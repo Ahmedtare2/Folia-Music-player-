@@ -43,6 +43,9 @@ import { buildMeasuredSpacingInfo } from '@/components/visualizer/claddagh/cladd
 import { splitDioramaLyricUnits } from '@/components/visualizer/diorama/dioramaSceneLayout';
 import { createTextMeasurer, flowLine } from '@/components/visualizer/lumiere/text/lineWrap';
 import { segmentWords } from '@/components/visualizer/lumiere/text/wordStyle';
+import { installFakeTextMeasure } from '../visualizer/lumiere/lumiereFixtures';
+
+installFakeTextMeasure();
 
 describe('Phase 3: Arabic lyric rendering, shaping, bidi layout, and synchronized highlighting', () => {
     describe('Arabic typography, diacritics, joining rules, and direction detection', () => {

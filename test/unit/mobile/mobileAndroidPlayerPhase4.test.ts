@@ -33,27 +33,38 @@ import { minimizeAndroidApp } from '@/services/android/foliaAndroidBridge';
 // local song search/sort/grouping (including Arabic & English), GPU/DPR/Pixi budgets,
 // and visibility-driven visualizer suspension.
 
-const makeLocalSong = (overrides: any): LocalSong => ({
-    filePath: `Music/${overrides.title}.mp3`,
-    mimeType: 'audio/mpeg',
-    id: overrides.id,
-    title: overrides.title,
-    titleOrigin: overrides.titleOrigin ?? 'import',
-    folderName: overrides.folderName ?? 'Music',
-    fileName: overrides.fileName ?? `${overrides.title}.mp3`,
-    fileSize: overrides.fileSize ?? 5_000_000,
-    duration: overrides.duration ?? 210_000,
-    addedAt: overrides.addedAt ?? 1_700_000_000_000,
-    hasLocalLyrics: overrides.hasLocalLyrics ?? false,
-    hasEmbeddedLyrics: overrides.hasEmbeddedLyrics ?? false,
-    importedMetadata: overrides.importedMetadata ?? {
+type MakeLocalSongInput = Omit<Partial<LocalSong>, 'importedMetadata'> & {
+    id: string;
+    title: string;
+    importedMetadata?: Partial<LocalSong['importedMetadata']>;
+};
+
+const makeLocalSong = (overrides: MakeLocalSongInput): LocalSong => {
+    const fileName = overrides.fileName ?? `${overrides.title}.mp3`;
+    const folderName = overrides.folderName ?? 'Music';
+    const { importedMetadata, ...rest } = overrides;
+    return {
+        id: overrides.id,
         title: overrides.title,
-        titleSource: 'embedded',
-        artistNames: ['Amr Diab'],
-        albumName: 'Tamally Maak',
-    },
-    ...overrides,
-});
+        titleOrigin: overrides.titleOrigin ?? 'import',
+        folderName,
+        fileName,
+        filePath: overrides.filePath ?? `${folderName}/${fileName}`,
+        mimeType: overrides.mimeType ?? 'audio/mpeg',
+        fileSize: overrides.fileSize ?? 5_000_000,
+        duration: overrides.duration ?? 210_000,
+        addedAt: overrides.addedAt ?? 1_700_000_000_000,
+        hasLocalLyrics: overrides.hasLocalLyrics ?? false,
+        hasEmbeddedLyrics: overrides.hasEmbeddedLyrics ?? false,
+        ...rest,
+        importedMetadata: {
+            title: importedMetadata?.title ?? overrides.title,
+            titleSource: importedMetadata?.titleSource ?? 'embedded',
+            artistNames: importedMetadata?.artistNames ?? ['Amr Diab'],
+            albumName: importedMetadata?.albumName ?? 'Tamally Maak',
+        },
+    };
+};
 
 describe('Phase 4: Mobile-first Android player architecture & usability', () => {
     const originalCapacitor = (globalThis as { Capacitor?: unknown }).Capacitor;
@@ -214,9 +225,7 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
                 title: 'Nour El Ain',
                 folderName: 'Arabic Classics',
                 addedAt: 3000,
-                importedMetadata: { title: overrides.title,
-        titleSource: 'embedded',
-        artistNames: ['Amr Diab'], albumName: 'Nour El Ain' },
+                importedMetadata: { artistNames: ['Amr Diab'], albumName: 'Nour El Ain' },
             }),
             makeLocalSong({
                 id: 's3',

@@ -42,7 +42,7 @@ export interface AndroidSafFileHandle extends FileSystemFileHandle {
     verifyReadable(): Promise<boolean>;
 }
 
-export interface AndroidSafDirectoryHandle extends FileSystemDirectoryHandle, SerializedAndroidSafDirectoryHandle {
+export interface AndroidSafDirectoryHandle extends FileSystemDirectoryHandle, Omit<SerializedAndroidSafDirectoryHandle, 'kind' | 'name'> {
     queryPermission(descriptor?: { mode?: 'read' | 'readwrite' }): Promise<PermissionState>;
     requestPermission(descriptor?: { mode?: 'read' | 'readwrite' }): Promise<PermissionState>;
 }
@@ -370,7 +370,7 @@ export const createAndroidSafDirectoryHandle = (
         [Symbol.asyncIterator]() {
             return this.entries();
         },
-    } as AndroidSafDirectoryHandle;
+    } as unknown as AndroidSafDirectoryHandle;
 
     return handle;
 };

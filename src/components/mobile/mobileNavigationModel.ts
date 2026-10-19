@@ -231,7 +231,7 @@ export const buildMobileLibraryCollections = (
         id: group.id,
         title: group.name,
         subtitle: group.description,
-        coverUrl: group.coverUrl,
+        coverUrl: typeof group.coverUrl === 'string' ? group.coverUrl : undefined,
         songs: group.songs,
     });
 

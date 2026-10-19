@@ -30,7 +30,8 @@ import {
     type Theme,
     type VisualizerMode,
 } from '../../types';
-import { detectTextDirection } from '../../utils/lyrics/arabicText';
+import { detectTextDirection, resolveTokenDirection, type TextDirection } from '../../utils/lyrics/arabicText';
+import type { Word as WordType } from '../../types';
 import { VISUALIZER_REGISTRY, getVisualizerModeLabel } from '../visualizer/registry';
 import type { MobilePlayerDisplayMode, MobileSubDrawer } from './mobileNavigationModel';
 
@@ -96,6 +97,79 @@ const formatSeconds = (sec: number): string => {
     const s = Math.floor(sec % 60);
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 };
+
+interface MobileTimedWordProps {
+    word: WordType;
+    currentTime: MotionValue<number>;
+    activeColor: string;
+    inactiveColor: string;
+    passedColor: string;
+    glowColor: string;
+    lineDirection: TextDirection;
+}
+
+const MobileTimedWord: React.FC<MobileTimedWordProps> = React.memo(({
+    word,
+    currentTime,
+    activeColor,
+    inactiveColor,
+    passedColor,
+    glowColor,
+    lineDirection,
+}) => {
+    const spanRef = useRef<HTMLSpanElement>(null);
+    const wordDir = useMemo(() => resolveTokenDirection(word.text, lineDirection), [lineDirection, word.text]);
+
+    const applyWordProgress = useCallback((timeSec: number) => {
+        const el = spanRef.current;
+        if (!el) return;
+        const dur = Math.max(0.05, word.endTime - word.startTime);
+        if (timeSec < word.startTime) {
+            el.style.color = inactiveColor;
+            el.style.backgroundImage = '';
+            el.style.webkitBackgroundClip = '';
+            el.style.backgroundClip = '';
+            el.style.textShadow = 'none';
+            return;
+        }
+        if (timeSec >= word.endTime) {
+            el.style.color = passedColor;
+            el.style.backgroundImage = '';
+            el.style.webkitBackgroundClip = '';
+            el.style.backgroundClip = '';
+            el.style.textShadow = 'none';
+            return;
+        }
+        const pct = Math.max(0, Math.min(100, ((timeSec - word.startTime) / dur) * 100));
+        const angle = wordDir === 'rtl' ? '270deg' : '90deg';
+        el.style.color = 'transparent';
+        el.style.backgroundImage = `linear-gradient(${angle}, ${activeColor} 0%, ${activeColor} ${pct.toFixed(1)}%, ${inactiveColor} ${Math.min(100, pct + 12).toFixed(1)}%, ${inactiveColor} 100%)`;
+        el.style.webkitBackgroundClip = 'text';
+        el.style.backgroundClip = 'text';
+        el.style.textShadow = `0 0 18px color-mix(in srgb, ${glowColor} 45%, transparent)`;
+    }, [activeColor, glowColor, inactiveColor, passedColor, word.endTime, word.startTime, wordDir]);
+
+    useEffect(() => {
+        applyWordProgress(currentTime.get());
+    }, [applyWordProgress, currentTime]);
+
+    useMotionValueEvent(currentTime, 'change', applyWordProgress);
+
+    return (
+        <span
+            ref={spanRef}
+            dir={wordDir}
+            className="inline-block whitespace-pre-wrap transition-transform duration-150"
+            style={{
+                color: inactiveColor,
+                unicodeBidi: 'isolate',
+                letterSpacing: '0px',
+            }}
+        >
+            {word.text}
+        </span>
+    );
+});
 
 export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
     isOpen,
@@ -542,7 +616,16 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                             >
                                                 {isActive && line.words.length > 0 ? (
                                                     line.words.map((word, wIdx) => (
-                                                        <span key={`${wIdx}-${word.startTime}`} style={{ color: primaryColor, unicodeBidi: "isolate" }}>{word.text}</span>
+                                                        <MobileTimedWord
+                                                            key={`${wIdx}-${word.startTime}`}
+                                                            word={word}
+                                                            currentTime={lyricCurrentTime}
+                                                            activeColor={primaryColor}
+                                                            inactiveColor="rgba(255,255,255,0.38)"
+                                                            passedColor="rgba(255,255,255,0.82)"
+                                                            glowColor={accentColor}
+                                                            lineDirection={lineDir}
+                                                        />
                                                     ))
                                                 ) : (
                                                     <span

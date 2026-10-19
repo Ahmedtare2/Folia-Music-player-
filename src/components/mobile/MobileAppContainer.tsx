@@ -149,7 +149,7 @@ export const MobileAppContainer: React.FC<MobileAppContainerProps> = ({
             lyricsFontScale: state.lyricsFontScale,
             handleSetLyricsFontScale: state.handleSetLyricsFontScale,
             showSubtitleTranslation: state.showSubtitleTranslation,
-            handleToggleSubtitleTranslation: state.handleToggleSubtitleTranslation,
+            handleToggleSubtitleTranslation: state.handleToggleShowSubtitleTranslation,
         })),
     );
 

@@ -66,6 +66,10 @@ vi.mock('@/services/coverCache', () => ({
     removeCachedCover: vi.fn(),
 }));
 
+vi.mock('@/utils/localMetadataWorkerClient', () => ({
+    parseEmbeddedMetadataAsync: vi.fn(async () => ({})),
+}));
+
 const TTML_SAMPLE = `<?xml version="1.0" encoding="utf-8"?>
 <tt xmlns="http://www.w3.org/ns/ttml" xmlns:itunes="http://music.apple.com/lyric-ttml-internal" itunes:timing="Word">
   <body>
@@ -242,6 +246,10 @@ describe('Android SAF local music adapter & Media3 playback bridge', () => {
         vi.mocked(deleteLocalSong).mockImplementation(async (id) => {
             persistedSongsStore = persistedSongsStore.filter(item => item.id !== id);
         });
+        vi.mocked(deleteLocalSongs).mockImplementation(async (ids) => {
+            const removed = new Set(ids);
+            persistedSongsStore = persistedSongsStore.filter(item => !removed.has(item.id));
+        });
         vi.mocked(getDirHandles).mockImplementation(async () => (
             rehydrateDirHandlesFromStorage(persistedHandlesStore as never)
         ));
@@ -258,7 +266,8 @@ describe('Android SAF local music adapter & Media3 playback bridge', () => {
         });
     });
 
-    afterEach(() => {
+    afterEach(async () => {
+        await new Promise(resolve => setTimeout(resolve, 40));
         delete (globalThis as { Capacitor?: unknown }).Capacitor;
         delete (globalThis as { __FOLIA_ANDROID_BRIDGE__?: unknown }).__FOLIA_ANDROID_BRIDGE__;
     });
@@ -297,12 +306,14 @@ describe('Android SAF local music adapter & Media3 playback bridge', () => {
         installAndroidEnvironment();
 
         const firstImport = await importFolder();
+        await new Promise(resolve => setTimeout(resolve, 40));
         expect(firstImport).toHaveLength(2);
         const firstIds = firstImport.map(s => s.id).sort();
 
         // Picking the same SAF folder a second time must recognize the existing root via isSameEntry()
         // and reuse existing song IDs rather than creating "Music (2)" or duplicating tracks.
         const secondImport = await importFolder();
+        await new Promise(resolve => setTimeout(resolve, 40));
         expect(secondImport).toHaveLength(2);
         expect(secondImport.map(s => s.id).sort()).toEqual(firstIds);
         expect(persistedSongsStore).toHaveLength(2);
