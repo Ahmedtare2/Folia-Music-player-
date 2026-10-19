@@ -1,0 +1,24 @@
+{
+  "appId": "top.izuna.foliamajor",
+  "appName": "Folia",
+  "webDir": "dist",
+  "backgroundColor": "#09090b",
+  "server": {
+    "androidScheme": "https",
+    "hostname": "localhost"
+  },
+  "android": {
+    "backgroundColor": "#09090b",
+    "allowMixedContent": true,
+    "captureInput": true,
+    "webContentsDebuggingEnabled": false
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 0,
+      "launchAutoHide": true,
+      "backgroundColor": "#09090b",
+      "showSpinner": false
+    }
+  }
+}

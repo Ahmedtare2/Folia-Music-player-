@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="512"
+    android:viewportHeight="512">
+    <group
+        android:scaleX="0.62"
+        android:scaleY="0.62"
+        android:translateX="97.28"
+        android:translateY="97.28">
+        <!-- Vertical Stem from public/icon.svg -->
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M160,128 C160,110 175,110 190,110 H220 C235,110 250,125 250,140 V372 C250,388 235,402 220,402 H190 C175,402 160,388 160,372 V128 Z" />
+        <!-- Top Bar (Leaf Shape) from public/icon.svg -->
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M240,110 H340 C380,110 400,140 400,170 C400,200 360,200 340,200 H250 V110 Z" />
+        <!-- Middle Bar (Smaller Leaf Shape) from public/icon.svg -->
+        <path
+            android:fillColor="#FFFFFFFF"
+            android:pathData="M250,240 H320 C350,240 360,260 360,280 C360,300 340,300 320,300 H250 V240 Z" />
+    </group>
+</vector>
