@@ -40,9 +40,6 @@ dependencies {
     implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
     implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
     implementation "androidx.documentfile:documentfile:$androidxDocumentFileVersion"
-    implementation "androidx.media3:media3-common:$androidxMedia3Version"
-    implementation "androidx.media3:media3-session:$androidxMedia3Version"
-    implementation "com.google.guava:guava:33.3.1-android"
     implementation project(':capacitor-android')
     testImplementation "junit:junit:$junitVersion"
     androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"

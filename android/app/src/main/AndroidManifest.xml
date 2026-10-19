@@ -25,16 +25,11 @@
 
         </activity>
 
-        <!-- AndroidX Media3 Foreground Playback & MediaSession Service -->
+        <!-- Android Foreground Playback & MediaSession Service -->
         <service
             android:name=".FoliaPlaybackService"
-            android:exported="true"
-            android:foregroundServiceType="mediaPlayback">
-            <intent-filter>
-                <action android:name="androidx.media3.session.MediaSessionService" />
-                <action android:name="android.media.browse.MediaBrowserService" />
-            </intent-filter>
-        </service>
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

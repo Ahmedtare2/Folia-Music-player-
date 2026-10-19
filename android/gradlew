@@ -52,7 +52,7 @@ fi
 GRADLE_VERSION=$(basename "$DIST_URL" | sed -E 's/^gradle-([0-9.]+)-(all|bin)\.zip$/\1/')
 
 # If a matching or pre-configured gradle binary is already on PATH (e.g. via gradle/actions/setup-gradle), use it
-if command -v gradle >/dev/null 2>&1 ; then
+if command -v gradle >/dev/null 2>&1 && gradle --version 2>/dev/null | grep -q "Gradle ${GRADLE_VERSION}" ; then
     exec gradle -p "$APP_HOME" "$@"
 fi
 

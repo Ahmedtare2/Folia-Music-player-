@@ -442,7 +442,7 @@ public class FoliaNativeBridgePlugin extends Plugin {
         Float speed = call.getFloat("playbackSpeed", 1.0f);
 
         Intent serviceIntent = new Intent(context, FoliaPlaybackService.class);
-        serviceIntent.setAction(FoliaPlaybackService.ACTION_UPDATE_STATE);
+        serviceIntent.setAction(FoliaPlaybackService.ACTION_SYNC_STATE);
         serviceIntent.putExtra(FoliaPlaybackService.EXTRA_TITLE, title);
         serviceIntent.putExtra(FoliaPlaybackService.EXTRA_ARTIST, artist);
         serviceIntent.putExtra(FoliaPlaybackService.EXTRA_ALBUM, album);
@@ -450,7 +450,7 @@ public class FoliaNativeBridgePlugin extends Plugin {
         serviceIntent.putExtra(FoliaPlaybackService.EXTRA_DURATION_MS, durationMs != null ? durationMs : 0L);
         serviceIntent.putExtra(FoliaPlaybackService.EXTRA_POSITION_MS, positionMs != null ? positionMs : 0L);
         serviceIntent.putExtra(FoliaPlaybackService.EXTRA_IS_PLAYING, isPlaying != null && isPlaying);
-        serviceIntent.putExtra(FoliaPlaybackService.EXTRA_PLAYBACK_SPEED, speed != null ? speed : 1.0f);
+        serviceIntent.putExtra(FoliaPlaybackService.EXTRA_SPEED, speed != null ? speed : 1.0f);
 
         try {
             if (Boolean.TRUE.equals(isPlaying) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
