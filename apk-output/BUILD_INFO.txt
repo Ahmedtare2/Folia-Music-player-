@@ -1,0 +1,8 @@
+Folia Android Debug APK Build Summary
+=====================================
+Version: 0.7.21
+Branch: main
+Commit: 8166a36c973f0bf10692dee82191ebf0cda8f8cf
+APK File: Folia-0.7.21-android-debug.apk
+Size: 15M
+SHA-256: 01a772f14b4a80c5542dfc261686d48b8ab7db40f12ce268a4f0fa8312343ec4
