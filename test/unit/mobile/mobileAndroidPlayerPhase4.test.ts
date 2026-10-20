@@ -52,10 +52,10 @@ type MakeLocalSongInput = Omit<Partial<LocalSong>, 'importedMetadata'> & {
 const makeLocalSong = (overrides: MakeLocalSongInput): LocalSong => {
     const fileName = overrides.fileName ?? `${overrides.title}.mp3`;
     const folderName = overrides.folderName ?? 'Music';
-    const { importedMetadata, ...rest } = overrides;
+    const { id, title, importedMetadata, ...rest } = overrides;
     return {
-        id: overrides.id,
-        title: overrides.title,
+        id,
+        title,
         titleOrigin: overrides.titleOrigin ?? 'import',
         folderName,
         fileName,
@@ -236,7 +236,7 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
                 title: 'Nour El Ain',
                 folderName: 'Arabic Classics',
                 addedAt: 3000,
-                onlineMetadata: { coverUrl: 'https://example.com/nour.jpg' },
+                onlineMetadata: { source: 'netease', coverUrl: 'https://example.com/nour.jpg', artists: ['Amr Diab'], matchMode: 'auto', matchedAt: 1000 },
                 importedMetadata: { artistNames: ['Amr Diab'], albumName: 'Nour El Ain' },
             }),
             makeLocalSong({
@@ -289,7 +289,11 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
         it('identifies the currently playing local song and resolves artist/album labels and cover artwork', () => {
             expect(resolveLocalSongArtistText(songs[0]!)).toBe('عمرو دياب');
             expect(resolveLocalSongAlbumText(songs[0]!)).toBe('تملي معاك');
-            Object.defineProperty(globalThis.window, "isSecureContext", { configurable: true, value: true });
+            (globalThis as { window?: unknown }).window = {
+                ...((globalThis as { window?: Record<string, unknown> }).window || {}),
+                isSecureContext: true,
+                location: { protocol: 'https:', hostname: 'localhost' },
+            };
             Object.defineProperty(globalThis, "navigator", {
                 configurable: true,
                 value: {

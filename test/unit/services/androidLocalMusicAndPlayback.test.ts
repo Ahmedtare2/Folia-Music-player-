@@ -27,6 +27,7 @@ import {
 } from '@/services/db';
 import { removeCachedCover } from '@/services/coverCache';
 import { getLocalLibraryAvailability } from '@/services/localLibraryAvailability';
+import { consumeProgrammaticPause, markProgrammaticPause } from '@/services/playbackFade';
 import {
     METADATA_HEADER_SLICE_NO_COVER_BYTES,
     createAndroidSafDirectoryHandle,
@@ -574,7 +575,7 @@ describe('Android SAF local music adapter & Media3 playback bridge', () => {
         const subDir = await rehydrated.Music.getDirectoryHandle('Fairuz');
         const fileHandle = await subDir.getFileHandle('Fairuz - Habaytak.flac');
         expect(isAndroidSafFileHandle(fileHandle)).toBe(true);
-        const headerFile = await fileHandle.getMetadataFile({ includeCover: false });
+        const headerFile = await (fileHandle as any).getMetadataFile({ includeCover: false });
         expect(headerFile.size).toBeLessThanOrEqual(METADATA_HEADER_SLICE_NO_COVER_BYTES);
     });
 
@@ -688,7 +689,6 @@ describe('Android SAF local music adapter & Media3 playback bridge', () => {
     });
 
     it('prevents programmatic source-switch pauses from flipping playback state to PAUSED and resumes suspended AudioContext', async () => {
-        const { consumeProgrammaticPause, markProgrammaticPause } = require('@/services/playbackFade');
         const fakeAudioElement = {} as HTMLAudioElement;
 
         // When switching tracks, usePlaybackAudioBridge marks the outgoing element pause as programmatic

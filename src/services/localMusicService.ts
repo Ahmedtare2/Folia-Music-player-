@@ -514,7 +514,7 @@ async function extractSafHandleEmbeddedMetadata(
     let preparedNativeCover: PreparedLocalCoverBlob | undefined;
     if (includeCover && nativeMeta?.cover) {
         try {
-            preparedNativeCover = await prepareLocalCoverBlob(nativeMeta.cover);
+            preparedNativeCover = (await prepareLocalCoverBlob(nativeMeta.cover)) ?? undefined;
         } catch (err) {
             console.warn(`[LocalMusic] Failed to prepare native cover thumbnail for ${stat.name}:`, err);
         }

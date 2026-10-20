@@ -58,7 +58,7 @@ const fetchCoverBlob = async (coverUrl: string): Promise<Blob> => {
     if (response.ok === false) throw new Error(`Cover request failed: ${response.status}`);
     const blob = await response.blob();
     if (!isValidCoverImageBlob(blob)) {
-        throw new Error(`Cover response is not a valid image (type=${blob?.type || 'unknown'}, size=${blob?.size ?? 0})`);
+        throw new Error(`Cover response is not a valid image (type=${(blob as Blob)?.type || 'unknown'}, size=${(blob as Blob)?.size ?? 0})`);
     }
     return blob;
 };

@@ -137,7 +137,7 @@ export interface MobilePlayerShellProps {
 const MAX_RENDERED_SONGS_STEP = 120;
 
 const LocalCoverThumbnail: React.FC<{
-    coverUrl: string | null;
+    coverUrl: string | null | undefined;
     alt: string;
     fallback: React.ReactNode;
 }> = React.memo(({ coverUrl, alt, fallback }) => {
@@ -334,12 +334,12 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
     );
 
     // Resolve cover artwork using the same reliable local song source that works in the library
-    const effectiveCoverUrl = useMemo(() => {
+    const effectiveCoverUrl = useMemo((): string | null => {
         if (coverUrl) return coverUrl;
         if (currentSong?.album?.coverUrl) return currentSong.album.coverUrl;
         const matchedLocalSong = localSongs.find(song => isLocalSongCurrentlyPlaying(song, currentSong));
         if (matchedLocalSong) {
-            return resolveLocalSongCoverThumb(matchedLocalSong, 1024);
+            return resolveLocalSongCoverThumb(matchedLocalSong, 1024) ?? null;
         }
         return null;
     }, [coverUrl, currentSong, localSongs]);

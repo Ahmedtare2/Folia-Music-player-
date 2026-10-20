@@ -456,7 +456,7 @@ export const createAndroidSafDirectoryHandle = (
         },
 
         [Symbol.asyncIterator]() {
-            return this.entries();
+            return handle.entries();
         },
     } as unknown as AndroidSafDirectoryHandle;
 
