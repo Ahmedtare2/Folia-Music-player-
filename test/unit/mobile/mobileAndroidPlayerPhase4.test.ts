@@ -13,7 +13,8 @@ import {
     resolveLocalSongCoverThumb,
     stepMobileBackNavigation,
 } from '@/components/mobile/mobileNavigationModel';
-import MobileNowPlayingSheet, {
+import {
+    MobileNowPlayingSheet,
     computeActiveLyricLineIndices,
     computeTimedWordProgressPercent,
 } from '@/components/mobile/MobileNowPlayingSheet';
@@ -68,6 +69,66 @@ import {
     writeStoredDynamicAlbumArtworkSettings,
 } from '@/utils/dynamicAlbumArtwork';
 import { useDynamicAlbumArtworkStore } from '@/stores/useDynamicAlbumArtworkStore';
+
+vi.mock('react', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('react')>();
+    const actualRecord = actual as unknown as Record<string, unknown>;
+    const actualDefault = (actualRecord.default as Record<string, unknown> | undefined) ?? actualRecord;
+    const hookShims = {
+        useState: <T,>(init?: T | (() => T)) => [
+            typeof init === 'function' ? (init as () => T)() : init,
+            vi.fn(),
+        ] as const,
+        useReducer: <S,>(reducer: unknown, init: S, initializer?: (arg: S) => S) => [
+            typeof initializer === 'function' ? initializer(init) : init,
+            vi.fn(),
+        ] as const,
+        useRef: <T,>(init?: T) => ({ current: init as T }),
+        useEffect: () => {},
+        useLayoutEffect: () => {},
+        useInsertionEffect: () => {},
+        useMemo: <T,>(fn: () => T) => fn(),
+        useCallback: <T extends (...args: any[]) => any>(fn: T) => fn,
+        useContext: (ctx: any) => ctx?._currentValue ?? {},
+        useSyncExternalStore: <T,>(_subscribe: unknown, getSnapshot: () => T) => getSnapshot(),
+        useDebugValue: () => {},
+        useId: () => 'folia-mock-id',
+        useImperativeHandle: () => {},
+        useTransition: () => [false, (cb: () => void) => cb()] as const,
+        useDeferredValue: <T,>(val: T) => val,
+        memo: <T,>(comp: T) => comp,
+        forwardRef: <T,>(render: T) => render,
+    };
+    return {
+        ...actualRecord,
+        ...hookShims,
+        default: {
+            ...actualDefault,
+            ...hookShims,
+        },
+    };
+});
+
+vi.mock('react-i18next', () => ({
+    initReactI18next: { type: '3rdParty', init: () => {} },
+    useTranslation: () => ({
+        t: (key: string, fallback?: string) => (typeof fallback === 'string' ? fallback : key),
+        i18n: { language: 'en', changeLanguage: () => Promise.resolve() },
+    }),
+}));
+
+vi.mock('framer-motion', () => ({
+    motionValue: <T,>(initial: T) => {
+        let current = initial;
+        return {
+            get: () => current,
+            set: (next: T) => { current = next; },
+            on: () => () => {},
+            onChange: () => () => {},
+        };
+    },
+    useMotionValueEvent: () => {},
+}));
 
 // test/unit/mobile/mobileAndroidPlayerPhase4.test.ts
 // Verifies Phase 4 mobile-first Android music player navigation, hardware Back stack,
