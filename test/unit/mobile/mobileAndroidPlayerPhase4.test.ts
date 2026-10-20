@@ -99,6 +99,16 @@ vi.mock('react', async (importOriginal) => {
         memo: <T,>(comp: T) => comp,
         forwardRef: <T,>(render: T) => render,
     };
+    const clientInternals = (actualRecord.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE
+        ?? actualDefault.__CLIENT_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE) as Record<string, unknown> | undefined;
+    if (clientInternals) {
+        clientInternals.H = hookShims;
+    }
+    const secretInternals = (actualRecord.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED
+        ?? actualDefault.__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED) as { ReactCurrentDispatcher?: { current: unknown } } | undefined;
+    if (secretInternals?.ReactCurrentDispatcher) {
+        secretInternals.ReactCurrentDispatcher.current = hookShims;
+    }
     return {
         ...actualRecord,
         ...hookShims,
@@ -108,6 +118,10 @@ vi.mock('react', async (importOriginal) => {
         },
     };
 });
+
+vi.mock('zustand/react/shallow', () => ({
+    useShallow: <T,>(selector: T) => selector,
+}));
 
 vi.mock('react-i18next', () => ({
     initReactI18next: { type: '3rdParty', init: () => {} },
