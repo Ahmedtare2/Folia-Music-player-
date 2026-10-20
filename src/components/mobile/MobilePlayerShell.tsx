@@ -6,6 +6,7 @@ import {
     Disc3,
     FileUp,
     FolderOpen,
+    Grid,
     Heart,
     Library,
     ListMusic,
@@ -35,7 +36,10 @@ import {
     type VisualizerMode,
 } from '../../types';
 import type { LocalLibraryDisplayCatalog } from '../../services/playbackAdapters';
+import type { LocalMusicScanProgressDetail } from '../../services/localMusicService';
 import { buildLocalQueue } from '../../services/playbackAdapters';
+import { getCachedLocalCoverObjectUrl, resolveLocalCoverObjectUrl } from '../../services/localCoverRuntime';
+import { isLocalCoverAssetUrl } from '../../services/localCoverAssetUrl';
 import { detectTextDirection } from '../../utils/lyrics/arabicText';
 import { VISUALIZER_REGISTRY, getVisualizerModeLabel } from '../visualizer/registry';
 import { minimizeAndroidApp } from '../../services/android/foliaAndroidBridge';
@@ -106,6 +110,8 @@ export interface MobilePlayerShellProps {
     onImportPlaylistFile: (file: File) => Promise<unknown>;
     isImportingOrScanning: boolean;
     scanPercent: number;
+    scanProgress?: LocalMusicScanProgressDetail | null;
+    onCancelScan?: () => void;
     onPlayLocalSongList: (song: LocalSong, queue: LocalSong[]) => void;
     onAddLocalSongToQueue: (song: LocalSong) => void;
     onPlayQueueSong: (song: SongResult, queue: SongResult[]) => void;
@@ -123,9 +129,66 @@ export interface MobilePlayerShellProps {
     onOpenFullSettingsModal: () => void;
     externalModals: ExternalModalState;
     onVisualizerVisibilityChange?: (visible: boolean) => void;
+    isLatticeOpen?: boolean;
+    onOpenLattice?: () => void;
+    onCloseLattice?: () => void;
 }
 
 const MAX_RENDERED_SONGS_STEP = 120;
+
+const LocalCoverThumbnail: React.FC<{
+    coverUrl: string | null;
+    alt: string;
+    fallback: React.ReactNode;
+}> = React.memo(({ coverUrl, alt, fallback }) => {
+    const [resolvedUrl, setResolvedUrl] = useState<string | null>(() => {
+        if (!coverUrl) return null;
+        return getCachedLocalCoverObjectUrl(coverUrl) ?? coverUrl;
+    });
+    const [hasError, setHasError] = useState(false);
+
+    useEffect(() => {
+        setHasError(false);
+        if (!coverUrl) {
+            setResolvedUrl(null);
+            return undefined;
+        }
+        const cached = getCachedLocalCoverObjectUrl(coverUrl);
+        if (cached) {
+            setResolvedUrl(cached);
+            return undefined;
+        }
+        if (!isLocalCoverAssetUrl(coverUrl)) {
+            setResolvedUrl(coverUrl);
+            return undefined;
+        }
+        setResolvedUrl(coverUrl);
+        let cancelled = false;
+        void resolveLocalCoverObjectUrl(coverUrl).then((blobUrl) => {
+            if (!cancelled && blobUrl) {
+                setResolvedUrl(blobUrl);
+                setHasError(false);
+            }
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [coverUrl]);
+
+    if (!resolvedUrl || hasError) {
+        return <>{fallback}</>;
+    }
+
+    return (
+        <img
+            src={resolvedUrl}
+            alt={alt}
+            className="h-full w-full object-cover"
+            loading="lazy"
+            onError={() => setHasError(true)}
+        />
+    );
+});
 
 export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
     localSongs,
@@ -169,6 +232,8 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
     onImportPlaylistFile,
     isImportingOrScanning,
     scanPercent,
+    scanProgress,
+    onCancelScan,
     onPlayLocalSongList,
     onAddLocalSongToQueue,
     onPlayQueueSong,
@@ -186,6 +251,9 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
     onOpenFullSettingsModal,
     externalModals,
     onVisualizerVisibilityChange,
+    isLatticeOpen = false,
+    onOpenLattice,
+    onCloseLattice,
 }) => {
     const { t } = useTranslation();
     const [navState, setNavState] = useState<MobileNavigationState>(INITIAL_MOBILE_NAVIGATION_STATE);
@@ -199,11 +267,15 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
     navStateRef.current = navState;
     const externalModalsRef = useRef(externalModals);
     externalModalsRef.current = externalModals;
+    const isLatticeOpenRef = useRef(isLatticeOpen);
+    isLatticeOpenRef.current = isLatticeOpen;
+    const onCloseLatticeRef = useRef(onCloseLattice);
+    onCloseLatticeRef.current = onCloseLattice;
 
     // Report whether the full-screen visualizer is visible so App.tsx can pause GPU loops when hidden
     useEffect(() => {
-        onVisualizerVisibilityChange?.(isMobileVisualizerVisible(navState));
-    }, [navState, onVisualizerVisibilityChange]);
+        onVisualizerVisibilityChange?.(!isLatticeOpen && isMobileVisualizerVisible(navState));
+    }, [isLatticeOpen, navState, onVisualizerVisibilityChange]);
 
     // Detect soft keyboard appearance via visualViewport so bottom tab bar does not crowd the input
     useEffect(() => {
@@ -218,6 +290,10 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
 
     // Register global Android hardware Back handler called by MainActivity.java OnBackPressedCallback
     const handleHardwareBack = useCallback((): boolean => {
+        if (isLatticeOpenRef.current && onCloseLatticeRef.current) {
+            onCloseLatticeRef.current();
+            return true;
+        }
         const result = stepMobileBackNavigation(navStateRef.current, externalModalsRef.current);
         if (result.sideEffect) {
             result.sideEffect();
@@ -257,8 +333,20 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
         [localLibraryCatalog, localPlaylists, localSongs, t],
     );
 
+    // Resolve cover artwork using the same reliable local song source that works in the library
+    const effectiveCoverUrl = useMemo(() => {
+        if (coverUrl) return coverUrl;
+        if (currentSong?.album?.coverUrl) return currentSong.album.coverUrl;
+        const matchedLocalSong = localSongs.find(song => isLocalSongCurrentlyPlaying(song, currentSong));
+        if (matchedLocalSong) {
+            return resolveLocalSongCoverThumb(matchedLocalSong, 1024);
+        }
+        return null;
+    }, [coverUrl, currentSong, localSongs]);
+
     const accentColor = theme.accentColor || theme.primaryColor || '#f4f4f5';
     const hasLyrics = Boolean(lyrics && lyrics.lines.length > 0);
+    const isPlayerExpanded = navState.playerSheet === 'expanded' && Boolean(currentSong);
 
     const handleSelectTab = (tab: MobilePrimaryTab) => {
         setNavState(prev => ({
@@ -306,18 +394,15 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                     className="flex min-w-0 flex-1 items-center gap-3 text-left focus:outline-none"
                 >
                     <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded-xl border border-white/10 bg-zinc-900">
-                        {thumbUrl ? (
-                            <img
-                                src={thumbUrl}
-                                alt={song.title}
-                                className="h-full w-full object-cover"
-                                loading="lazy"
-                            />
-                        ) : (
-                            <div className="flex h-full w-full items-center justify-center text-zinc-500">
-                                <Music size={20} />
-                            </div>
-                        )}
+                        <LocalCoverThumbnail
+                            coverUrl={thumbUrl}
+                            alt={song.title}
+                            fallback={
+                                <div className="flex h-full w-full items-center justify-center text-zinc-500">
+                                    <Music size={20} />
+                                </div>
+                            }
+                        />
                         {active && (
                             <div className="absolute inset-0 flex items-center justify-center bg-black/50">
                                 <div className="h-2.5 w-2.5 rounded-full animate-ping" style={{ backgroundColor: accentColor }} />
@@ -378,13 +463,33 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
             </p>
 
             {isImportingOrScanning && (
-                <div className="mt-5 w-full max-w-xs rounded-2xl border border-white/10 bg-white/[0.05] p-3.5">
+                <div
+                    data-testid="mobile-scan-progress-card"
+                    className="mt-5 w-full max-w-xs rounded-2xl border border-white/10 bg-white/[0.05] p-3.5 text-left"
+                >
                     <div className="flex items-center justify-between text-xs font-medium text-zinc-200">
                         <span className="flex items-center gap-2">
                             <Loader2 size={14} className="animate-spin" />
-                            Scanning music files...
+                            <span>
+                                {scanProgress?.phase === 'discovering'
+                                    ? 'Discovering music files...'
+                                    : scanProgress?.phase === 'hydrating'
+                                        ? `Indexing metadata (${scanProgress.completedSongs}/${scanProgress.totalSongs})`
+                                        : 'Importing music library...'}
+                            </span>
                         </span>
-                        <span>{scanPercent}%</span>
+                        <div className="flex items-center gap-2">
+                            <span>{scanPercent}%</span>
+                            {onCancelScan && (
+                                <button
+                                    type="button"
+                                    onClick={onCancelScan}
+                                    className="rounded-lg border border-white/15 bg-white/10 px-2 py-0.5 text-[11px] font-semibold text-zinc-200 active:scale-95"
+                                >
+                                    Cancel
+                                </button>
+                            )}
+                        </div>
                     </div>
                     <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-white/10">
                         <div
@@ -392,6 +497,16 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                             style={{ width: `${Math.max(5, scanPercent)}%`, backgroundColor: accentColor }}
                         />
                     </div>
+                    {scanProgress && (
+                        <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-zinc-400">
+                            <span>Discovered: {scanProgress.discoveredSongs ?? scanProgress.totalSongs ?? 0}</span>
+                            <span>Processed: {scanProgress.processedSongs ?? scanProgress.completedSongs ?? 0}</span>
+                            <span>Skipped: {scanProgress.skippedSongs ?? 0}</span>
+                            {(scanProgress.failedSongs ?? 0) > 0 && (
+                                <span className="text-amber-400">Failed: {scanProgress.failedSongs}</span>
+                            )}
+                        </div>
+                    )}
                 </div>
             )}
 
@@ -444,13 +559,15 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                 {/* Collection Hero Header */}
                 <div className="flex flex-col sm:flex-row items-center gap-4 rounded-3xl border border-white/10 bg-white/[0.04] p-4">
                     <div className="h-28 w-28 shrink-0 overflow-hidden rounded-2xl border border-white/10 bg-zinc-900 shadow-lg">
-                        {detail.coverUrl ? (
-                            <img src={detail.coverUrl} alt={detail.title} className="h-full w-full object-cover" />
-                        ) : (
-                            <div className="flex h-full w-full items-center justify-center text-zinc-500">
-                                <Disc3 size={40} />
-                            </div>
-                        )}
+                        <LocalCoverThumbnail
+                            coverUrl={detail.coverUrl ?? null}
+                            alt={detail.title}
+                            fallback={
+                                <div className="flex h-full w-full items-center justify-center text-zinc-500">
+                                    <Disc3 size={40} />
+                                </div>
+                            }
+                        />
                     </div>
                     <div className="min-w-0 flex-1 text-center sm:text-left">
                         <h2
@@ -495,10 +612,20 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
         );
     };
 
+    // When the Lattice queue collage is open, let the Lattice layer occupy the full viewport
+    // without the mobile shell covering it.
+    if (isLatticeOpen) {
+        return null;
+    }
+
     return (
         <div
             data-testid="mobile-player-shell"
-            className="fixed inset-0 z-40 flex flex-col overflow-hidden bg-[#060609]/95 text-zinc-100 select-none"
+            className={`fixed inset-0 z-40 flex flex-col overflow-hidden text-zinc-100 select-none ${
+                isPlayerExpanded
+                    ? (navState.playerDisplayMode === 'stage' ? 'bg-transparent' : 'bg-[#060609]')
+                    : 'bg-[#060609]'
+            }`}
             style={{
                 paddingTop: 'max(env(safe-area-inset-top, 0px), 8px)',
                 paddingLeft: 'env(safe-area-inset-left, 0px)',
@@ -517,499 +644,562 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                 }}
             />
 
-            {/* Top Mobile App Header */}
-            <header className="flex shrink-0 items-center justify-between gap-3 px-4 py-2.5">
-                <div className="flex items-center gap-2.5">
-                    <div
-                        className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/15 bg-white/[0.07] font-bold text-sm"
-                        style={{ color: accentColor }}
-                    >
-                        F
-                    </div>
-                    <div>
-                        <h1 className="text-base font-bold tracking-tight text-white leading-none">
-                            Folia
-                        </h1>
-                        <p className="text-[11px] text-zinc-400 mt-0.5">
-                            {localSongs.length} {localSongs.length === 1 ? 'track' : 'tracks'} · Local Library
-                        </p>
-                    </div>
-                </div>
+            {/* Library chrome is rendered ONLY when the full-screen player sheet is collapsed,
+                preventing any visual overlap between the player/visualizer and the library list. */}
+            {!isPlayerExpanded && (
+                <>
+                    {/* Top Mobile App Header */}
+                    <header className="flex shrink-0 items-center justify-between gap-3 px-4 py-2.5">
+                        <div className="flex items-center gap-2.5">
+                            <div
+                                className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/15 bg-white/[0.07] font-bold text-sm"
+                                style={{ color: accentColor }}
+                            >
+                                F
+                            </div>
+                            <div>
+                                <h1 className="text-base font-bold tracking-tight text-white leading-none">
+                                    Folia
+                                </h1>
+                                <p className="text-[11px] text-zinc-400 mt-0.5">
+                                    {localSongs.length} {localSongs.length === 1 ? 'track' : 'tracks'} · Local Library
+                                </p>
+                            </div>
+                        </div>
 
-                <div className="flex items-center gap-2">
-                    <button
-                        type="button"
-                        disabled={isImportingOrScanning}
-                        onClick={() => void onImportFolder()}
-                        className="flex h-10 items-center gap-1.5 rounded-full border border-white/12 bg-white/[0.07] px-3.5 text-xs font-medium text-zinc-100 active:scale-95 transition-transform disabled:opacity-50"
-                        aria-label="Add music folder"
-                    >
-                        {isImportingOrScanning ? (
-                            <Loader2 size={14} className="animate-spin" />
-                        ) : (
-                            <FolderOpen size={14} style={{ color: accentColor }} />
-                        )}
-                        <span>Add Folder</span>
-                    </button>
-                    <button
-                        type="button"
-                        disabled={isImportingOrScanning}
-                        onClick={() => void onRefreshFolders()}
-                        className="flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-white/[0.05] text-zinc-300 active:scale-95 transition-transform disabled:opacity-50"
-                        aria-label="Rescan music folders"
-                        title="Rescan folders"
-                    >
-                        <RefreshCw size={15} className={isImportingOrScanning ? 'animate-spin' : ''} />
-                    </button>
-                </div>
-            </header>
+                        <div className="flex items-center gap-2">
+                            {onOpenLattice && (
+                                <button
+                                    type="button"
+                                    onClick={onOpenLattice}
+                                    className="flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-white/[0.05] text-zinc-200 active:scale-95 transition-transform"
+                                    aria-label="Open Lattice queue collage"
+                                    title="Lattice Queue Collage"
+                                >
+                                    <Grid size={15} />
+                                </button>
+                            )}
+                            <button
+                                type="button"
+                                disabled={isImportingOrScanning}
+                                onClick={() => void onImportFolder()}
+                                className="flex h-10 items-center gap-1.5 rounded-full border border-white/12 bg-white/[0.07] px-3.5 text-xs font-medium text-zinc-100 active:scale-95 transition-transform disabled:opacity-50"
+                                aria-label="Add music folder"
+                            >
+                                {isImportingOrScanning ? (
+                                    <Loader2 size={14} className="animate-spin" />
+                                ) : (
+                                    <FolderOpen size={14} style={{ color: accentColor }} />
+                                )}
+                                <span>Add Folder</span>
+                            </button>
+                            <button
+                                type="button"
+                                disabled={isImportingOrScanning}
+                                onClick={() => void onRefreshFolders()}
+                                className="flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-white/[0.05] text-zinc-300 active:scale-95 transition-transform disabled:opacity-50"
+                                aria-label="Rescan music folders"
+                                title="Rescan folders"
+                            >
+                                <RefreshCw size={15} className={isImportingOrScanning ? 'animate-spin' : ''} />
+                            </button>
+                        </div>
+                    </header>
 
-            {/* Active Tab Body */}
-            <main className="flex min-h-0 flex-1 flex-col overflow-hidden">
-                {navState.collectionDetail ? (
-                    renderCollectionDetailView(navState.collectionDetail)
-                ) : navState.activeTab === 'songs' ? (
-                    localSongs.length === 0 ? (
-                        renderEmptyLibraryState()
-                    ) : (
-                        <div className="flex min-h-0 flex-1 flex-col px-4">
-                            {/* Search & Sort Bar */}
-                            <div className="flex items-center gap-2 pb-2.5">
-                                <div className="relative flex-1">
-                                    <Search
-                                        size={15}
-                                        className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-400"
-                                    />
-                                    <input
-                                        type="search"
-                                        value={searchQuery}
-                                        onChange={(e) => {
-                                            setSearchQuery(e.target.value);
-                                            setVisibleSongLimit(MAX_RENDERED_SONGS_STEP);
-                                        }}
-                                        placeholder="Search songs, artists, albums, Arabic lyrics..."
-                                        dir="auto"
-                                        className="h-10 w-full rounded-2xl border border-white/10 bg-white/[0.06] pl-9 pr-8 text-xs text-white placeholder-zinc-500 focus:border-white/25 focus:outline-none"
-                                    />
-                                    {searchQuery && (
+                    {/* Non-blocking Live Scan Progress Banner (keeps library usable during scan) */}
+                    {isImportingOrScanning && localSongs.length > 0 && (
+                        <div
+                            data-testid="mobile-live-scan-banner"
+                            className="mx-4 mb-2 rounded-2xl border border-white/10 bg-white/[0.05] px-3.5 py-2.5"
+                        >
+                            <div className="flex items-center justify-between gap-2 text-xs font-medium text-zinc-200">
+                                <span className="flex items-center gap-2 truncate">
+                                    <Loader2 size={13} className="shrink-0 animate-spin" style={{ color: accentColor }} />
+                                    <span className="truncate">
+                                        {scanProgress?.phase === 'discovering'
+                                            ? `Scanning "${scanProgress.folderName || 'folder'}"...`
+                                            : `Indexing "${scanProgress?.folderName || 'library'}" (${scanProgress?.completedSongs ?? 0}/${scanProgress?.totalSongs ?? 0})`}
+                                    </span>
+                                </span>
+                                <div className="flex shrink-0 items-center gap-2">
+                                    <span className="text-[11px] text-zinc-300">{scanPercent}%</span>
+                                    {onCancelScan && (
                                         <button
                                             type="button"
-                                            onClick={() => setSearchQuery('')}
-                                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400"
-                                            aria-label="Clear search"
+                                            onClick={onCancelScan}
+                                            className="rounded-lg border border-white/15 bg-white/10 px-2 py-0.5 text-[11px] font-semibold text-zinc-100 active:scale-95"
                                         >
-                                            <X size={14} />
+                                            Cancel
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                            <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-white/10">
+                                <div
+                                    className="h-full rounded-full transition-all duration-200"
+                                    style={{ width: `${Math.max(5, scanPercent)}%`, backgroundColor: accentColor }}
+                                />
+                            </div>
+                            {scanProgress && (
+                                <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10px] text-zinc-400">
+                                    <span>Discovered: {scanProgress.discoveredSongs ?? 0}</span>
+                                    <span>Processed: {scanProgress.processedSongs ?? 0}</span>
+                                    <span>Skipped: {scanProgress.skippedSongs ?? 0}</span>
+                                    <span>Failed: {scanProgress.failedSongs ?? 0}</span>
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* Active Tab Body */}
+                    <main className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                        {navState.collectionDetail ? (
+                            renderCollectionDetailView(navState.collectionDetail)
+                        ) : navState.activeTab === 'songs' ? (
+                            localSongs.length === 0 ? (
+                                renderEmptyLibraryState()
+                            ) : (
+                                <div className="flex min-h-0 flex-1 flex-col px-4">
+                                    {/* Search & Sort Bar */}
+                                    <div className="flex items-center gap-2 pb-2.5">
+                                        <div className="relative flex-1">
+                                            <Search
+                                                size={15}
+                                                className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-400"
+                                            />
+                                            <input
+                                                type="search"
+                                                value={searchQuery}
+                                                onChange={(e) => {
+                                                    setSearchQuery(e.target.value);
+                                                    setVisibleSongLimit(MAX_RENDERED_SONGS_STEP);
+                                                }}
+                                                placeholder="Search songs, artists, albums, Arabic lyrics..."
+                                                dir="auto"
+                                                className="h-10 w-full rounded-2xl border border-white/10 bg-white/[0.06] pl-9 pr-8 text-xs text-white placeholder-zinc-500 focus:border-white/25 focus:outline-none"
+                                            />
+                                            {searchQuery && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setSearchQuery('')}
+                                                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400"
+                                                    aria-label="Clear search"
+                                                >
+                                                    <X size={14} />
+                                                </button>
+                                            )}
+                                        </div>
+
+                                        <select
+                                            aria-label="Sort songs"
+                                            value={sortOrder}
+                                            onChange={(e) => setSortOrder(e.target.value as MobileSongSortOrder)}
+                                            className="h-10 rounded-2xl border border-white/10 bg-[#121218] px-3 text-xs font-medium text-zinc-200 focus:outline-none"
+                                        >
+                                            <option value="title">Title</option>
+                                            <option value="artist">Artist</option>
+                                            <option value="album">Album</option>
+                                            <option value="recent">Recent</option>
+                                        </select>
+                                    </div>
+
+                                    {/* Play All / Shuffle All Action Row */}
+                                    <div className="flex items-center justify-between gap-2 pb-2">
+                                        <div className="flex items-center gap-2">
+                                            <button
+                                                type="button"
+                                                onClick={() => handlePlayAllSongs(filteredSongs, false)}
+                                                className="flex h-9 items-center gap-1.5 rounded-full px-4 text-xs font-semibold text-zinc-950 active:scale-95 transition-transform"
+                                                style={{ backgroundColor: accentColor }}
+                                            >
+                                                <Play size={14} fill="currentColor" />
+                                                Play All ({filteredSongs.length})
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => handlePlayAllSongs(filteredSongs, true)}
+                                                className="flex h-9 items-center gap-1.5 rounded-full border border-white/12 bg-white/[0.06] px-3.5 text-xs font-medium text-zinc-200 active:scale-95 transition-transform"
+                                            >
+                                                <Shuffle size={13} />
+                                                Shuffle
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {/* Scrollable Windowed Song List */}
+                                    <div
+                                        onScroll={(e) => {
+                                            const el = e.currentTarget;
+                                            if (el.scrollTop + el.clientHeight >= el.scrollHeight - 240) {
+                                                if (visibleSongLimit < filteredSongs.length) {
+                                                    setVisibleSongLimit(prev => prev + MAX_RENDERED_SONGS_STEP);
+                                                }
+                                            }
+                                        }}
+                                        className="flex-1 overflow-y-auto overscroll-contain space-y-1 pb-4"
+                                    >
+                                        {filteredSongs.slice(0, visibleSongLimit).map((song, idx) =>
+                                            renderSongRow(song, filteredSongs, idx),
+                                        )}
+                                        {filteredSongs.length === 0 && (
+                                            <div className="py-12 text-center text-xs text-zinc-500">
+                                                No tracks matching "{searchQuery}"
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            )
+                        ) : navState.activeTab === 'albums' ? (
+                            <div className="flex min-h-0 flex-1 flex-col px-4">
+                                {/* Segmented Albums / Artists Sub-Switcher */}
+                                <div className="flex items-center gap-2 pb-3">
+                                    {([
+                                        { id: 'albums' as const, label: `Albums (${collections.albums.length})`, icon: <Disc3 size={14} /> },
+                                        { id: 'artists' as const, label: `Artists (${collections.artists.length})`, icon: <User size={14} /> },
+                                    ]).map(sub => {
+                                        const active = navState.albumsSubTab === sub.id;
+                                        return (
+                                            <button
+                                                key={sub.id}
+                                                type="button"
+                                                onClick={() => setNavState(prev => ({ ...prev, albumsSubTab: sub.id }))}
+                                                className={`flex h-9 items-center gap-1.5 rounded-full px-4 text-xs font-semibold transition-all ${
+                                                    active
+                                                        ? 'bg-white text-zinc-950'
+                                                        : 'border border-white/10 bg-white/[0.05] text-zinc-300'
+                                                }`}
+                                            >
+                                                {sub.icon}
+                                                <span>{sub.label}</span>
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+
+                                {localSongs.length === 0 ? (
+                                    renderEmptyLibraryState()
+                                ) : (
+                                    <div className="grid grid-cols-2 sm:grid-cols-3 landscape:grid-cols-4 gap-3 overflow-y-auto overscroll-contain pb-6">
+                                        {(navState.albumsSubTab === 'albums' ? collections.albums : collections.artists).map(item => (
+                                            <button
+                                                key={item.id}
+                                                type="button"
+                                                onClick={() => handleOpenCollection(item)}
+                                                className="group flex flex-col overflow-hidden rounded-2xl border border-white/10 bg-white/[0.04] p-2.5 text-left active:scale-[0.98] transition-transform"
+                                            >
+                                                <div className="relative aspect-square w-full overflow-hidden rounded-xl bg-zinc-900">
+                                                    <LocalCoverThumbnail
+                                                        coverUrl={item.coverUrl ?? null}
+                                                        alt={item.title}
+                                                        fallback={
+                                                            <div className="flex h-full w-full items-center justify-center text-zinc-600">
+                                                                {item.kind === 'artist' ? <User size={36} /> : <Disc3 size={36} />}
+                                                            </div>
+                                                        }
+                                                    />
+                                                </div>
+                                                <div
+                                                    dir={detectTextDirection(item.title)}
+                                                    className="mt-2 truncate text-xs font-semibold text-zinc-100"
+                                                    style={{ unicodeBidi: 'plaintext' }}
+                                                >
+                                                    {item.title}
+                                                </div>
+                                                <div className="truncate text-[11px] text-zinc-400">
+                                                    {item.songs.length} {item.songs.length === 1 ? 'track' : 'tracks'}
+                                                </div>
+                                            </button>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        ) : navState.activeTab === 'folders' ? (
+                            <div className="flex min-h-0 flex-1 flex-col px-4">
+                                {/* Segmented Folders / Local Playlists Sub-Switcher */}
+                                <div className="flex items-center justify-between gap-2 pb-3">
+                                    <div className="flex items-center gap-2">
+                                        {([
+                                            { id: 'folders' as const, label: `Folders (${collections.folders.length})`, icon: <FolderOpen size={14} /> },
+                                            { id: 'playlists' as const, label: `Playlists (${collections.playlists.length})`, icon: <ListMusic size={14} /> },
+                                        ]).map(sub => {
+                                            const active = navState.foldersSubTab === sub.id;
+                                            return (
+                                                <button
+                                                    key={sub.id}
+                                                    type="button"
+                                                    onClick={() => setNavState(prev => ({ ...prev, foldersSubTab: sub.id }))}
+                                                    className={`flex h-9 items-center gap-1.5 rounded-full px-4 text-xs font-semibold transition-all ${
+                                                        active
+                                                            ? 'bg-white text-zinc-950'
+                                                            : 'border border-white/10 bg-white/[0.05] text-zinc-300'
+                                                    }`}
+                                                >
+                                                    {sub.icon}
+                                                    <span>{sub.label}</span>
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+
+                                    {navState.foldersSubTab === 'playlists' && (
+                                        <button
+                                            type="button"
+                                            onClick={() => playlistInputRef.current?.click()}
+                                            className="flex h-9 items-center gap-1.5 rounded-full border border-white/15 bg-white/[0.06] px-3 text-xs font-medium text-zinc-200"
+                                        >
+                                            <FileUp size={13} />
+                                            Import .M3U
                                         </button>
                                     )}
                                 </div>
 
-                                <select
-                                    aria-label="Sort songs"
-                                    value={sortOrder}
-                                    onChange={(e) => setSortOrder(e.target.value as MobileSongSortOrder)}
-                                    className="h-10 rounded-2xl border border-white/10 bg-[#121218] px-3 text-xs font-medium text-zinc-200 focus:outline-none"
-                                >
-                                    <option value="title">Title</option>
-                                    <option value="artist">Artist</option>
-                                    <option value="album">Album</option>
-                                    <option value="recent">Recent</option>
-                                </select>
-                            </div>
-
-                            {/* Play All / Shuffle All Action Row */}
-                            <div className="flex items-center justify-between gap-2 pb-2">
-                                <div className="flex items-center gap-2">
-                                    <button
-                                        type="button"
-                                        onClick={() => handlePlayAllSongs(filteredSongs, false)}
-                                        className="flex h-9 items-center gap-1.5 rounded-full px-4 text-xs font-semibold text-zinc-950 active:scale-95 transition-transform"
-                                        style={{ backgroundColor: accentColor }}
-                                    >
-                                        <Play size={14} fill="currentColor" />
-                                        Play All ({filteredSongs.length})
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={() => handlePlayAllSongs(filteredSongs, true)}
-                                        className="flex h-9 items-center gap-1.5 rounded-full border border-white/12 bg-white/[0.06] px-3.5 text-xs font-medium text-zinc-200 active:scale-95 transition-transform"
-                                    >
-                                        <Shuffle size={13} />
-                                        Shuffle
-                                    </button>
-                                </div>
-                            </div>
-
-                            {/* Scrollable Windowed Song List */}
-                            <div
-                                onScroll={(e) => {
-                                    const el = e.currentTarget;
-                                    if (el.scrollTop + el.clientHeight >= el.scrollHeight - 240) {
-                                        if (visibleSongLimit < filteredSongs.length) {
-                                            setVisibleSongLimit(prev => prev + MAX_RENDERED_SONGS_STEP);
-                                        }
-                                    }
-                                }}
-                                className="flex-1 overflow-y-auto overscroll-contain space-y-1 pb-4"
-                            >
-                                {filteredSongs.slice(0, visibleSongLimit).map((song, idx) =>
-                                    renderSongRow(song, filteredSongs, idx),
-                                )}
-                                {filteredSongs.length === 0 && (
-                                    <div className="py-12 text-center text-xs text-zinc-500">
-                                        No tracks matching "{searchQuery}"
+                                {localSongs.length === 0 && navState.foldersSubTab === 'folders' ? (
+                                    renderEmptyLibraryState()
+                                ) : (
+                                    <div className="flex-1 overflow-y-auto overscroll-contain space-y-2 pb-6">
+                                        {(navState.foldersSubTab === 'folders' ? collections.folders : collections.playlists).map(item => (
+                                            <button
+                                                key={item.id}
+                                                type="button"
+                                                onClick={() => handleOpenCollection(item)}
+                                                className="flex w-full items-center gap-3.5 rounded-2xl border border-white/10 bg-white/[0.04] p-3 text-left active:scale-[0.99] transition-transform"
+                                            >
+                                                <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-zinc-900 text-zinc-300">
+                                                    <LocalCoverThumbnail
+                                                        coverUrl={item.coverUrl ?? null}
+                                                        alt={item.title}
+                                                        fallback={
+                                                            item.kind === 'folder' ? (
+                                                                <FolderOpen size={22} style={{ color: accentColor }} />
+                                                            ) : (
+                                                                <Heart size={22} className="text-rose-400" />
+                                                            )
+                                                        }
+                                                    />
+                                                </div>
+                                                <div className="min-w-0 flex-1">
+                                                    <div
+                                                        dir={detectTextDirection(item.title)}
+                                                        className="truncate text-sm font-semibold text-white"
+                                                        style={{ unicodeBidi: 'plaintext' }}
+                                                    >
+                                                        {item.title}
+                                                    </div>
+                                                    <div className="text-xs text-zinc-400 mt-0.5">
+                                                        {item.songs.length} {item.songs.length === 1 ? 'track' : 'tracks'}
+                                                    </div>
+                                                </div>
+                                            </button>
+                                        ))}
                                     </div>
                                 )}
                             </div>
-                        </div>
-                    )
-                ) : navState.activeTab === 'albums' ? (
-                    <div className="flex min-h-0 flex-1 flex-col px-4">
-                        {/* Segmented Albums / Artists Sub-Switcher */}
-                        <div className="flex items-center gap-2 pb-3">
+                        ) : (
+                            /* Settings Tab: Mobile-First Local Library, Visualizer, Typography, and Audio Settings */
+                            <div
+                                data-testid="mobile-settings-view"
+                                className="flex-1 overflow-y-auto overscroll-contain px-4 pb-8 space-y-5"
+                            >
+                                {/* Section 1: Local Music Storage (SAF) */}
+                                <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-4 space-y-3">
+                                    <div className="flex items-center justify-between">
+                                        <div>
+                                            <h3 className="text-sm font-bold text-white">Local Music Library</h3>
+                                            <p className="text-xs text-zinc-400">
+                                                {localSongs.length} tracks · {collections.albums.length} albums · {collections.artists.length} artists
+                                            </p>
+                                        </div>
+                                        <FolderOpen size={20} style={{ color: accentColor }} />
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-2.5">
+                                        <button
+                                            type="button"
+                                            disabled={isImportingOrScanning}
+                                            onClick={() => void onImportFolder()}
+                                            className="flex h-11 items-center justify-center gap-2 rounded-2xl bg-white text-xs font-semibold text-zinc-950"
+                                        >
+                                            <FolderOpen size={15} />
+                                            Add Folder
+                                        </button>
+                                        <button
+                                            type="button"
+                                            disabled={isImportingOrScanning}
+                                            onClick={() => void onRefreshFolders()}
+                                            className="flex h-11 items-center justify-center gap-2 rounded-2xl border border-white/15 bg-white/[0.06] text-xs font-semibold text-white"
+                                        >
+                                            <RefreshCw size={15} className={isImportingOrScanning ? 'animate-spin' : ''} />
+                                            Rescan All
+                                        </button>
+                                    </div>
+                                </section>
+
+                                {/* Section 2: Folia Lyric Visualizer & Appearance */}
+                                <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-4 space-y-3.5">
+                                    <div className="flex items-center justify-between">
+                                        <div>
+                                            <h3 className="text-sm font-bold text-white">Folia Visualizer & Lyrics</h3>
+                                            <p className="text-xs text-zinc-400">
+                                                Active style: {getVisualizerModeLabel(visualizerMode, t)}
+                                            </p>
+                                        </div>
+                                        <Sparkles size={19} style={{ color: accentColor }} />
+                                    </div>
+
+                                    <div className="grid grid-cols-3 gap-2">
+                                        {VISUALIZER_REGISTRY.map(entry => {
+                                            const active = visualizerMode === entry.mode;
+                                            return (
+                                                <button
+                                                    key={entry.mode}
+                                                    type="button"
+                                                    onClick={() => onVisualizerModeChange(entry.mode)}
+                                                    className={`rounded-xl border px-2.5 py-2 text-xs font-medium truncate ${
+                                                        active
+                                                            ? 'border-white bg-white text-zinc-950 font-semibold'
+                                                            : 'border-white/10 bg-white/[0.03] text-zinc-300'
+                                                    }`}
+                                                >
+                                                    {getVisualizerModeLabel(entry.mode, t)}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+
+                                    <div className="flex items-center justify-between pt-1">
+                                        <span className="text-xs text-zinc-300">Theme Surface</span>
+                                        <div className="flex items-center gap-2">
+                                            <button
+                                                type="button"
+                                                onClick={onToggleDaylight}
+                                                className="flex h-9 items-center gap-1.5 rounded-xl border border-white/12 bg-white/[0.06] px-3 text-xs font-medium text-zinc-200"
+                                            >
+                                                {isDaylight ? <Sun size={14} /> : <Moon size={14} />}
+                                                <span>{isDaylight ? 'Daylight' : 'OLED Dark'}</span>
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => onToggleCoverColorBg(!useCoverColorBg)}
+                                                className={`h-9 rounded-xl border px-3 text-xs font-medium ${
+                                                    useCoverColorBg
+                                                        ? 'border-white bg-white/15 text-white'
+                                                        : 'border-white/10 bg-white/[0.04] text-zinc-400'
+                                                }`}
+                                            >
+                                                Artwork Tint: {useCoverColorBg ? 'On' : 'Off'}
+                                            </button>
+                                        </div>
+                                    </div>
+                                </section>
+
+                                {/* Section 3: Audio & ReplayGain */}
+                                <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-4 space-y-3">
+                                    <h3 className="text-sm font-bold text-white">Audio & Playback</h3>
+                                    <div className="flex items-center justify-between">
+                                        <span className="text-xs text-zinc-300">ReplayGain Normalization</span>
+                                        <div className="flex items-center gap-1.5">
+                                            {(['off', 'track', 'album'] as const).map(mode => (
+                                                <button
+                                                    key={mode}
+                                                    type="button"
+                                                    onClick={() => onChangeReplayGainMode(mode)}
+                                                    className={`h-8 rounded-lg border px-2.5 text-xs font-medium capitalize ${
+                                                        replayGainMode === mode
+                                                            ? 'border-white bg-white text-zinc-950 font-semibold'
+                                                            : 'border-white/10 bg-white/[0.04] text-zinc-300'
+                                                    }`}
+                                                >
+                                                    {mode}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </section>
+
+                                {/* Section 4: Advanced Folia Settings & Custom Tunings */}
+                                <button
+                                    type="button"
+                                    onClick={onOpenFullSettingsModal}
+                                    className="flex h-12 w-full items-center justify-between rounded-2xl border border-white/12 bg-white/[0.05] px-4 text-xs font-semibold text-zinc-200 active:scale-[0.99]"
+                                >
+                                    <span className="flex items-center gap-2.5">
+                                        <Sliders size={16} style={{ color: accentColor }} />
+                                        Open Full Folia Visualizer & Advanced Settings
+                                    </span>
+                                    <span className="text-zinc-400">→</span>
+                                </button>
+                            </div>
+                        )}
+                    </main>
+
+                    {/* Persistent Mini-Player (when collapsed and a track is loaded) */}
+                    {currentSong && (
+                        <MobileMiniPlayer
+                            currentSong={currentSong}
+                            artistName={artistName}
+                            coverUrl={effectiveCoverUrl}
+                            playerState={playerState}
+                            currentTime={currentTime}
+                            duration={duration}
+                            theme={theme}
+                            hasLyrics={hasLyrics}
+                            onExpandCover={() =>
+                                setNavState(prev => ({
+                                    ...prev,
+                                    playerSheet: 'expanded',
+                                    playerDisplayMode: 'cover',
+                                }))
+                            }
+                            onExpandLyrics={() =>
+                                setNavState(prev => ({
+                                    ...prev,
+                                    playerSheet: 'expanded',
+                                    playerDisplayMode: 'lyrics',
+                                }))
+                            }
+                            onTogglePlay={onTogglePlay}
+                            onNextTrack={onNextTrack}
+                        />
+                    )}
+
+                    {/* Bottom Primary Navigation Bar (hidden when soft keyboard is open) */}
+                    {!isKeyboardOpen && (
+                        <nav
+                            aria-label="Primary mobile navigation"
+                            className="flex shrink-0 items-center justify-around border-t border-white/10 bg-[#08080c]/95 px-2 pt-1.5 backdrop-blur-xl"
+                            style={{
+                                paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 8px)',
+                            }}
+                        >
                             {([
-                                { id: 'albums' as const, label: `Albums (${collections.albums.length})`, icon: <Disc3 size={14} /> },
-                                { id: 'artists' as const, label: `Artists (${collections.artists.length})`, icon: <User size={14} /> },
-                            ]).map(sub => {
-                                const active = navState.albumsSubTab === sub.id;
+                                { id: 'songs' as const, label: 'Library', icon: Library },
+                                { id: 'albums' as const, label: 'Albums', icon: Disc3 },
+                                { id: 'folders' as const, label: 'Folders', icon: FolderOpen },
+                                { id: 'settings' as const, label: 'Settings', icon: Settings },
+                            ]).map(item => {
+                                const Icon = item.icon;
+                                const active = navState.activeTab === item.id;
                                 return (
                                     <button
-                                        key={sub.id}
+                                        key={item.id}
                                         type="button"
-                                        onClick={() => setNavState(prev => ({ ...prev, albumsSubTab: sub.id }))}
-                                        className={`flex h-9 items-center gap-1.5 rounded-full px-4 text-xs font-semibold transition-all ${
-                                            active
-                                                ? 'bg-white text-zinc-950'
-                                                : 'border border-white/10 bg-white/[0.05] text-zinc-300'
+                                        onClick={() => handleSelectTab(item.id)}
+                                        className={`flex min-h-[48px] flex-1 flex-col items-center justify-center gap-1 rounded-xl py-1 text-[11px] font-medium transition-colors ${
+                                            active ? 'text-white font-semibold' : 'text-zinc-500 hover:text-zinc-300'
                                         }`}
                                     >
-                                        {sub.icon}
-                                        <span>{sub.label}</span>
+                                        <Icon size={20} style={{ color: active ? accentColor : undefined }} />
+                                        <span>{item.label}</span>
                                     </button>
                                 );
                             })}
-                        </div>
-
-                        {localSongs.length === 0 ? (
-                            renderEmptyLibraryState()
-                        ) : (
-                            <div className="grid grid-cols-2 sm:grid-cols-3 landscape:grid-cols-4 gap-3 overflow-y-auto overscroll-contain pb-6">
-                                {(navState.albumsSubTab === 'albums' ? collections.albums : collections.artists).map(item => (
-                                    <button
-                                        key={item.id}
-                                        type="button"
-                                        onClick={() => handleOpenCollection(item)}
-                                        className="group flex flex-col overflow-hidden rounded-2xl border border-white/10 bg-white/[0.04] p-2.5 text-left active:scale-[0.98] transition-transform"
-                                    >
-                                        <div className="relative aspect-square w-full overflow-hidden rounded-xl bg-zinc-900">
-                                            {item.coverUrl ? (
-                                                <img
-                                                    src={item.coverUrl}
-                                                    alt={item.title}
-                                                    className="h-full w-full object-cover"
-                                                    loading="lazy"
-                                                />
-                                            ) : (
-                                                <div className="flex h-full w-full items-center justify-center text-zinc-600">
-                                                    {item.kind === 'artist' ? <User size={36} /> : <Disc3 size={36} />}
-                                                </div>
-                                            )}
-                                        </div>
-                                        <div
-                                            dir={detectTextDirection(item.title)}
-                                            className="mt-2 truncate text-xs font-semibold text-zinc-100"
-                                            style={{ unicodeBidi: 'plaintext' }}
-                                        >
-                                            {item.title}
-                                        </div>
-                                        <div className="truncate text-[11px] text-zinc-400">
-                                            {item.songs.length} {item.songs.length === 1 ? 'track' : 'tracks'}
-                                        </div>
-                                    </button>
-                                ))}
-                            </div>
-                        )}
-                    </div>
-                ) : navState.activeTab === 'folders' ? (
-                    <div className="flex min-h-0 flex-1 flex-col px-4">
-                        {/* Segmented Folders / Local Playlists Sub-Switcher */}
-                        <div className="flex items-center justify-between gap-2 pb-3">
-                            <div className="flex items-center gap-2">
-                                {([
-                                    { id: 'folders' as const, label: `Folders (${collections.folders.length})`, icon: <FolderOpen size={14} /> },
-                                    { id: 'playlists' as const, label: `Playlists (${collections.playlists.length})`, icon: <ListMusic size={14} /> },
-                                ]).map(sub => {
-                                    const active = navState.foldersSubTab === sub.id;
-                                    return (
-                                        <button
-                                            key={sub.id}
-                                            type="button"
-                                            onClick={() => setNavState(prev => ({ ...prev, foldersSubTab: sub.id }))}
-                                            className={`flex h-9 items-center gap-1.5 rounded-full px-4 text-xs font-semibold transition-all ${
-                                                active
-                                                    ? 'bg-white text-zinc-950'
-                                                    : 'border border-white/10 bg-white/[0.05] text-zinc-300'
-                                            }`}
-                                        >
-                                            {sub.icon}
-                                            <span>{sub.label}</span>
-                                        </button>
-                                    );
-                                })}
-                            </div>
-
-                            {navState.foldersSubTab === 'playlists' && (
-                                <button
-                                    type="button"
-                                    onClick={() => playlistInputRef.current?.click()}
-                                    className="flex h-9 items-center gap-1.5 rounded-full border border-white/15 bg-white/[0.06] px-3 text-xs font-medium text-zinc-200"
-                                >
-                                    <FileUp size={13} />
-                                    Import .M3U
-                                </button>
-                            )}
-                        </div>
-
-                        {localSongs.length === 0 && navState.foldersSubTab === 'folders' ? (
-                            renderEmptyLibraryState()
-                        ) : (
-                            <div className="flex-1 overflow-y-auto overscroll-contain space-y-2 pb-6">
-                                {(navState.foldersSubTab === 'folders' ? collections.folders : collections.playlists).map(item => (
-                                    <button
-                                        key={item.id}
-                                        type="button"
-                                        onClick={() => handleOpenCollection(item)}
-                                        className="flex w-full items-center gap-3.5 rounded-2xl border border-white/10 bg-white/[0.04] p-3 text-left active:scale-[0.99] transition-transform"
-                                    >
-                                        <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-zinc-900 text-zinc-300">
-                                            {item.coverUrl ? (
-                                                <img src={item.coverUrl} alt={item.title} className="h-full w-full object-cover" />
-                                            ) : item.kind === 'folder' ? (
-                                                <FolderOpen size={22} style={{ color: accentColor }} />
-                                            ) : (
-                                                <Heart size={22} className="text-rose-400" />
-                                            )}
-                                        </div>
-                                        <div className="min-w-0 flex-1">
-                                            <div
-                                                dir={detectTextDirection(item.title)}
-                                                className="truncate text-sm font-semibold text-white"
-                                                style={{ unicodeBidi: 'plaintext' }}
-                                            >
-                                                {item.title}
-                                            </div>
-                                            <div className="text-xs text-zinc-400 mt-0.5">
-                                                {item.songs.length} {item.songs.length === 1 ? 'track' : 'tracks'}
-                                            </div>
-                                        </div>
-                                    </button>
-                                ))}
-                            </div>
-                        )}
-                    </div>
-                ) : (
-                    /* Settings Tab: Mobile-First Local Library, Visualizer, Typography, and Audio Settings */
-                    <div
-                        data-testid="mobile-settings-view"
-                        className="flex-1 overflow-y-auto overscroll-contain px-4 pb-8 space-y-5"
-                    >
-                        {/* Section 1: Local Music Storage (SAF) */}
-                        <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-4 space-y-3">
-                            <div className="flex items-center justify-between">
-                                <div>
-                                    <h3 className="text-sm font-bold text-white">Local Music Library</h3>
-                                    <p className="text-xs text-zinc-400">
-                                        {localSongs.length} tracks · {collections.albums.length} albums · {collections.artists.length} artists
-                                    </p>
-                                </div>
-                                <FolderOpen size={20} style={{ color: accentColor }} />
-                            </div>
-                            <div className="grid grid-cols-2 gap-2.5">
-                                <button
-                                    type="button"
-                                    disabled={isImportingOrScanning}
-                                    onClick={() => void onImportFolder()}
-                                    className="flex h-11 items-center justify-center gap-2 rounded-2xl bg-white text-xs font-semibold text-zinc-950"
-                                >
-                                    <FolderOpen size={15} />
-                                    Add Folder
-                                </button>
-                                <button
-                                    type="button"
-                                    disabled={isImportingOrScanning}
-                                    onClick={() => void onRefreshFolders()}
-                                    className="flex h-11 items-center justify-center gap-2 rounded-2xl border border-white/15 bg-white/[0.06] text-xs font-semibold text-white"
-                                >
-                                    <RefreshCw size={15} className={isImportingOrScanning ? 'animate-spin' : ''} />
-                                    Rescan All
-                                </button>
-                            </div>
-                        </section>
-
-                        {/* Section 2: Folia Lyric Visualizer & Appearance */}
-                        <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-4 space-y-3.5">
-                            <div className="flex items-center justify-between">
-                                <div>
-                                    <h3 className="text-sm font-bold text-white">Folia Visualizer & Lyrics</h3>
-                                    <p className="text-xs text-zinc-400">
-                                        Active style: {getVisualizerModeLabel(visualizerMode, t)}
-                                    </p>
-                                </div>
-                                <Sparkles size={19} style={{ color: accentColor }} />
-                            </div>
-
-                            <div className="grid grid-cols-3 gap-2">
-                                {VISUALIZER_REGISTRY.map(entry => {
-                                    const active = visualizerMode === entry.mode;
-                                    return (
-                                        <button
-                                            key={entry.mode}
-                                            type="button"
-                                            onClick={() => onVisualizerModeChange(entry.mode)}
-                                            className={`rounded-xl border px-2.5 py-2 text-xs font-medium truncate ${
-                                                active
-                                                    ? 'border-white bg-white text-zinc-950 font-semibold'
-                                                    : 'border-white/10 bg-white/[0.03] text-zinc-300'
-                                            }`}
-                                        >
-                                            {getVisualizerModeLabel(entry.mode, t)}
-                                        </button>
-                                    );
-                                })}
-                            </div>
-
-                            <div className="flex items-center justify-between pt-1">
-                                <span className="text-xs text-zinc-300">Theme Surface</span>
-                                <div className="flex items-center gap-2">
-                                    <button
-                                        type="button"
-                                        onClick={onToggleDaylight}
-                                        className="flex h-9 items-center gap-1.5 rounded-xl border border-white/12 bg-white/[0.06] px-3 text-xs font-medium text-zinc-200"
-                                    >
-                                        {isDaylight ? <Sun size={14} /> : <Moon size={14} />}
-                                        <span>{isDaylight ? 'Daylight' : 'OLED Dark'}</span>
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={() => onToggleCoverColorBg(!useCoverColorBg)}
-                                        className={`h-9 rounded-xl border px-3 text-xs font-medium ${
-                                            useCoverColorBg
-                                                ? 'border-white bg-white/15 text-white'
-                                                : 'border-white/10 bg-white/[0.04] text-zinc-400'
-                                        }`}
-                                    >
-                                        Artwork Tint: {useCoverColorBg ? 'On' : 'Off'}
-                                    </button>
-                                </div>
-                            </div>
-                        </section>
-
-                        {/* Section 3: Audio & ReplayGain */}
-                        <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-4 space-y-3">
-                            <h3 className="text-sm font-bold text-white">Audio & Playback</h3>
-                            <div className="flex items-center justify-between">
-                                <span className="text-xs text-zinc-300">ReplayGain Normalization</span>
-                                <div className="flex items-center gap-1.5">
-                                    {(['off', 'track', 'album'] as const).map(mode => (
-                                        <button
-                                            key={mode}
-                                            type="button"
-                                            onClick={() => onChangeReplayGainMode(mode)}
-                                            className={`h-8 rounded-lg border px-2.5 text-xs font-medium capitalize ${
-                                                replayGainMode === mode
-                                                    ? 'border-white bg-white text-zinc-950 font-semibold'
-                                                    : 'border-white/10 bg-white/[0.04] text-zinc-300'
-                                            }`}
-                                        >
-                                            {mode}
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
-                        </section>
-
-                        {/* Section 4: Advanced Folia Settings & Custom Tunings */}
-                        <button
-                            type="button"
-                            onClick={onOpenFullSettingsModal}
-                            className="flex h-12 w-full items-center justify-between rounded-2xl border border-white/12 bg-white/[0.05] px-4 text-xs font-semibold text-zinc-200 active:scale-[0.99]"
-                        >
-                            <span className="flex items-center gap-2.5">
-                                <Sliders size={16} style={{ color: accentColor }} />
-                                Open Full Folia Visualizer & Advanced Settings
-                            </span>
-                            <span className="text-zinc-400">→</span>
-                        </button>
-                    </div>
-                )}
-            </main>
-
-            {/* Persistent Mini-Player (when collapsed and a track is loaded) */}
-            {navState.playerSheet === 'collapsed' && currentSong && (
-                <MobileMiniPlayer
-                    currentSong={currentSong}
-                    artistName={artistName}
-                    coverUrl={coverUrl}
-                    playerState={playerState}
-                    currentTime={currentTime}
-                    duration={duration}
-                    theme={theme}
-                    hasLyrics={hasLyrics}
-                    onExpandCover={() =>
-                        setNavState(prev => ({
-                            ...prev,
-                            playerSheet: 'expanded',
-                            playerDisplayMode: 'cover',
-                        }))
-                    }
-                    onExpandLyrics={() =>
-                        setNavState(prev => ({
-                            ...prev,
-                            playerSheet: 'expanded',
-                            playerDisplayMode: 'lyrics',
-                        }))
-                    }
-                    onTogglePlay={onTogglePlay}
-                    onNextTrack={onNextTrack}
-                />
-            )}
-
-            {/* Bottom Primary Navigation Bar (hidden when soft keyboard is open) */}
-            {!isKeyboardOpen && (
-                <nav
-                    aria-label="Primary mobile navigation"
-                    className="flex shrink-0 items-center justify-around border-t border-white/10 bg-[#08080c]/95 px-2 pt-1.5 backdrop-blur-xl"
-                    style={{
-                        paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 8px)',
-                    }}
-                >
-                    {([
-                        { id: 'songs' as const, label: 'Library', icon: Library },
-                        { id: 'albums' as const, label: 'Albums', icon: Disc3 },
-                        { id: 'folders' as const, label: 'Folders', icon: FolderOpen },
-                        { id: 'settings' as const, label: 'Settings', icon: Settings },
-                    ]).map(item => {
-                        const Icon = item.icon;
-                        const active = navState.activeTab === item.id;
-                        return (
-                            <button
-                                key={item.id}
-                                type="button"
-                                onClick={() => handleSelectTab(item.id)}
-                                className={`flex min-h-[48px] flex-1 flex-col items-center justify-center gap-1 rounded-xl py-1 text-[11px] font-medium transition-colors ${
-                                    active ? 'text-white font-semibold' : 'text-zinc-500 hover:text-zinc-300'
-                                }`}
-                            >
-                                <Icon size={20} style={{ color: active ? accentColor : undefined }} />
-                                <span>{item.label}</span>
-                            </button>
-                        );
-                    })}
-                </nav>
+                        </nav>
+                    )}
+                </>
             )}
 
             {/* Expanded Full-Screen Now Playing Sheet */}
             <MobileNowPlayingSheet
-                isOpen={navState.playerSheet === 'expanded'}
+                isOpen={isPlayerExpanded}
                 displayMode={navState.playerDisplayMode}
                 subDrawer={navState.subDrawer}
                 onChangeDisplayMode={(mode) => setNavState(prev => ({ ...prev, playerDisplayMode: mode }))}
@@ -1018,7 +1208,7 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                 currentSong={currentSong}
                 artistName={artistName}
                 albumName={albumName}
-                coverUrl={coverUrl}
+                coverUrl={effectiveCoverUrl}
                 playerState={playerState}
                 currentTime={currentTime}
                 lyricCurrentTime={lyricCurrentTime}
@@ -1055,6 +1245,7 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                 onRemoveQueueSong={onRemoveQueueSong}
                 onSaveQueueAsPlaylist={onSaveQueueAsPlaylist}
                 onOpenVisualizerSettings={onOpenFullSettingsModal}
+                onOpenLattice={onOpenLattice}
             />
         </div>
     );

@@ -10,8 +10,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.ServiceInfo;
-import android.media.AudioAttributes;
-import android.media.AudioFocusRequest;
 import android.media.AudioManager;
 import android.media.MediaMetadata;
 import android.media.session.MediaSession;
@@ -27,9 +25,9 @@ import androidx.annotation.Nullable;
  * Android foreground MediaSession playback service for Folia.
  *
  * Bridges system media notifications, lock-screen controls, Bluetooth headset buttons,
- * AudioFocus transitions, and ACTION_AUDIO_BECOMING_NOISY (headphone unplug) directly
- * to Folia's single Web Audio / HTMLAudioElement playback clock without creating a
- * second competing audio player.
+ * and ACTION_AUDIO_BECOMING_NOISY (headphone unplug) directly to Folia's single
+ * Web Audio / HTMLAudioElement playback clock without creating a second competing
+ * audio player or competing AudioFocus client against Chromium's WebView AudioFocusDelegate.
  */
 public class FoliaPlaybackService extends Service {
     public static final String ACTION_UPDATE_STATE = "top.izuna.foliamajor.action.UPDATE_STATE";
@@ -59,10 +57,6 @@ public class FoliaPlaybackService extends Service {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private MediaSession mediaSession;
     private NotificationManager notificationManager;
-    private AudioManager audioManager;
-    private AudioFocusRequest audioFocusRequest;
-    private boolean hasAudioFocus = false;
-    private boolean resumeOnFocusGain = false;
     private boolean noisyReceiverRegistered = false;
     private boolean isForegroundStarted = false;
     private PowerManager.WakeLock wakeLock;
@@ -79,40 +73,10 @@ public class FoliaPlaybackService extends Service {
         return playbackActive;
     }
 
-    private final AudioManager.OnAudioFocusChangeListener audioFocusChangeListener = focusChange -> {
-        switch (focusChange) {
-            case AudioManager.AUDIOFOCUS_LOSS:
-                hasAudioFocus = false;
-                resumeOnFocusGain = false;
-                FoliaNativeBridgePlugin.dispatchMediaAction("pause", null);
-                break;
-            case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
-                if (currentIsPlaying) {
-                    resumeOnFocusGain = true;
-                }
-                FoliaNativeBridgePlugin.dispatchMediaAction("pause", null);
-                break;
-            case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
-                FoliaNativeBridgePlugin.dispatchMediaAction("duck", null);
-                break;
-            case AudioManager.AUDIOFOCUS_GAIN:
-                hasAudioFocus = true;
-                FoliaNativeBridgePlugin.dispatchMediaAction("unduck", null);
-                if (resumeOnFocusGain) {
-                    resumeOnFocusGain = false;
-                    FoliaNativeBridgePlugin.dispatchMediaAction("play", null);
-                }
-                break;
-            default:
-                break;
-        }
-    };
-
     private final BroadcastReceiver becomingNoisyReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
             if (AudioManager.ACTION_AUDIO_BECOMING_NOISY.equals(intent.getAction())) {
-                resumeOnFocusGain = false;
                 FoliaNativeBridgePlugin.dispatchMediaAction("pause", null);
             }
         }
@@ -122,7 +86,6 @@ public class FoliaPlaybackService extends Service {
     public void onCreate() {
         super.onCreate();
         notificationManager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
-        audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
         PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
         if (powerManager != null) {
             wakeLock = powerManager.newWakeLock(
@@ -236,8 +199,11 @@ public class FoliaPlaybackService extends Service {
         this.currentSpeed = speed > 0f ? speed : 1.0f;
         playbackActive = isPlaying;
 
+        // Note: Chromium's WebView (AudioFocusDelegate) natively requests and manages Android
+        // AudioFocus for HTMLAudioElement / Web Audio playback. Do NOT register a second
+        // competing AudioFocusRequest here, as Android's AudioManager will revoke focus from
+        // Chromium (or vice versa) ~0.5-1s after playback starts.
         if (isPlaying) {
-            requestAudioFocusIfNeeded();
             registerNoisyReceiverIfNeeded();
             acquireWakeLockIfNeeded();
         } else {
@@ -382,9 +348,7 @@ public class FoliaPlaybackService extends Service {
     private void clearAndStopPlayback() {
         playbackActive = false;
         currentIsPlaying = false;
-        resumeOnFocusGain = false;
         unregisterNoisyReceiverIfNeeded();
-        abandonAudioFocusIfHeld();
         releaseWakeLockIfHeld();
         if (isForegroundStarted) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -397,44 +361,6 @@ public class FoliaPlaybackService extends Service {
             isForegroundStarted = false;
         }
         stopSelf();
-    }
-
-    private void requestAudioFocusIfNeeded() {
-        if (audioManager == null || hasAudioFocus) return;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            if (audioFocusRequest == null) {
-                AudioAttributes attrs = new AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                    .build();
-                audioFocusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                    .setAudioAttributes(attrs)
-                    .setAcceptsDelayedFocusGain(true)
-                    .setOnAudioFocusChangeListener(audioFocusChangeListener, mainHandler)
-                    .build();
-            }
-            int res = audioManager.requestAudioFocus(audioFocusRequest);
-            hasAudioFocus = (res == AudioManager.AUDIOFOCUS_REQUEST_GRANTED);
-        } else {
-            @SuppressWarnings("deprecation")
-            int res = audioManager.requestAudioFocus(
-                audioFocusChangeListener,
-                AudioManager.STREAM_MUSIC,
-                AudioManager.AUDIOFOCUS_GAIN
-            );
-            hasAudioFocus = (res == AudioManager.AUDIOFOCUS_REQUEST_GRANTED);
-        }
-    }
-
-    private void abandonAudioFocusIfHeld() {
-        if (audioManager == null || !hasAudioFocus) return;
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && audioFocusRequest != null) {
-            audioManager.abandonAudioFocusRequest(audioFocusRequest);
-        } else {
-            @SuppressWarnings("deprecation")
-            int ignored = audioManager.abandonAudioFocus(audioFocusChangeListener);
-        }
-        hasAudioFocus = false;
     }
 
     private void registerNoisyReceiverIfNeeded() {
@@ -452,8 +378,8 @@ public class FoliaPlaybackService extends Service {
         if (!noisyReceiverRegistered) return;
         try {
             unregisterReceiver(becomingNoisyReceiver);
-        } catch (IllegalArgumentException ignored) {
-            // Receiver already unregistered.
+        } catch (Exception ignored) {
+            // Receiver may not be registered.
         }
         noisyReceiverRegistered = false;
     }
@@ -466,20 +392,11 @@ public class FoliaPlaybackService extends Service {
 
     private void releaseWakeLockIfHeld() {
         if (wakeLock != null && wakeLock.isHeld()) {
-            wakeLock.release();
-        }
-    }
-
-    @Nullable
-    @Override
-    public IBinder onBind(Intent intent) {
-        return null;
-    }
-
-    @Override
-    public void onTaskRemoved(@Nullable Intent rootIntent) {
-        if (!playbackActive) {
-            clearAndStopPlayback();
+            try {
+                wakeLock.release();
+            } catch (Exception ignored) {
+                // Ignore under-locked exception.
+            }
         }
     }
 
@@ -487,7 +404,6 @@ public class FoliaPlaybackService extends Service {
     public void onDestroy() {
         playbackActive = false;
         unregisterNoisyReceiverIfNeeded();
-        abandonAudioFocusIfHeld();
         releaseWakeLockIfHeld();
         if (mediaSession != null) {
             mediaSession.setActive(false);
@@ -495,5 +411,11 @@ public class FoliaPlaybackService extends Service {
             mediaSession = null;
         }
         super.onDestroy();
+    }
+
+    @Nullable
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
     }
 }

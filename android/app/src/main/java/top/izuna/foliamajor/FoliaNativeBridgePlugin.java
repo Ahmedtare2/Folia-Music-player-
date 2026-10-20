@@ -7,6 +7,9 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.UriPermission;
 import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.media.MediaMetadataRetriever;
 import android.net.Uri;
 import android.os.Build;
 import android.provider.DocumentsContract;
@@ -17,7 +20,6 @@ import androidx.annotation.Nullable;
 import androidx.documentfile.provider.DocumentFile;
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
-import org.json.JSONObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
@@ -26,6 +28,7 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.lang.ref.WeakReference;
+import java.security.MessageDigest;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.HashSet;
@@ -34,16 +37,18 @@ import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import org.json.JSONObject;
 
 /**
  * Capacitor plugin providing Storage Access Framework (SAF) folder/file import with persisted URI
- * permissions, fast DocumentsContract tree scanning, sidecar lyric discovery (.ttml, .lrc, .vtt,
- * .qrc, .yrc, .krc, .fia), and AndroidX Media3 playback service control.
+ * permissions, fast DocumentsContract tree scanning, native off-thread metadata/artwork extraction,
+ * bounded byte-slice reading, sidecar lyric discovery (.ttml, .lrc, .vtt, .qrc, .yrc, .krc, .fia),
+ * and AndroidX Media3 playback service control.
  */
 @CapacitorPlugin(name = "FoliaNativeBridge")
 public class FoliaNativeBridgePlugin extends Plugin {
     private static WeakReference<FoliaNativeBridgePlugin> activeInstanceRef = new WeakReference<>(null);
-    private final ExecutorService ioExecutor = Executors.newFixedThreadPool(2);
+    private final ExecutorService ioExecutor = Executors.newFixedThreadPool(4);
 
     private static final String[] TREE_PROJECTION = new String[] {
         DocumentsContract.Document.COLUMN_DOCUMENT_ID,
@@ -314,30 +319,68 @@ public class FoliaNativeBridgePlugin extends Plugin {
         ioExecutor.execute(() -> {
             try {
                 Uri treeUri = Uri.parse(rawTreeUri);
-                DocumentFile current = DocumentFile.fromTreeUri(context, treeUri);
+                ContentResolver resolver = context.getContentResolver();
+                String currentDocId = DocumentsContract.getTreeDocumentId(treeUri);
                 String[] segments = relativePath.split("/");
-                for (String segment : segments) {
+
+                String matchedName = "";
+                String matchedMime = "application/octet-stream";
+                long matchedSize = 0L;
+                long matchedLastModified = 0L;
+                boolean matchedIsDir = false;
+
+                for (int i = 0; i < segments.length; i++) {
+                    String segment = segments[i];
                     if (segment.isEmpty() || ".".equals(segment)) continue;
-                    if (current == null) break;
-                    current = current.findFile(segment);
+                    boolean isLast = (i == segments.length - 1);
+
+                    Uri childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, currentDocId);
+                    String nextDocId = null;
+                    try (Cursor cursor = resolver.query(childrenUri, TREE_PROJECTION, null, null, null)) {
+                        if (cursor != null) {
+                            while (cursor.moveToNext()) {
+                                String candidateName = cursor.getString(1);
+                                if (segment.equals(candidateName)) {
+                                    nextDocId = cursor.getString(0);
+                                    matchedName = candidateName;
+                                    matchedMime = cursor.getString(2);
+                                    matchedSize = cursor.isNull(3) ? 0L : cursor.getLong(3);
+                                    matchedLastModified = cursor.isNull(4) ? 0L : cursor.getLong(4);
+                                    matchedIsDir = DocumentsContract.Document.MIME_TYPE_DIR.equals(matchedMime);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if (nextDocId == null) {
+                        currentDocId = null;
+                        break;
+                    }
+                    currentDocId = nextDocId;
+                    if (!isLast && !matchedIsDir) {
+                        currentDocId = null;
+                        break;
+                    }
                 }
 
                 JSObject res = new JSObject();
-                if (current == null || !current.exists()) {
+                if (currentDocId == null) {
                     res.put("entry", JSONObject.NULL);
                     call.resolve(res);
                     return;
                 }
 
+                Uri contentUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, currentDocId);
                 JSObject entry = new JSObject();
-                entry.put("name", current.getName() != null ? current.getName() : "");
+                entry.put("name", matchedName);
                 entry.put("relativePath", relativePath);
-                entry.put("kind", current.isDirectory() ? "directory" : "file");
-                entry.put("documentId", DocumentsContract.getDocumentId(current.getUri()));
-                entry.put("contentUri", current.getUri().toString());
-                entry.put("mimeType", current.getType() != null ? current.getType() : "application/octet-stream");
-                entry.put("size", current.length());
-                entry.put("lastModified", current.lastModified());
+                entry.put("kind", matchedIsDir ? "directory" : "file");
+                entry.put("documentId", currentDocId);
+                entry.put("contentUri", contentUri.toString());
+                entry.put("mimeType", matchedMime != null ? matchedMime : "application/octet-stream");
+                entry.put("size", matchedSize);
+                entry.put("lastModified", matchedLastModified);
                 res.put("entry", entry);
                 call.resolve(res);
             } catch (Exception e) {
@@ -391,6 +434,8 @@ public class FoliaNativeBridgePlugin extends Plugin {
     @PluginMethod
     public void readFileBase64(PluginCall call) {
         final String rawContentUri = call.getString("contentUri", "");
+        final Long offsetParam = call.getLong("offset", 0L);
+        final Integer lengthParam = call.getInt("length", -1);
         if (rawContentUri == null || rawContentUri.isEmpty()) {
             call.reject("Missing contentUri");
             return;
@@ -401,16 +446,37 @@ public class FoliaNativeBridgePlugin extends Plugin {
             try {
                 Uri uri = Uri.parse(rawContentUri);
                 ContentResolver resolver = context.getContentResolver();
-                ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+                long offset = offsetParam != null && offsetParam > 0L ? offsetParam : 0L;
+                int maxLength = lengthParam != null && lengthParam > 0 ? lengthParam : -1;
+
+                ByteArrayOutputStream buffer = new ByteArrayOutputStream(maxLength > 0 ? Math.min(maxLength, 262144) : 32768);
                 try (InputStream is = resolver.openInputStream(uri)) {
                     if (is == null) {
                         call.reject("Unable to open InputStream for " + rawContentUri);
                         return;
                     }
+                    long remainingSkip = offset;
+                    while (remainingSkip > 0L) {
+                        long skipped = is.skip(remainingSkip);
+                        if (skipped <= 0L) {
+                            if (is.read() == -1) break;
+                            remainingSkip -= 1L;
+                        } else {
+                            remainingSkip -= skipped;
+                        }
+                    }
+
                     byte[] chunk = new byte[16384];
-                    int read;
-                    while ((read = is.read(chunk)) != -1) {
+                    int totalRead = 0;
+                    while (true) {
+                        int toRead = maxLength > 0
+                            ? Math.min(chunk.length, maxLength - totalRead)
+                            : chunk.length;
+                        if (toRead <= 0) break;
+                        int read = is.read(chunk, 0, toRead);
+                        if (read == -1) break;
                         buffer.write(chunk, 0, read);
+                        totalRead += read;
                     }
                 }
                 byte[] bytes = buffer.toByteArray();
@@ -425,6 +491,83 @@ public class FoliaNativeBridgePlugin extends Plugin {
                 call.resolve(res);
             } catch (Exception e) {
                 call.reject("Failed to read file base64: " + e.getMessage(), e);
+            }
+        });
+    }
+
+    /**
+     * Extracts audio metadata and downscaled embedded cover artwork off the UI thread using Android's
+     * native MediaMetadataRetriever so scanning a large library never reads entire audio files into JS RAM.
+     */
+    @PluginMethod
+    public void extractAudioMetadata(PluginCall call) {
+        final String rawContentUri = call.getString("contentUri", "");
+        final boolean includeCover = Boolean.TRUE.equals(call.getBoolean("includeCover", false));
+        final int maxCoverDimension = Math.max(128, call.getInt("maxCoverDimension", 512));
+
+        if (rawContentUri == null || rawContentUri.isEmpty()) {
+            call.reject("Missing contentUri");
+            return;
+        }
+
+        final Context context = getContext();
+        ioExecutor.execute(() -> {
+            MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+            JSObject res = new JSObject();
+            try {
+                Uri uri = Uri.parse(rawContentUri);
+                retriever.setDataSource(context, uri);
+
+                String title = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE);
+                String artist = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST);
+                String albumArtist = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUMARTIST);
+                String album = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM);
+                String durationStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
+                String bitrateStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE);
+                String trackStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CD_TRACK_NUMBER);
+                String discStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DISC_NUMBER);
+
+                if (title != null && !title.trim().isEmpty()) res.put("title", title.trim());
+                if (artist != null && !artist.trim().isEmpty()) {
+                    res.put("artist", artist.trim());
+                } else if (albumArtist != null && !albumArtist.trim().isEmpty()) {
+                    res.put("artist", albumArtist.trim());
+                }
+                if (album != null && !album.trim().isEmpty()) res.put("album", album.trim());
+
+                long durationMs = parseLeadingLong(durationStr, 0L);
+                if (durationMs > 0L) res.put("durationMs", durationMs);
+
+                long bitrate = parseLeadingLong(bitrateStr, 0L);
+                if (bitrate > 0L) res.put("bitrate", bitrate);
+
+                int trackNumber = (int) parseLeadingLong(trackStr, 0L);
+                if (trackNumber > 0) res.put("trackNumber", trackNumber);
+
+                int discNumber = (int) parseLeadingLong(discStr, 0L);
+                if (discNumber > 0) res.put("discNumber", discNumber);
+
+                if (includeCover) {
+                    byte[] rawArt = retriever.getEmbeddedPicture();
+                    if (rawArt != null && rawArt.length > 0) {
+                        EncodedCoverResult coverResult = downscaleCoverIfNeeded(rawArt, maxCoverDimension);
+                        if (coverResult != null) {
+                            res.put("coverBase64", Base64.encodeToString(coverResult.bytes, Base64.NO_WRAP));
+                            res.put("coverMimeType", coverResult.mimeType);
+                            res.put("coverAssetId", sha256AssetId(coverResult.bytes));
+                        }
+                    }
+                }
+
+                call.resolve(res);
+            } catch (Exception e) {
+                call.resolve(res);
+            } finally {
+                try {
+                    retriever.release();
+                } catch (Exception ignored) {
+                    // Ignore release exception.
+                }
             }
         });
     }
@@ -475,6 +618,97 @@ public class FoliaNativeBridgePlugin extends Plugin {
             // Service may not be running yet.
         }
         call.resolve();
+    }
+
+    private static long parseLeadingLong(@Nullable String raw, long fallback) {
+        if (raw == null || raw.isEmpty()) return fallback;
+        String trimmed = raw.trim();
+        int slashIdx = trimmed.indexOf('/');
+        if (slashIdx > 0) {
+            trimmed = trimmed.substring(0, slashIdx).trim();
+        }
+        try {
+            return Long.parseLong(trimmed);
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
+    }
+
+    @Nullable
+    private static EncodedCoverResult downscaleCoverIfNeeded(byte[] rawBytes, int maxDimension) {
+        try {
+            BitmapFactory.Options bounds = new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.length, bounds);
+            int width = bounds.outWidth;
+            int height = bounds.outHeight;
+            String outMime = bounds.outMimeType != null ? bounds.outMimeType : "image/jpeg";
+
+            if (width <= 0 || height <= 0) {
+                return new EncodedCoverResult(rawBytes, outMime);
+            }
+            if (width <= maxDimension && height <= maxDimension && rawBytes.length <= 350_000) {
+                return new EncodedCoverResult(rawBytes, outMime);
+            }
+
+            int sampleSize = 1;
+            int maxSide = Math.max(width, height);
+            while ((maxSide / (sampleSize * 2)) >= maxDimension) {
+                sampleSize *= 2;
+            }
+
+            BitmapFactory.Options decodeOpts = new BitmapFactory.Options();
+            decodeOpts.inSampleSize = sampleSize;
+            decodeOpts.inPreferredConfig = Bitmap.Config.RGB_565;
+            Bitmap decoded = BitmapFactory.decodeByteArray(rawBytes, 0, rawBytes.length, decodeOpts);
+            if (decoded == null) {
+                return new EncodedCoverResult(rawBytes, outMime);
+            }
+
+            Bitmap target = decoded;
+            int decodedMax = Math.max(decoded.getWidth(), decoded.getHeight());
+            if (decodedMax > maxDimension) {
+                float scale = (float) maxDimension / (float) decodedMax;
+                int scaledW = Math.max(1, Math.round(decoded.getWidth() * scale));
+                int scaledH = Math.max(1, Math.round(decoded.getHeight() * scale));
+                Bitmap scaled = Bitmap.createScaledBitmap(decoded, scaledW, scaledH, true);
+                if (scaled != decoded) {
+                    decoded.recycle();
+                    target = scaled;
+                }
+            }
+
+            ByteArrayOutputStream out = new ByteArrayOutputStream(65536);
+            target.compress(Bitmap.CompressFormat.JPEG, 84, out);
+            target.recycle();
+            return new EncodedCoverResult(out.toByteArray(), "image/jpeg");
+        } catch (Exception ignored) {
+            return new EncodedCoverResult(rawBytes, "image/jpeg");
+        }
+    }
+
+    private static String sha256AssetId(byte[] bytes) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(bytes);
+            StringBuilder sb = new StringBuilder("sha256:");
+            for (byte b : digest) {
+                sb.append(String.format(Locale.ROOT, "%02x", b & 0xff));
+            }
+            return sb.toString();
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    private static final class EncodedCoverResult {
+        final byte[] bytes;
+        final String mimeType;
+
+        EncodedCoverResult(byte[] bytes, String mimeType) {
+            this.bytes = bytes;
+            this.mimeType = mimeType;
+        }
     }
 
     private static boolean isRelevantMusicOrLyricOrCoverFile(String fileName) {

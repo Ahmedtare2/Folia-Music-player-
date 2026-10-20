@@ -14,6 +14,9 @@ import {
 import { type LocalLibraryDisplayCatalog, buildLocalQueue } from '../../services/playbackAdapters';
 import {
     LOCAL_MUSIC_SCAN_PROGRESS_EVENT,
+    type LocalMusicScanProgressDetail,
+    cancelLocalLibraryScan,
+    getActiveLocalMusicScanProgress,
     importFolder,
     resyncAllFolders,
 } from '../../services/localMusicService';
@@ -75,6 +78,9 @@ interface MobileAppContainerProps {
     isCommandPaletteOpen: boolean;
     onCloseCommandPalette: () => void;
     onVisualizerVisibilityChange?: (visible: boolean) => void;
+    isLatticeOpen?: boolean;
+    onOpenLattice?: () => void;
+    onCloseLattice?: () => void;
 }
 
 export const MobileAppContainer: React.FC<MobileAppContainerProps> = ({
@@ -122,6 +128,9 @@ export const MobileAppContainer: React.FC<MobileAppContainerProps> = ({
     isCommandPaletteOpen,
     onCloseCommandPalette,
     onVisualizerVisibilityChange,
+    isLatticeOpen = false,
+    onOpenLattice,
+    onCloseLattice,
 }) => {
     const { t } = useTranslation();
     const activeLocalLyricsSource = usePlaybackStore(state => state.activeLocalLyricsSource);
@@ -154,24 +163,26 @@ export const MobileAppContainer: React.FC<MobileAppContainerProps> = ({
     );
 
     const [isBusy, setIsBusy] = useState(false);
-    const [scanPercent, setScanPercent] = useState(0);
+    const [scanProgress, setScanProgress] = useState<LocalMusicScanProgressDetail | null>(() => getActiveLocalMusicScanProgress());
+    const scanPercent = useMemo(() => {
+        if (!scanProgress?.active) return 0;
+        if (!scanProgress.totalSongs || scanProgress.totalSongs <= 0) return 5;
+        return Math.min(100, Math.round(((scanProgress.completedSongs ?? 0) / scanProgress.totalSongs) * 100));
+    }, [scanProgress]);
 
     useEffect(() => {
         if (typeof window === 'undefined') return undefined;
         const onScanProgress = (event: Event) => {
-            const detail = (event as CustomEvent<{ active?: boolean; completedSongs?: number; totalSongs?: number }>).detail;
-            if (!detail || !detail.active) {
-                setScanPercent(0);
-                return;
-            }
-            const pct = detail.totalSongs
-                ? Math.min(100, Math.round(((detail.completedSongs ?? 0) / detail.totalSongs) * 100))
-                : 0;
-            setScanPercent(pct);
+            const detail = (event as CustomEvent<LocalMusicScanProgressDetail>).detail;
+            setScanProgress(detail ? { ...detail } : null);
         };
         window.addEventListener(LOCAL_MUSIC_SCAN_PROGRESS_EVENT, onScanProgress);
         return () => window.removeEventListener(LOCAL_MUSIC_SCAN_PROGRESS_EVENT, onScanProgress);
     }, []);
+
+    const handleCancelScan = useCallback(() => {
+        cancelLocalLibraryScan(scanProgress?.folderName);
+    }, [scanProgress?.folderName]);
 
     const handleImportFolder = useCallback(async () => {
         if (isBusy) return;
@@ -300,8 +311,10 @@ export const MobileAppContainer: React.FC<MobileAppContainerProps> = ({
             onImportFolder={handleImportFolder}
             onRefreshFolders={handleRefreshFolders}
             onImportPlaylistFile={handleImportPlaylist}
-            isImportingOrScanning={isBusy || scanPercent > 0}
+            isImportingOrScanning={isBusy || Boolean(scanProgress?.active)}
             scanPercent={scanPercent}
+            scanProgress={scanProgress}
+            onCancelScan={handleCancelScan}
             onPlayLocalSongList={(song, queue) => {
                 void onPlayLocalSong(song, queue);
             }}
@@ -321,6 +334,9 @@ export const MobileAppContainer: React.FC<MobileAppContainerProps> = ({
             onOpenFullSettingsModal={() => openSettings('options')}
             externalModals={externalModals}
             onVisualizerVisibilityChange={onVisualizerVisibilityChange}
+            isLatticeOpen={isLatticeOpen}
+            onOpenLattice={onOpenLattice}
+            onCloseLattice={onCloseLattice}
         />
     );
 };

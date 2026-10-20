@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { LocalPlaylist, LocalSong } from '@/types';
+import type { LocalPlaylist, LocalSong, LyricLine, Word } from '@/types';
 import {
     INITIAL_MOBILE_NAVIGATION_STATE,
     type MobileNavigationState,
@@ -9,14 +9,23 @@ import {
     isMobileVisualizerVisible,
     resolveLocalSongAlbumText,
     resolveLocalSongArtistText,
+    resolveLocalSongCoverThumb,
     stepMobileBackNavigation,
 } from '@/components/mobile/mobileNavigationModel';
+import {
+    computeActiveLyricLineIndices,
+    computeTimedWordProgressPercent,
+} from '@/components/mobile/MobileNowPlayingSheet';
+import {
+    resolveVisualizerBackdropBlur,
+    resolveVisualizerShowText,
+} from '@/components/app/presentation/playerVisualizerBackdrop';
+import { shouldMountPlayerVisualizer } from '@/components/app/presentation/playerVisualizerMount';
 import {
     DESKTOP_MAX_CANVAS_DPR,
     MOBILE_MAX_CANVAS_DPR,
     MOBILE_MAX_PIXI_RESOLUTION,
     MOBILE_MAX_TEXTURE_AXIS_PX,
-    isMobileGpuConstrained,
     resolveMobileCanvasDpr,
     resolveMobileLumiereQuality,
     resolveMobilePixiResolution,
@@ -31,7 +40,8 @@ import { minimizeAndroidApp } from '@/services/android/foliaAndroidBridge';
 // test/unit/mobile/mobileAndroidPlayerPhase4.test.ts
 // Verifies Phase 4 mobile-first Android music player navigation, hardware Back stack,
 // local song search/sort/grouping (including Arabic & English), GPU/DPR/Pixi budgets,
-// and visibility-driven visualizer suspension.
+// synchronized TTML syllable & overlapping vocal lyrics, artwork resolution, and
+// non-overlapping player/visualizer/Lattice presentation.
 
 type MakeLocalSongInput = Omit<Partial<LocalSong>, 'importedMetadata'> & {
     id: string;
@@ -218,6 +228,7 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
                 title: 'تملي معاك',
                 folderName: 'Arabic Classics',
                 addedAt: 1000,
+                localCoverAssetId: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 importedMetadata: { artistNames: ['عمرو دياب'], albumName: 'تملي معاك' },
             }),
             makeLocalSong({
@@ -225,6 +236,7 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
                 title: 'Nour El Ain',
                 folderName: 'Arabic Classics',
                 addedAt: 3000,
+                onlineMetadata: { coverUrl: 'https://example.com/nour.jpg' },
                 importedMetadata: { artistNames: ['Amr Diab'], albumName: 'Nour El Ain' },
             }),
             makeLocalSong({
@@ -270,13 +282,24 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
             expect(collections.artists).toHaveLength(3);
             // Folders includes virtual "All Songs" + "Arabic Classics" + "Synthwave"
             expect(collections.folders).toHaveLength(3);
-            expect(collections. playlists).toHaveLength(1);
+            expect(collections.playlists).toHaveLength(1);
             expect(collections.playlists[0]?.songs.map(s => s.id)).toEqual(['s1', 's2']);
         });
 
-        it('identifies the currently playing local song and resolves artist/album labels', () => {
+        it('identifies the currently playing local song and resolves artist/album labels and cover artwork', () => {
             expect(resolveLocalSongArtistText(songs[0]!)).toBe('عمرو دياب');
             expect(resolveLocalSongAlbumText(songs[0]!)).toBe('تملي معاك');
+            Object.defineProperty(globalThis.window, "isSecureContext", { configurable: true, value: true });
+            Object.defineProperty(globalThis, "navigator", {
+                configurable: true,
+                value: {
+                    ...(globalThis.navigator || {}),
+                    storage: { getDirectory: vi.fn() },
+                },
+            });
+            expect(resolveLocalSongCoverThumb(songs[0]!, 1024)).toContain(encodeURIComponent("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+            expect(resolveLocalSongCoverThumb(songs[1]!, 1024)).toBe('https://example.com/nour.jpg');
+            expect(resolveLocalSongCoverThumb(songs[2]!, 1024)).toBeUndefined();
             expect(
                 isLocalSongCurrentlyPlaying(songs[0]!, {
                     id: -101,
@@ -294,6 +317,88 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
                     album: { id: 0, name: 'تملي معاك' },
                     localRef: { songId: 's1' },
                 } as any),
+            ).toBe(false);
+        });
+    });
+
+    describe('Synchronized TTML Syllable Progress & Overlapping Vocal Lines', () => {
+        it('computes piecewise TTML syllable progress accurately alongside linear word timing', () => {
+            const wordWithSyllables: Word = {
+                text: 'حبيبي',
+                startTime: 10,
+                endTime: 14,
+                syllables: [
+                    { text: 'حبي', startTime: 10, endTime: 11 }, // 3 chars out of 5 -> 0% to 60%
+                    { text: 'بي', startTime: 11, endTime: 14 },  // 2 chars out of 5 -> 60% to 100%
+                ],
+            };
+
+            expect(computeTimedWordProgressPercent(wordWithSyllables, 9.5)).toBe(0);
+            expect(computeTimedWordProgressPercent(wordWithSyllables, 10.5)).toBeCloseTo(30, 1);
+            expect(computeTimedWordProgressPercent(wordWithSyllables, 11.0)).toBeCloseTo(60, 1);
+            expect(computeTimedWordProgressPercent(wordWithSyllables, 12.5)).toBeCloseTo(80, 1);
+            expect(computeTimedWordProgressPercent(wordWithSyllables, 14.0)).toBe(100);
+        });
+
+        it('keeps overlapping vocal lines simultaneously active instead of prematurely dimming them', () => {
+            const lines: LyricLine[] = [
+                {
+                    startTime: 5,
+                    endTime: 12,
+                    fullText: 'تملي معاك',
+                    words: [{ text: 'تملي', startTime: 5, endTime: 8 }, { text: 'معاك', startTime: 8, endTime: 12 }],
+                    renderHints: { renderEndTime: 12 } as any,
+                },
+                {
+                    startTime: 9,
+                    endTime: 15,
+                    fullText: 'ولو حتى بعيد عني',
+                    words: [{ text: 'ولو', startTime: 9, endTime: 11 }, { text: 'حتى', startTime: 11, endTime: 15 }],
+                    agentId: 'v2',
+                },
+            ];
+
+            // At t = 10.5s, primaryLineIndex has advanced to 1, but line 0 is still singing until 12s
+            const activeAtOverlap = computeActiveLyricLineIndices(lines, 1, 10.5);
+            expect(activeAtOverlap.has(0)).toBe(true);
+            expect(activeAtOverlap.has(1)).toBe(true);
+
+            // At t = 13.0s, line 0 has finished and only line 1 remains active
+            const activeAfterOverlap = computeActiveLyricLineIndices(lines, 1, 13.0);
+            expect(activeAfterOverlap.has(0)).toBe(false);
+            expect(activeAfterOverlap.has(1)).toBe(true);
+        });
+    });
+
+    describe('Mobile Visualizer Mount, ShowText & Backdrop Blur (Non-Overlapping Layout)', () => {
+        it('mounts visualizer, shows text, and disables backdrop blur when mobile visualizer is active even if currentView is home', () => {
+            expect(
+                shouldMountPlayerVisualizer({
+                    currentView: 'home',
+                    hasLatticeExited: true,
+                    shouldRevealHomeSurface: true,
+                    libraryOccludesPlayer: true,
+                    hasLibraryOcclusionSettled: true,
+                    isMobileVisualizerActive: true,
+                }),
+            ).toBe(true);
+
+            expect(
+                resolveVisualizerShowText({
+                    currentView: 'home',
+                    isSettingsModalOpen: false,
+                    isPanelOpen: false,
+                    backdropLyrics: false,
+                    isMobileVisualizerActive: true,
+                }),
+            ).toBe(true);
+
+            expect(
+                resolveVisualizerBackdropBlur({
+                    shouldRevealHomeSurface: true,
+                    backdropBlur: true,
+                    isMobileVisualizerActive: true,
+                }),
             ).toBe(false);
         });
     });

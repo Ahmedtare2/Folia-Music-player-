@@ -6,6 +6,7 @@ import {
     Disc3,
     FileText,
     FileUp,
+    Grid,
     Heart,
     ListMusic,
     Music2,
@@ -25,6 +26,7 @@ import {
 } from 'lucide-react';
 import {
     type LyricData,
+    type LyricLine,
     PlayerState,
     type SongResult,
     type Theme,
@@ -32,6 +34,8 @@ import {
 } from '../../types';
 import { detectTextDirection, resolveTokenDirection, type TextDirection } from '../../utils/lyrics/arabicText';
 import type { Word as WordType } from '../../types';
+import { getCachedLocalCoverObjectUrl, resolveLocalCoverObjectUrl } from '../../services/localCoverRuntime';
+import { isLocalCoverAssetUrl } from '../../services/localCoverAssetUrl';
 import { VISUALIZER_REGISTRY, getVisualizerModeLabel } from '../visualizer/registry';
 import type { MobilePlayerDisplayMode, MobileSubDrawer } from './mobileNavigationModel';
 
@@ -41,6 +45,60 @@ import type { MobilePlayerDisplayMode, MobileSubDrawer } from './mobileNavigatio
 //   - 'cover': Album-art hero + artwork-tinted OLED lighting + 2-line live synchronized lyric preview
 //   - 'lyrics': Synchronized scrolling lyrics reader with full Arabic RTL shaping + word/syllable glow sweep
 //   - 'stage': Full-screen Folia visualizer canvas with tap-to-hide chrome & quick style switcher
+
+export const computeTimedWordProgressPercent = (word: WordType, timeSec: number): number => {
+    if (timeSec <= word.startTime) return 0;
+    if (timeSec >= word.endTime) return 100;
+
+    const syllables = word.syllables;
+    if (syllables && syllables.length > 1) {
+        const totalChars = syllables.reduce((sum, s) => sum + Math.max(1, Array.from(s.text || '').length), 0);
+        if (totalChars > 0) {
+            let charAccumulator = 0;
+            for (const syl of syllables) {
+                const sylChars = Math.max(1, Array.from(syl.text || '').length);
+                const startFrac = charAccumulator / totalChars;
+                const endFrac = (charAccumulator + sylChars) / totalChars;
+                if (timeSec <= syl.startTime) {
+                    return Math.max(0, Math.min(100, startFrac * 100));
+                }
+                if (timeSec < syl.endTime) {
+                    const sylDur = Math.max(0.01, syl.endTime - syl.startTime);
+                    const localProgress = Math.max(0, Math.min(1, (timeSec - syl.startTime) / sylDur));
+                    return Math.max(0, Math.min(100, (startFrac + localProgress * (endFrac - startFrac)) * 100));
+                }
+                charAccumulator += sylChars;
+            }
+            return 100;
+        }
+    }
+
+    const dur = Math.max(0.05, word.endTime - word.startTime);
+    return Math.max(0, Math.min(100, ((timeSec - word.startTime) / dur) * 100));
+};
+
+export const computeActiveLyricLineIndices = (
+    lines: LyricLine[],
+    primaryLineIndex: number,
+    timeSec: number,
+): Set<number> => {
+    const active = new Set<number>();
+    if (primaryLineIndex >= 0 && primaryLineIndex < lines.length) {
+        active.add(primaryLineIndex);
+    }
+    if (!Number.isFinite(timeSec) || lines.length === 0) {
+        return active;
+    }
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line) continue;
+        const lineEnd = line.renderHints?.renderEndTime ?? line.endTime;
+        if (timeSec >= line.startTime && timeSec <= lineEnd) {
+            active.add(i);
+        }
+    }
+    return active;
+};
 
 interface MobileNowPlayingSheetProps {
     isOpen: boolean;
@@ -89,6 +147,7 @@ interface MobileNowPlayingSheetProps {
     onRemoveQueueSong: (index: number) => void;
     onSaveQueueAsPlaylist: (name: string) => Promise<void>;
     onOpenVisualizerSettings: () => void;
+    onOpenLattice?: () => void;
 }
 
 const formatSeconds = (sec: number): string => {
@@ -123,7 +182,6 @@ const MobileTimedWord: React.FC<MobileTimedWordProps> = React.memo(({
     const applyWordProgress = useCallback((timeSec: number) => {
         const el = spanRef.current;
         if (!el) return;
-        const dur = Math.max(0.05, word.endTime - word.startTime);
         if (timeSec < word.startTime) {
             el.style.color = inactiveColor;
             el.style.backgroundImage = '';
@@ -140,14 +198,14 @@ const MobileTimedWord: React.FC<MobileTimedWordProps> = React.memo(({
             el.style.textShadow = 'none';
             return;
         }
-        const pct = Math.max(0, Math.min(100, ((timeSec - word.startTime) / dur) * 100));
+        const pct = computeTimedWordProgressPercent(word, timeSec);
         const angle = wordDir === 'rtl' ? '270deg' : '90deg';
         el.style.color = 'transparent';
         el.style.backgroundImage = `linear-gradient(${angle}, ${activeColor} 0%, ${activeColor} ${pct.toFixed(1)}%, ${inactiveColor} ${Math.min(100, pct + 12).toFixed(1)}%, ${inactiveColor} 100%)`;
         el.style.webkitBackgroundClip = 'text';
         el.style.backgroundClip = 'text';
         el.style.textShadow = `0 0 18px color-mix(in srgb, ${glowColor} 45%, transparent)`;
-    }, [activeColor, glowColor, inactiveColor, passedColor, word.endTime, word.startTime, wordDir]);
+    }, [activeColor, glowColor, inactiveColor, passedColor, word, wordDir]);
 
     useEffect(() => {
         applyWordProgress(currentTime.get());
@@ -218,6 +276,7 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
     onRemoveQueueSong,
     onSaveQueueAsPlaylist,
     onOpenVisualizerSettings,
+    onOpenLattice,
 }) => {
     const { t } = useTranslation();
     const progressFillRef = useRef<HTMLDivElement>(null);
@@ -232,6 +291,75 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
     const [stageChromeHidden, setStageChromeHidden] = useState(false);
     const [newPlaylistName, setNewPlaylistName] = useState('');
     const [showSavePlaylistInput, setShowSavePlaylistInput] = useState(false);
+    const [resolvedCoverUrl, setResolvedCoverUrl] = useState<string | null>(() => {
+        if (!coverUrl) return null;
+        return getCachedLocalCoverObjectUrl(coverUrl) ?? coverUrl;
+    });
+    const [coverLoadError, setCoverLoadError] = useState(false);
+
+    useEffect(() => {
+        setCoverLoadError(false);
+        if (!coverUrl) {
+            setResolvedCoverUrl(null);
+            return undefined;
+        }
+        const cached = getCachedLocalCoverObjectUrl(coverUrl);
+        if (cached) {
+            setResolvedCoverUrl(cached);
+            return undefined;
+        }
+        if (!isLocalCoverAssetUrl(coverUrl)) {
+            setResolvedCoverUrl(coverUrl);
+            return undefined;
+        }
+        setResolvedCoverUrl(coverUrl);
+        let cancelled = false;
+        void resolveLocalCoverObjectUrl(coverUrl).then((blobUrl) => {
+            if (!cancelled && blobUrl) {
+                setResolvedCoverUrl(blobUrl);
+                setCoverLoadError(false);
+            }
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [coverUrl]);
+
+    const lyricLines = useMemo(() => lyrics?.lines ?? [], [lyrics]);
+    const hasRenderableLines = lyricLines.length > 0 && !(lyricLines.length === 1 && lyricLines[0]?.fullText === '......');
+
+    // Track all concurrently active overlapping lyric lines from lyricCurrentTime
+    const [activeLineSetKey, setActiveLineSetKey] = useState<string>(() => {
+        const indices = Array.from(computeActiveLyricLineIndices(lyricLines, currentLineIndex, lyricCurrentTime.get())).sort((a, b) => a - b);
+        return indices.join(',');
+    });
+
+    useEffect(() => {
+        const indices = Array.from(computeActiveLyricLineIndices(lyricLines, currentLineIndex, lyricCurrentTime.get())).sort((a, b) => a - b);
+        const key = indices.join(',');
+        setActiveLineSetKey(prev => (prev === key ? prev : key));
+    }, [currentLineIndex, lyricCurrentTime, lyricLines]);
+
+    useMotionValueEvent(lyricCurrentTime, 'change', (latest: number) => {
+        if (!isOpen || displayMode !== 'lyrics' || lyricLines.length === 0) return;
+        const indices = Array.from(computeActiveLyricLineIndices(lyricLines, currentLineIndex, latest)).sort((a, b) => a - b);
+        const key = indices.join(',');
+        setActiveLineSetKey(prev => (prev === key ? prev : key));
+    });
+
+    const activeLineIndices = useMemo(() => {
+        const set = new Set<number>();
+        if (currentLineIndex >= 0) set.add(currentLineIndex);
+        if (activeLineSetKey) {
+            for (const part of activeLineSetKey.split(',')) {
+                const parsed = Number(part);
+                if (Number.isInteger(parsed) && parsed >= 0) {
+                    set.add(parsed);
+                }
+            }
+        }
+        return set;
+    }, [activeLineSetKey, currentLineIndex]);
 
     const updateScrubberDOM = useCallback((timeValue: number, force = false) => {
         const clamped = duration > 0 ? Math.max(0, Math.min(timeValue, duration)) : Math.max(0, timeValue);
@@ -265,6 +393,14 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
         updateScrubberDOM(latest, false);
     });
 
+    // Reset lyric scroll position on track change
+    useEffect(() => {
+        userScrollingLyricsUntilRef.current = 0;
+        if (lyricsListRef.current && currentLineIndex <= 0) {
+            lyricsListRef.current.scrollTo({ top: 0, behavior: 'auto' });
+        }
+    }, [currentSong?.id]);
+
     // Auto-scroll active lyric line into center of the lyrics reader unless user recently scrolled manually
     useEffect(() => {
         if (!isOpen || displayMode !== 'lyrics' || currentLineIndex < 0) return;
@@ -281,9 +417,6 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
         }
     }, [currentLineIndex, displayMode, isOpen]);
 
-    const lyricLines = useMemo(() => lyrics?.lines ?? [], [lyrics]);
-    const hasRenderableLines = lyricLines.length > 0 && !(lyricLines.length === 1 && lyricLines[0]?.fullText === '......');
-
     if (!isOpen || !currentSong) {
         return null;
     }
@@ -296,6 +429,7 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
     const artistDir = detectTextDirection(artistName || '');
     const activeLine = currentLineIndex >= 0 && currentLineIndex < lyricLines.length ? lyricLines[currentLineIndex] : null;
     const nextLine = currentLineIndex + 1 >= 0 && currentLineIndex + 1 < lyricLines.length ? lyricLines[currentLineIndex + 1] : null;
+    const effectiveCover = !coverLoadError ? resolvedCoverUrl : null;
 
     const handleLyricFileChosen = async (event: React.ChangeEvent<HTMLInputElement>) => {
         const file = event.target.files?.[0];
@@ -396,6 +530,17 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                 </div>
 
                 <div className="flex items-center gap-1.5">
+                    {onOpenLattice && (
+                        <button
+                            type="button"
+                            onClick={onOpenLattice}
+                            className="flex h-11 w-11 items-center justify-center rounded-full bg-white/[0.07] text-zinc-200 backdrop-blur-md active:scale-95 transition-all"
+                            aria-label="Open Lattice queue collage"
+                            title="Lattice Queue Collage"
+                        >
+                            <Grid size={18} />
+                        </button>
+                    )}
                     <button
                         type="button"
                         onClick={() => onChangeSubDrawer(subDrawer === 'lyrics-tools' ? 'none' : 'lyrics-tools')}
@@ -437,11 +582,12 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                             }}
                             aria-label="Switch to synchronized lyrics view"
                         >
-                            {coverUrl ? (
+                            {effectiveCover ? (
                                 <img
-                                    src={coverUrl}
+                                    src={effectiveCover}
                                     alt={currentSong.name}
                                     className="h-full w-full object-cover"
+                                    onError={() => setCoverLoadError(true)}
                                 />
                             ) : (
                                 <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-gradient-to-br from-zinc-800/80 to-zinc-950 text-zinc-500">
@@ -583,11 +729,19 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                 className="hide-scrollbar flex-1 overflow-y-auto overscroll-contain py-10 px-1 space-y-5"
                             >
                                 {lyricLines.map((line, index) => {
-                                    const isActive = index === currentLineIndex;
-                                    const isPassed = index < currentLineIndex;
+                                    const isActive = activeLineIndices.has(index);
+                                    const isPassed = !isActive && index < currentLineIndex;
                                     const lineDir = detectTextDirection(line.fullText);
                                     const isRtl = lineDir === 'rtl';
+                                    const isDuetSecondAgent = Boolean(
+                                        line.agentId && (line.agentId === 'v2' || line.agentId === '2' || line.agentId.endsWith('2')),
+                                    );
                                     const baseRem = 1.35 * lyricsFontScale;
+                                    const bgVocals = line.backgroundVocals && line.backgroundVocals.length > 0
+                                        ? line.backgroundVocals
+                                        : line.backgroundVocal
+                                            ? [line.backgroundVocal]
+                                            : [];
 
                                     return (
                                         <div
@@ -596,7 +750,9 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                             dir={lineDir}
                                             onClick={() => onLyricLineSeek(line.startTime)}
                                             className={`cursor-pointer rounded-2xl px-3 py-2 transition-all duration-300 ${
-                                                isRtl ? 'text-right' : 'text-left'
+                                                isDuetSecondAgent
+                                                    ? (isRtl ? 'text-left' : 'text-right')
+                                                    : (isRtl ? 'text-right' : 'text-left')
                                             } ${
                                                 isActive
                                                     ? 'bg-white/[0.06] scale-[1.01] opacity-100'
@@ -608,7 +764,9 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                         >
                                             {/* Main Timed Lyric Words with Arabic RTL shaping & directional highlight sweep */}
                                             <div
-                                                className="flex flex-wrap items-baseline gap-x-1.5 gap-y-1 font-bold leading-snug"
+                                                className={`flex flex-wrap items-baseline gap-x-1.5 gap-y-1 font-bold leading-snug ${
+                                                    isDuetSecondAgent ? 'justify-end' : 'justify-start'
+                                                }`}
                                                 style={{
                                                     fontSize: `${baseRem.toFixed(2)}rem`,
                                                     direction: lineDir,
@@ -640,18 +798,35 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                             </div>
 
                                             {/* Overlapping Background / Harmony Vocals */}
-                                            {line.backgroundVocals && line.backgroundVocals.length > 0 && (
+                                            {bgVocals.length > 0 && (
                                                 <div className="mt-1 space-y-0.5">
-                                                    {line.backgroundVocals.map((bg, bgIdx) => {
+                                                    {bgVocals.map((bg, bgIdx) => {
                                                         const bgDir = detectTextDirection(bg.text);
                                                         return (
                                                             <div
                                                                 key={bgIdx}
                                                                 dir={bgDir}
-                                                                className="text-xs font-medium italic text-zinc-300/80"
-                                                                style={{ unicodeBidi: 'isolate' }}
+                                                                className="flex flex-wrap items-baseline gap-x-1 text-xs font-medium italic text-zinc-300/80"
+                                                                style={{ unicodeBidi: 'isolate', direction: bgDir }}
                                                             >
-                                                                ({bg.text})
+                                                                <span>(</span>
+                                                                {isActive && bg.words && bg.words.length > 0 ? (
+                                                                    bg.words.map((bgWord, bwIdx) => (
+                                                                        <MobileTimedWord
+                                                                            key={`bg-${bgIdx}-${bwIdx}-${bgWord.startTime}`}
+                                                                            word={bgWord}
+                                                                            currentTime={lyricCurrentTime}
+                                                                            activeColor={primaryColor}
+                                                                            inactiveColor="rgba(255,255,255,0.42)"
+                                                                            passedColor="rgba(255,255,255,0.78)"
+                                                                            glowColor={accentColor}
+                                                                            lineDirection={bgDir}
+                                                                        />
+                                                                    ))
+                                                                ) : (
+                                                                    <span>{bg.text}</span>
+                                                                )}
+                                                                <span>)</span>
                                                             </div>
                                                         );
                                                     })}
@@ -1058,6 +1233,19 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                             <p className="text-xs text-zinc-400">{playQueue.length} tracks</p>
                         </div>
                         <div className="flex items-center gap-2">
+                            {onOpenLattice && (
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        onChangeSubDrawer('none');
+                                        onOpenLattice();
+                                    }}
+                                    className="flex items-center gap-1 rounded-full border border-white/15 bg-white/[0.08] px-3 py-1.5 text-xs font-medium text-white"
+                                >
+                                    <Grid size={13} />
+                                    <span>Lattice Collage</span>
+                                </button>
+                            )}
                             <button
                                 type="button"
                                 onClick={() => setShowSavePlaylistInput(prev => !prev)}
