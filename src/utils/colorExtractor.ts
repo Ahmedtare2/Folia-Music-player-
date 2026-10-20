@@ -1,4 +1,5 @@
 import { extractRepresentativeColorsFromPixels } from './colorPalette';
+import { extractAssetIdFromCoverUrl, resolveLocalCoverObjectUrl } from '../services/localCoverRuntime';
 
 // src/utils/colorExtractor.ts
 
@@ -12,8 +13,12 @@ interface RGB {
  * 把图片缩到 50×50 读出像素（crossOrigin 匿名请求）。图片加载失败、没有 CORS 头、画布被污染（读像素抛
  * SecurityError）时都返回 null。silent：失败时不打 warn（墙上一批头像取色时用，失败只是回退）。
  */
-export const loadImagePixels = (imageUrl: string, { silent = false }: { silent?: boolean } = {}): Promise<Uint8ClampedArray | null> => (
-    new Promise(resolve => {
+export const loadImagePixels = async (imageUrl: string, { silent = false }: { silent?: boolean } = {}): Promise<Uint8ClampedArray | null> => {
+    const resolvedUrl = extractAssetIdFromCoverUrl(imageUrl)
+        ? (await resolveLocalCoverObjectUrl(imageUrl)) || imageUrl
+        : imageUrl;
+
+    return new Promise(resolve => {
         const img = new Image();
         img.crossOrigin = "Anonymous";
 
@@ -45,9 +50,9 @@ export const loadImagePixels = (imageUrl: string, { silent = false }: { silent?:
             if (!silent) console.warn("Failed to load image for color extraction", e);
             resolve(null);
         };
-        img.src = imageUrl;
-    })
-);
+        img.src = resolvedUrl;
+    });
+};
 
 const extractVibrantColorsFromPixels = (imageData: Uint8ClampedArray, count: number): string[] => {
     const colors: RGB[] = [];

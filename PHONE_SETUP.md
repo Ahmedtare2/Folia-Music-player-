@@ -2,12 +2,21 @@
 
 This guide explains how to deploy your completed **Folia Android** project and build an installable **Android Debug APK** using **only your Android phone's web browser** and **GitHub Actions** — no PC, no Android Studio, and no terminal required.
 
-## Before You Begin: Download the 2 Files to Your Phone
+## Quick Fix (If You Already Uploaded `folia-android-source.zip` to Your Repo)
+
+If you already uploaded **`folia-android-source.zip`** to your GitHub repository and saw the **`refusing to allow a GitHub App to create or update workflow`** push error, you **do not** even need to re-upload the 17.8 MiB ZIP file! Follow these 4 steps on your phone:
+
+1. Open your repository on `github.com` in your phone's browser and navigate to **`.github/workflows/import-and-build-android.yml`**.
+2. Tap the **pencil icon (Edit this file)** in the top-right corner of the file view (if hidden on mobile, tap the **`⋯`** menu next to the file name and select **Edit file**).
+3. Select all existing text in the editor, replace it with the updated **`import-and-build-android.yml`** provided with this guide, and tap **Commit changes...** → **Commit changes** directly to `main`.
+4. **That's it!** Committing the updated workflow file automatically triggers **Import Source ZIP and Build Android Debug APK** in the **Actions** tab using the `folia-android-source.zip` already in your repository, commits the extracted app files without touching `.github/workflows/*`, and publishes **`Folia-Android-debug-APK`**.
+
+## Before You Begin (Fresh Repository Setup): Download the 2 Files to Your Phone
 
 Make sure you have downloaded these files onto your Android phone:
 
-1. **`import-and-build-android.yml`** — The GitHub Actions workflow file that automatically unpacks your ZIP, commits the project files, and builds the Android APK.
-2. **`folia-android-source.zip`** — The complete, ready-to-build Folia Android project archive.
+1. **`import-and-build-android.yml`** — The GitHub Actions workflow file that automatically unpacks your ZIP, normalizes and commits the project files, and builds the Android APK.
+2. **`folia-android-source.zip`** — The complete, ready-to-build Folia Android project archive (`17.76 MiB`, well under GitHub's `25 MiB` mobile browser upload limit).
 
 > **Important Tip for Mobile Browsers**: When using `github.com` in Chrome on Android, open the Chrome menu (`⋮` in the top-right corner) and check **Desktop site** if any button (such as **Add file → Upload files**) is hidden by the compact mobile layout.
 
@@ -15,7 +24,7 @@ Make sure you have downloaded these files onto your Android phone:
 
 1. Open [github.com](https://github.com/) in your phone's browser and sign in.
 2. Tap the **`+`** icon in the top-right corner and select **New repository**.
-3. Enter a **Repository name** (for example, `folia-android`).
+3. Enter a **Repository name** (for example, `Folia-Music-player-`).
 4. Choose **Public** or **Private** (GitHub Actions includes free build minutes on Public repositories and standard free-tier minutes on Private repositories).
 5. **Crucial**: Check **Add a README file** so GitHub initializes your default **`main`** branch immediately.
 6. Scroll to the bottom and tap **Create repository**.
@@ -50,7 +59,7 @@ You must create the workflow file **before** uploading the ZIP file so GitHub kn
    - Tap the **Run workflow** dropdown button on the right, keep `main` selected, and tap the green **Run workflow** button.
 4. Tap the active workflow run title to watch live progress. The build typically takes **5 to 9 minutes**:
    - It validates and extracts `folia-android-source.zip`.
-   - It commits the extracted project files directly into your repository root.
+   - It commits the extracted project files directly into your repository root (while excluding `.github/workflows/*` so GitHub's `GITHUB_TOKEN` push rules are satisfied).
    - It installs Node.js 24, JDK 21, Android SDK 36, and Gradle 8.14.3, builds the web bundle, syncs Capacitor, and compiles the Android Debug APK.
 
 ## Step 5: Download `Folia-Android-debug-APK` from GitHub
@@ -61,7 +70,7 @@ You must create the workflow file **before** uploading the ZIP file so GitHub kn
 
 ## Step 6: Extract and Install the APK on Your Android Phone
 
-GitHub packages all workflow artifacts inside a outer `.zip` container, so you extract it once before installing:
+GitHub packages all workflow artifacts inside an outer `.zip` container, so you extract it once before installing:
 
 1. Open the **Files by Google** (or Samsung **My Files**) app on your phone and go to **Downloads**.
 2. Tap **`Folia-Android-debug-APK.zip`** and tap **Extract** (or **Unzip**).
@@ -81,5 +90,5 @@ If the workflow run shows a **red X**:
 2. GitHub will automatically expand the step that failed. Also check the step named **Print build failure diagnostics** right below it.
 3. Look at Which Step Failed:
    - **`Validate and extract folia-android-source.zip into staging`**: Make sure the uploaded file is named **`folia-android-source.zip`** (not renamed by Android to `folia-android-source (1).zip`) and sits in the root folder of your repository.
-   - **`Commit and push extracted project files to branch`**: Go to your repository **Settings → Actions → General**, scroll to **Workflow permissions**, select **Read and write permissions**, and tap **Save**, then re-run the workflow.
+   - **`Commit and push extracted project files to branch`**: The updated workflow automatically skips `.github/workflows/*` when committing and continues building the APK even if branch push is restricted. To allow branch commits, go to **Settings → Actions → General**, scroll to **Workflow permissions**, select **Read and write permissions**, and tap **Save**.
    - **`Build production Android web bundle`** or **`Build Android Debug APK with Gradle`**: Copy the last 30–50 lines of error output from the failed step and the **Print build failure diagnostics** step to share for troubleshooting.

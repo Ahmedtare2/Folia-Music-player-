@@ -1,4 +1,5 @@
 import type { MonetBackgroundImage, MonetBackgroundTuning, Theme } from '../../../types';
+import { extractAssetIdFromCoverUrl, resolveLocalCoverObjectUrl } from '../../../services/localCoverRuntime';
 import type { MonetBackgroundPaintReply, MonetBackgroundPaintRequest } from './monetBackground.worker';
 
 // src/components/visualizer/monet/monetBackgroundPipeline.ts
@@ -33,8 +34,11 @@ const resolveSourceUrl = ({
 );
 
 const loadImage = async (src: string): Promise<HTMLImageElement> => {
+    const resolvedSrc = extractAssetIdFromCoverUrl(src)
+        ? (await resolveLocalCoverObjectUrl(src)) || src
+        : src;
     const image = new Image();
-    if (src.startsWith('http://') || src.startsWith('https://')) {
+    if (resolvedSrc.startsWith('http://') || resolvedSrc.startsWith('https://')) {
         image.crossOrigin = 'anonymous';
     }
     image.decoding = 'async';
@@ -42,10 +46,10 @@ const loadImage = async (src: string): Promise<HTMLImageElement> => {
     // Create a promise for the fallback load event
     const loadPromise = new Promise<void>((resolve, reject) => {
         image.onload = () => resolve();
-        image.onerror = () => reject(new Error(`Failed to load image: ${src}`));
+        image.onerror = () => reject(new Error(`Failed to load image: ${resolvedSrc}`));
     });
 
-    image.src = src;
+    image.src = resolvedSrc;
 
     try {
         await image.decode();

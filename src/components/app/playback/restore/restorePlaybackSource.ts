@@ -36,6 +36,7 @@ import { setActiveLocalLyricsSource, setAudioSrc, setCachedCoverUrl, setCurrentS
 import { askedSongKeyRef, replaceShownSong } from '../currentSong';
 import { onlineFailureToast } from '../source/onlineFailureToast';
 import { loadLocalSongAudio, loadNavidromeSongAudio, loadOnlineSongAudio } from '../source/songAudioSource';
+import { isRevocableBlobUrl, safeRevokeBlobUrl } from '../../../../services/playbackBlobUrls';
 import { useLyricSettingsStore } from '../../../../stores/useLyricSettingsStore';
 
 // src/components/app/playback/restore/restorePlaybackSource.ts
@@ -82,10 +83,10 @@ const replaceBlobUrl = (
     blobUrlRef: MutableRefObject<string | null>,
     nextBlobUrl: string,
 ) => {
-    if (blobUrlRef.current) {
-        URL.revokeObjectURL(blobUrlRef.current);
+    if (blobUrlRef.current && blobUrlRef.current !== nextBlobUrl) {
+        safeRevokeBlobUrl(blobUrlRef.current);
     }
-    blobUrlRef.current = nextBlobUrl;
+    blobUrlRef.current = isRevocableBlobUrl(nextBlobUrl) ? nextBlobUrl : null;
 };
 
 // A failed restore shows its one message, with no countdown and no buttons. It never takes the place
@@ -204,7 +205,7 @@ export const restorePlaybackSourceForSong = async (
         const audio = await loadLocalSongAudio(songToRestore);
         if (overtaken()) {
             // Never played: nothing holds this URL.
-            if (audio) URL.revokeObjectURL(audio.blobUrl);
+            if (audio) safeRevokeBlobUrl(audio.blobUrl);
             return 'stale';
         }
         if (!audio) {
@@ -218,7 +219,7 @@ export const restorePlaybackSourceForSong = async (
         const localCoverUrl = getLocalCoverAssetUrl(songToRestore.localCoverAssetId, 1024);
         const catalog = await getLocalLibraryCatalogSnapshot();
         if (overtaken()) {
-            URL.revokeObjectURL(blobUrl);
+            safeRevokeBlobUrl(blobUrl);
             return 'stale';
         }
         const restoredSong = applyLocalLibraryEntityDisplay(buildUnifiedLocalSong({
@@ -296,7 +297,7 @@ export const restorePlaybackSourceForSong = async (
         : { retry: { isCurrent: () => !overtaken() } });
     if (overtaken()) {
         // Never played: nothing holds this URL.
-        if (audioResult.kind === 'ok' && audioResult.blobUrl) URL.revokeObjectURL(audioResult.blobUrl);
+        if (audioResult.kind === 'ok' && audioResult.blobUrl) safeRevokeBlobUrl(audioResult.blobUrl);
         return 'stale';
     }
     if (audioResult.kind === 'unavailable') {

@@ -15,30 +15,34 @@ import type { CSSProperties } from 'react';
 /** 模糊半径。够大（≥ 20px）时合成器的模糊会先降采样，开销基本不随半径涨。 */
 export const LIBRARY_BACKDROP_BLUR_PX = 24;
 
-/** visualizer 画不画歌词文字：播放页照旧（设置弹窗盖住时不画）；首页显示着（设置弹窗盖着也算）且 stage 报了 lyrics 时也画。 */
+/** visualizer 画不画歌词文字：播放页照旧（设置弹窗盖住时不画）；移动端打开了全屏 Visualizer 时也画；首页显示着（设置弹窗盖着也算）且 stage 报了 lyrics 时也画。 */
 export const resolveVisualizerShowText = ({
     currentView,
     isSettingsModalOpen,
     isPanelOpen,
     backdropLyrics,
+    isMobileVisualizerActive = false,
 }: {
     currentView: string;
     isSettingsModalOpen: boolean;
     isPanelOpen: boolean;
     backdropLyrics: boolean;
+    isMobileVisualizerActive?: boolean;
 }): boolean => (
-    (currentView === 'player' && !isSettingsModalOpen)
+    ((currentView === 'player' || isMobileVisualizerActive) && !isSettingsModalOpen)
     || (currentView === 'home' && !isPanelOpen && backdropLyrics)
 );
 
-/** visualizer 那一层要不要模糊：首页墙露着（buildHomeSurfacePresentation 的 shouldRevealHomeSurface）且 stage 报了 blur。 */
+/** visualizer 那一层要不要模糊：首页墙露着（buildHomeSurfacePresentation 的 shouldRevealHomeSurface）且 stage 报了 blur，且移动端全屏 Visualizer 未打开。 */
 export const resolveVisualizerBackdropBlur = ({
     shouldRevealHomeSurface,
     backdropBlur,
+    isMobileVisualizerActive = false,
 }: {
     shouldRevealHomeSurface: boolean;
     backdropBlur: boolean;
-}): boolean => shouldRevealHomeSurface && backdropBlur;
+    isMobileVisualizerActive?: boolean;
+}): boolean => !isMobileVisualizerActive && shouldRevealHomeSurface && backdropBlur;
 
 const BLURRED: CSSProperties = Object.freeze({ filter: `blur(${LIBRARY_BACKDROP_BLUR_PX}px)`, transition: 'filter 300ms ease' });
 const SHARP: CSSProperties = Object.freeze({ transition: 'filter 300ms ease' });

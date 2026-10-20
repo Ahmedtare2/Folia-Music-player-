@@ -8,7 +8,7 @@ import { ensureLocalSongCoverAsset } from '../../../../services/localMusicServic
 import { addSongsToLocalPlaylist, buildCanonicalLocalSongIdIndex, createLocalPlaylist, getLocalPlaylists, setLocalSongFavorite } from '../../../../services/localPlaylistService';
 import { applyLocalLibraryEntityDisplay, buildLocalQueue, buildNavidromeQueue, buildUnifiedLocalSong, buildUnifiedNavidromeSong, resolveLocalSongMetadata } from '../../../../services/playbackAdapters';
 import { getPrefetchedData, prefetchNearbySongs } from '../../../../services/prefetchService';
-import { retireBlobUrl } from '../../../../services/playbackBlobUrls';
+import { isRevocableBlobUrl, retireBlobUrl, safeRevokeBlobUrl } from '../../../../services/playbackBlobUrls';
 import type { ThemeCacheSongKey } from '../../../../services/themeCache';
 import { hasRenderableLyrics } from '../../../../utils/appPlaybackHelpers';
 import {
@@ -45,13 +45,14 @@ import { loadOnlineLyricsState, resolveOnlineLyrics, saveOnlineLyricsState, getO
 import { hasLocalSongCover } from '../../../../utils/localSongCover';
 import { isSameLocalSongRecord } from '../../../../utils/localSongRecordEquality';
 import { getLocalCoverAssetUrl } from '../../../../services/localCoverAssetUrl';
+import { isSharedLocalCoverObjectUrl } from '../../../../services/localCoverRuntime';
 import { applyMatchedMetadata } from '../../../../services/localLibraryCatalogService';
 import { setLocalSongPureMusicMark } from '../../../../services/localSongMatchSelectionService';
 import { buildLocalSongLyricMatchContext, shouldRefreshLocalSongLyricsFromMetadata, shouldRunLocalSongAutomaticMatch } from '../../../../utils/lyrics/localSongMatchContext';
 import { getLocalLibraryCatalogSnapshot } from '../../../../services/localLibraryEntityRepository';
 import { setStatusMessage as setStatusMsg } from '../../../../stores/useStatusMessageStore';
 import { useLyricSettingsStore } from '../../../../stores/useLyricSettingsStore';
-import { setActiveLocalLyricsSource, setAudioSrc, setCachedCoverUrl, setCurrentLineIndex, setCurrentSong, setPlayQueue, startLoadingToPlay } from '../../../../stores/usePlaybackStore';
+import { setActiveLocalLyricsSource, setAudioSrc, setCachedCoverUrl, setCurrentLineIndex, setCurrentSong, setDuration, setPlayQueue, startLoadingToPlay } from '../../../../stores/usePlaybackStore';
 import { askedSongKeyRef, askForSong, playsDroppedSoFar, replaceShownSong, showSong, startPlay } from '../currentSong';
 import { loadLocalSongAudio, loadNavidromeSongAudio } from '../source/songAudioSource';
 import { supplyLyricsAfterEmptyLoad } from '../createLyricsSetter';
@@ -193,7 +194,9 @@ export function useLibraryPlaybackController({
 
     const revokeManagedCachedCoverObjectUrl = useCallback(() => {
         if (managedCachedCoverObjectUrlRef.current) {
-            URL.revokeObjectURL(managedCachedCoverObjectUrlRef.current);
+            if (!isSharedLocalCoverObjectUrl(managedCachedCoverObjectUrlRef.current)) {
+                URL.revokeObjectURL(managedCachedCoverObjectUrlRef.current);
+            }
             managedCachedCoverObjectUrlRef.current = null;
         }
     }, []);
@@ -201,7 +204,9 @@ export function useLibraryPlaybackController({
     const setManagedCachedCoverUrl = useCallback((nextUrl: string | null) => {
         const previousUrl = managedCachedCoverObjectUrlRef.current;
         if (previousUrl && previousUrl !== nextUrl) {
-            URL.revokeObjectURL(previousUrl);
+            if (!isSharedLocalCoverObjectUrl(previousUrl)) {
+                URL.revokeObjectURL(previousUrl);
+            }
             managedCachedCoverObjectUrlRef.current = null;
         }
 
@@ -480,7 +485,7 @@ export function useLibraryPlaybackController({
             }
             // 只把这一首的最新记录换进 localSongs。以前这里整表 loadLocalSongs，换掉了预热正在写的那批对象，
             // 预热结果因此到不了下一次切歌；整表替换还会让依赖 localSongs 的曲库视图跟着全量重算。
-            const found = await getLocalSong(localSong.id);
+            const found = typeof getLocalSong === 'function' ? await getLocalSong(localSong.id) : (await getLocalSongs()).find(s => s.id === localSong.id);
             if (found) {
                 updatedLocalSong = found;
                 patchLocalSongsInState([found]);
@@ -495,7 +500,7 @@ export function useLibraryPlaybackController({
         const preferOnlineCover = localData.useOnlineCover === true;
         const coverUrl = preferOnlineCover
             ? (localData.onlineMetadata?.coverUrl || localCoverUrl || null)
-            : localCoverUrl;
+            : (localCoverUrl || (localData.useOnlineCover !== false ? localData.onlineMetadata?.coverUrl || null : null));
 
         const resolvedLyrics = await resolveLocalSongLyrics(
             localData,
@@ -657,7 +662,7 @@ export function useLibraryPlaybackController({
         // of this song is written, and the blob URL just made for it is given back.
         const givesUp = () => {
             if (stillWanted()) return false;
-            URL.revokeObjectURL(blobUrl);
+            safeRevokeBlobUrl(blobUrl);
             return true;
         };
         if (givesUp()) return;
@@ -670,7 +675,7 @@ export function useLibraryPlaybackController({
         // Handed over, not revoked here: a blend is still playing the song this replaces on the
         // other deck, and a revoked URL is a deck that can no longer be seeked. See `retireBlobUrl`.
         retireBlobUrl(blobUrlRef.current);
-        blobUrlRef.current = recoveredRepresentation ? null : blobUrl;
+        blobUrlRef.current = !recoveredRepresentation && isRevocableBlobUrl(blobUrl) ? blobUrl : null;
         if (recoveredRepresentation) {
             retireBlobUrl(blobUrl);
             retireBlobUrl(null);
@@ -685,6 +690,11 @@ export function useLibraryPlaybackController({
         setActiveLocalLyricsSource(initialMeta.lyricsSource);
         setCurrentLineIndex(-1);
         currentTime.set(0);
+        if (initialMeta.unifiedSong.durationMs && initialMeta.unifiedSong.durationMs > 0) {
+            setDuration(initialMeta.unifiedSong.durationMs / 1000);
+        } else {
+            setDuration(0);
+        }
         showSong(initialMeta.unifiedSong);
         setAudioSrc(playbackUrl);
 

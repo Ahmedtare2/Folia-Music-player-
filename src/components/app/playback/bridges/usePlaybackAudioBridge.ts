@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useRef } from 'react';
 import type { MutableRefObject, RefObject } from 'react';
 import { PlayerState } from '../../../../types';
-import type { ReplayGainInfo, ReplayGainMode, SongResult, StatusMessage } from '../../../../types';
+import type { ReplayGainInfo, SongResult } from '../../../../types';
 import type { LocalSong } from '../../../../types';
-import { resolveNavidromePlaybackCarrier } from '../../../../utils/appPlaybackGuards';
+import { isLocalPlaybackSong, resolveNavidromePlaybackCarrier } from '../../../../utils/appPlaybackGuards';
 import { calculateReplayGain } from '../../../../utils/replayGain';
 import { applyAudioEqualizerSettings } from '../../../../services/audioEqualizerGraph';
 import { type AudioEffectChain } from '../../../../services/audioEffects/effectChain';
 import { buildPlaybackGraph } from '../../../../services/playbackGraph';
 import { cachePlayedTrackAssets } from '../../../../services/playedTrackCache';
-import { registerPlaybackFadeGraph } from '../../../../services/playbackFade';
+import { markProgrammaticPause, registerPlaybackFadeGraph } from '../../../../services/playbackFade';
 import { rampGain, type AutomixDeckChain } from '../../../../services/automix/crossfadeGraph';
+import { isAndroidSafStreamUrl } from '../../../../services/android/foliaAndroidBridge';
 import { setStatusMessage as setStatusMsg } from '../../../../stores/useStatusMessageStore';
 import { useAudioSettingsStore } from '../../../../stores/useAudioSettingsStore';
 import { setPlayerState } from '../../../../stores/usePlaybackStore';
@@ -127,11 +128,17 @@ export function usePlaybackAudioBridge({
     }, [audioContextRef, currentSong, gainNodeRef, getActiveChain, localSongs, replayGainMode]);
 
     const setupAudioAnalyzer = useCallback(() => {
-        // The context is the sentinel, not the source node: a deck that failed to connect must
-        // not let this run twice, because createMediaElementSource throws on a second call.
-        if (!audioRef.current || audioContextRef.current) return;
+        if (!audioRef.current) return;
+        // If the AudioContext already exists, ensure it is not stuck in 'suspended' state when playback starts.
+        if (audioContextRef.current) {
+            if (audioContextRef.current.state === 'suspended') {
+                void audioContextRef.current.resume().catch(() => {});
+            }
+            return;
+        }
         try {
             const AudioContextClass = window.AudioContext || (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+            if (!AudioContextClass) return;
             const ctx = new AudioContextClass();
             audioContextRef.current = ctx;
 
@@ -157,6 +164,9 @@ export function usePlaybackAudioBridge({
             }
             applyReplayGain();
             syncOutputGain(getTargetPlaybackVolume(), 0);
+            if (ctx.state === 'suspended') {
+                void ctx.resume().catch(() => {});
+            }
         } catch (error) {
             console.error('Audio Context Setup Failed:', error);
         }
@@ -164,16 +174,6 @@ export function usePlaybackAudioBridge({
 
     /**
      * Writes a fully-played track's audio and cover into the media cache.
-     *
-     * Takes the song and its source explicitly rather than reading `currentSong`/`audioSrc`, because
-     * the automix settle path caches the track that just faded OUT - and by then the app's own state
-     * already names the track that arrived. `coverUrl` is passed for the currently-displayed track
-     * (which may carry a user override); left undefined - the automix path - the cover is taken from
-     * the song's own metadata instead.
-     *
-     * The writes themselves live in `cachePlayedTrackAssets`, which is where the audio and cover
-     * conditions are kept apart from each other; this only adds the setting gate, which does not
-     * belong in a service.
      */
     const cacheSongAssetsFor = useCallback(async (
         song: SongResult | null,
@@ -226,7 +226,12 @@ export function usePlaybackAudioBridge({
         }
 
         if (audioSrc && previousAudioSrcRef.current && previousAudioSrcRef.current !== audioSrc) {
-            audioElement.pause();
+            if (!audioElement.paused && !audioElement.ended) {
+                // Mark as programmatic pause before calling pause() on source switch so the queued
+                // DOM 'pause' event is not misinterpreted by App.tsx's onPause handler as a user pause.
+                markProgrammaticPause(audioElement);
+                audioElement.pause();
+            }
             audioElement.load();
         }
 
@@ -235,55 +240,34 @@ export function usePlaybackAudioBridge({
 
     useEffect(() => {
         if (audioSrc && audioRef.current) {
-            // `audioRef` and `audioSrc` describe the same track almost always - but not while a
-            // blend is being armed. Automix repoints the ref at the incoming deck the instant it
-            // arms, and `audioSrc` keeps naming the OUTGOING track until playSong has resolved the
-            // next URL, which takes an await or two. Playing in that window starts whatever the
-            // incoming deck still had loaded from an earlier song AND spends the autoplay intent
-            // on it, so when the real source lands there is nothing left to press play with: the
-            // deck sits fully buffered at currentTime 0 in silence.
-            //
-            // The deck's own src attribute is written from `audioSrc`, so an exact match is the
-            // whole test. Bail WITHOUT spending the intent - this effect runs again on the commit
-            // that gives the deck its real source, and that run is the one meant to start it.
             if (audioRef.current.getAttribute('src') !== audioSrc) return;
-
-            // The deck has already failed on this exact source and something else - the transcode
-            // fallback - is off resolving it. play() on an element in error state cannot start
-            // anything; it rejects with NotSupportedError. Pressing it here only spends the intent,
-            // so when the recovered source lands there is nothing left to start the deck with.
-            // Bail WITHOUT spending it, the same way the autoplay hold below does: replacing the
-            // source runs this effect again, and that run is the one meant to start it.
             if (audioRef.current.error) return;
 
-            if (shouldAutoPlayRef.current && !isLyricsLoading) {
-                // The deck has its source and is buffering, but its blend is not due yet. Bail
-                // WITHOUT spending the intent - this effect runs again when the hold lifts, and
-                // that run is the one meant to start it.
-                //
-                // This is what keeps the load out of the blend. Pressing play here instead starts
-                // the fade wherever loading happened to finish, which took the same second or two
-                // off every transition and capped an eight second plan at three.
+            const isLocalSourceReady = Boolean(
+                isLocalPlaybackSong(currentSong)
+                || audioSrc.startsWith('blob:')
+                || isAndroidSafStreamUrl(audioSrc)
+            );
+
+            // Local sources already have their playable URL and local lyrics resolved before audioSrc commits;
+            // do not delay starting local audio playback while optional online lyric/cover matching runs in the background.
+            if (shouldAutoPlayRef.current && (!isLyricsLoading || isLocalSourceReady)) {
                 if (isAutoplayHeld) {
-                    // The outgoing deck is still sounding. playSong dropped the state to IDLE on
-                    // its way past and nothing else puts it back until this deck starts, so left
-                    // alone the transport reads "stopped" for the whole lead - and the play button
-                    // it offers would start this deck early and take the blend with it.
                     setPlayerState(PlayerState.PLAYING);
                     return;
                 }
 
                 shouldAutoPlayRef.current = false;
 
-                // Automix starts the next track seconds early, so a pause can land after the
-                // advance is already in flight and too late to recall. Honour the pause instead:
-                // without this the listener presses pause and the next song starts anyway.
                 if (suppressAutoplayRef.current) {
                     suppressAutoplayRef.current = false;
                     setPlayerState(PlayerState.PAUSED);
                     return;
                 }
 
+                if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+                    void audioContextRef.current.resume().catch(() => {});
+                }
                 syncOutputGain(getTargetPlaybackVolume(), 0);
                 const playPromise = audioRef.current.play();
                 if (playPromise !== undefined) {
@@ -295,15 +279,10 @@ export function usePlaybackAudioBridge({
                         .catch(error => {
                             if (audioRef.current && !audioRef.current.paused && !audioRef.current.ended) {
                                 setPlayerState(PlayerState.PLAYING);
+                                setupAudioAnalyzer();
                                 return;
                             }
 
-                            // A load() landing between play() and its promise aborts the play.
-                            // That happens whenever the source changes again while a track is
-                            // still starting - skipping during an automix transition is the
-                            // reliable way to see it - and the autoplay flag was spent before
-                            // play() was ever called, so nothing would press play again and the
-                            // app sits silent. Put the intent back for the next run.
                             if (error.name === 'AbortError') {
                                 shouldAutoPlayRef.current = true;
                                 return;
@@ -317,13 +296,8 @@ export function usePlaybackAudioBridge({
                 }
             }
         }
-    }, [audioRef, audioSrc, getTargetPlaybackVolume, isAutoplayHeld, isLyricsLoading, setPlayerState, setStatusMsg, setupAudioAnalyzer, shouldAutoPlayRef, suppressAutoplayRef, syncOutputGain, t]);
+    }, [audioContextRef, audioRef, audioSrc, currentSong, getTargetPlaybackVolume, isAutoplayHeld, isLyricsLoading, setPlayerState, setStatusMsg, setupAudioAnalyzer, shouldAutoPlayRef, suppressAutoplayRef, syncOutputGain, t]);
 
-    // Tells this bridge that the active deck ALREADY holds `src` and is sounding it, so the next time
-    // `audioSrc` settles on that value the reload effect above treats it as a no-op instead of calling
-    // load(). Used when a transition is cancelled back onto the deck still playing the outgoing track:
-    // that deck has the song loaded and playing, and reloading it would run the whole song-change
-    // shape - a fresh load, a visible hitch - for a track that never actually left.
     const adoptActiveDeckSource = useCallback((src: string) => {
         previousAudioSrcRef.current = src;
     }, []);

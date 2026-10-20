@@ -1,6 +1,11 @@
 import { resolveMobileCanvasDpr } from '../../../utils/mobileVisualizerBudget';
 import React, { useEffect, useMemo, useRef } from 'react';
 import type { MotionValue } from 'framer-motion';
+import {
+    extractAssetIdFromCoverUrl,
+    getCachedLocalCoverObjectUrl,
+    resolveLocalCoverObjectUrl,
+} from '../../../services/localCoverRuntime';
 import { colorWithAlpha } from '../colorMix';
 import { drawPendoloClockwork2d } from './pendoloClockworkDraw2d';
 import {
@@ -163,23 +168,42 @@ const PendoloClockworkCanvas: React.FC<PendoloClockworkCanvasProps> = ({
         if (!showCover || !coverUrl) return undefined;
         let cancelled = false;
         let img: HTMLImageElement | null = null;
-        // CORS first, like the other cover consumers: WebGL cannot upload a tainted image. A
-        // host without CORS headers still gets a plain load, which the Canvas2D path can draw.
-        const load = (crossOrigin: boolean) => {
-            const next = new Image();
-            if (crossOrigin) next.crossOrigin = 'anonymous';
-            next.onload = () => {
-                if (!cancelled) coverImageRef.current = next;
+        const startLoad = (effectiveCoverUrl: string) => {
+            if (cancelled) return;
+            // CORS first, like the other cover consumers: WebGL cannot upload a tainted image. A
+            // host without CORS headers still gets a plain load, which the Canvas2D path can draw.
+            const load = (crossOrigin: boolean) => {
+                const next = new Image();
+                if (crossOrigin && (effectiveCoverUrl.startsWith('http://') || effectiveCoverUrl.startsWith('https://'))) {
+                    next.crossOrigin = 'anonymous';
+                }
+                next.onload = () => {
+                    if (!cancelled) coverImageRef.current = next;
+                };
+                next.onerror = () => {
+                    if (cancelled) return;
+                    if (crossOrigin) load(false);
+                    else coverImageRef.current = null;
+                };
+                next.src = effectiveCoverUrl;
+                img = next;
             };
-            next.onerror = () => {
-                if (cancelled) return;
-                if (crossOrigin) load(false);
-                else coverImageRef.current = null;
-            };
-            next.src = coverUrl;
-            img = next;
+            load(true);
         };
-        load(true);
+
+        if (extractAssetIdFromCoverUrl(coverUrl)) {
+            const cached = getCachedLocalCoverObjectUrl(coverUrl);
+            if (cached) {
+                startLoad(cached);
+            } else {
+                void resolveLocalCoverObjectUrl(coverUrl).then(resolved => {
+                    startLoad(resolved || coverUrl);
+                });
+            }
+        } else {
+            startLoad(coverUrl);
+        }
+
         return () => {
             cancelled = true;
             if (img) {

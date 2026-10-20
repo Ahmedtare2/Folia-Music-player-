@@ -59,6 +59,7 @@ const VisualizerCadenza: React.FC<VisualizerProps> = (props) => {
         audioPower,
         audioBands,
         showText = true,
+        paused = false,
         cadenzaTuning = DEFAULT_CADENZA_TUNING,
         lyricsFontScale = 1,
         subtitleFontScale = 1,
@@ -262,7 +263,6 @@ const VisualizerCadenza: React.FC<VisualizerProps> = (props) => {
                 lineLayer.style.transform = 'scale(1)';
                 lineLayer.style.perspective = '1000px';
                 clearOverlayWordNodes(overlayNodesRef.current);
-                frameId = window.requestAnimationFrame(draw);
                 return;
             }
 
@@ -273,7 +273,7 @@ const VisualizerCadenza: React.FC<VisualizerProps> = (props) => {
             const isInstantWordReveal = wordRevealMode === 'instant';
             const lineSeed = Math.abs(Math.sin(activeLine.startTime * 997.1));
             const linePerspective = theme.animationIntensity === 'chaotic' ? 500 + Math.round(lineSeed * 500) : 1000;
-            const energy = clamp(audioPower.get() / 255, 0, 1);
+            const energy = paused ? 0 : clamp(audioPower.get() / 255, 0, 1);
             const motionEnergy = energy * tuning.motionAmount;
             const verticalLift = Math.sin(time * 2.3) * (3 + motionEnergy * 8);
             const focusY = height * 0.42 + verticalLift;
@@ -296,6 +296,7 @@ const VisualizerCadenza: React.FC<VisualizerProps> = (props) => {
             }
             const overlayNodes = overlayNodesRef.current;
             frameNumber += 1;
+            let stillSettling = false;
 
             let placementIndex = -1;
             for (const status of STATUS_DRAW_ORDER) {
@@ -365,6 +366,15 @@ const VisualizerCadenza: React.FC<VisualizerProps> = (props) => {
                     animatedState.activeMix = mix(animatedState.activeMix, targetActiveMix, visualTransitionAmount);
                     animatedState.glowAlpha = mix(animatedState.glowAlpha, targetGlowAlpha, 1 - Math.exp(-16 * dt));
                     stateMap.set(placement.id, animatedState);
+
+                    if (
+                        Math.abs(animatedState.x - targetX) > 0.25
+                        || Math.abs(animatedState.y - targetY) > 0.25
+                        || Math.abs(animatedState.bodyAlpha - targetBodyAlpha) > 0.01
+                        || Math.abs(animatedState.glowAlpha - targetGlowAlpha) > 0.01
+                    ) {
+                        stillSettling = true;
+                    }
 
                     if (animatedState.bodyAlpha < 0.015 && animatedState.glowAlpha < 0.015) {
                         continue;
@@ -462,11 +472,21 @@ const VisualizerCadenza: React.FC<VisualizerProps> = (props) => {
                 }
             });
 
-            frameId = window.requestAnimationFrame(draw);
+            if (!paused || stillSettling) {
+                frameId = window.requestAnimationFrame(draw);
+            }
         };
 
         draw();
+        const unsubscribeTime = paused
+            ? currentTime.on('change', () => {
+                window.cancelAnimationFrame(frameId);
+                frameId = window.requestAnimationFrame(draw);
+            })
+            : undefined;
+
         return () => {
+            unsubscribeTime?.();
             window.cancelAnimationFrame(frameId);
             fontSet?.removeEventListener('loadingdone', forgetAscents);
             lastFrameTimeRef.current = null;
@@ -476,6 +496,7 @@ const VisualizerCadenza: React.FC<VisualizerProps> = (props) => {
         audioPower,
         currentTime,
         activeLine,
+        paused,
         preparedState,
         showText,
         theme,

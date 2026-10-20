@@ -54,6 +54,8 @@ export interface LyricAgent {
   type?: string;
 }
 
+export type LyricLine = Line;
+
 export interface Line {
   words: Word[];
   startTime: number;

@@ -322,14 +322,14 @@ function LatticePoster({
                     : tile.kind === 'collection' && expanded && tile.heading ? `${tile.label} · ${tile.heading}` : tile.label}
             </span>
             {expanded && expansionSettled && isCurrent ? (
-                <Suspense fallback={<span className="lattice-poster-copy"><WallTitle title={tile.title} expanded={expanded} targetPosterWidth={rect.width} /><small>{tile.artist}</small></span>}>
+                <Suspense fallback={<span className="lattice-poster-copy"><WallTitle title={tile.title} expanded={expanded} targetPosterWidth={rect.width} /><small dir="auto" style={{ unicodeBidi: 'plaintext' }}>{tile.artist}</small></span>}>
                     <LatticeLyrics key={tile.id} tile={tile} reducedMotion={Boolean(reducedMotion)} />
                 </Suspense>
             ) : <span className="lattice-poster-copy">
                 {/* `rect` is the slot the card is heading for, in world units, so the title is fitted
                     against its final column before the spring has moved it there. */}
                 <WallTitle title={tile.title} expanded={expanded} targetPosterWidth={rect.width} />
-                <small>{tile.artist}</small>
+                <small dir="auto" style={{ unicodeBidi: 'plaintext' }}>{tile.artist}</small>
             </span>}
             {expanded && (
                 <motion.div

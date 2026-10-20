@@ -1,6 +1,11 @@
 import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import { Theme } from '../../../../types';
+import {
+    extractAssetIdFromCoverUrl,
+    getCachedLocalCoverObjectUrl,
+    resolveLocalCoverObjectUrl,
+} from '../../../../services/localCoverRuntime';
 import { ARRIVING_MARK } from '../../preview/frozenPicture';
 import { useFirstFrameDrawn, useLayerUnseen } from '../../styleTransition/firstFrame';
 import { useBlendedColors } from '../useBlendedColors';
@@ -348,11 +353,16 @@ const FluidBackground: React.FC<FluidBackgroundProps> = memo(({ coverUrl, theme 
 
         setSoftFocusCoverUrl(null);
 
-        void buildSoftFocusCover(coverUrl).then((nextUrl) => {
+        const run = async () => {
+            const effectiveUrl = extractAssetIdFromCoverUrl(coverUrl)
+                ? (await resolveLocalCoverObjectUrl(coverUrl)) || coverUrl
+                : coverUrl;
+            const nextUrl = await buildSoftFocusCover(effectiveUrl);
             if (!cancelled) {
                 setSoftFocusCoverUrl(nextUrl);
             }
-        });
+        };
+        void run();
 
         return () => {
             cancelled = true;
@@ -387,42 +397,59 @@ const FluidBackground: React.FC<FluidBackgroundProps> = memo(({ coverUrl, theme 
         if (isIOSSafari) return undefined;
         if (!coverUrl) { setCoverLayers([]); return undefined; }
         let cancelled = false;
-        // No crossOrigin: the canvas is never read back, so a cover without CORS headers draws as well.
-        const image = new Image();
-        image.decoding = 'async';
-        image.src = coverUrl;
-        image.decode().then(() => {
-            const fit = Math.min(1, COVER_SOURCE_MAX / Math.max(image.naturalWidth, image.naturalHeight));
-            return createImageBitmap(image, {
-                resizeWidth: Math.max(1, Math.round(image.naturalWidth * fit)),
-                resizeHeight: Math.max(1, Math.round(image.naturalHeight * fit)),
-                resizeQuality: 'high',
-            });
-        }).then((bitmap) => {
-            if (cancelled) {
-                bitmap.close();
-                return;
-            }
-            openBitmapsRef.current.add(bitmap);
-            setCoverLayers((prev) => {
-                const top = prev[prev.length - 1];
-                if (top && top.sourceCover === coverUrl) return prev;
-                coverKeyRef.current += 1;
-                // Keep only the current top (to fade out beneath the newcomer) plus the newcomer.
-                return [...(top ? [top] : []), { image: bitmap, sourceCover: coverUrl, key: coverKeyRef.current }];
-            });
-        }, () => {
+        const decodeAndStack = (effectiveUrl: string) => {
             if (cancelled) return;
-            // A broken cover (e.g. a stale one whose object URL was revoked before it finished loading)
-            // is not stacked over the current one; only with no layer at all does it stand, drawing
-            // nothing. The copy starts anyway, so a change never waits on it.
-            setCoverLayers((prev) => {
-                if (prev.length > 0) return prev;
-                coverKeyRef.current += 1;
-                return [{ image: null, sourceCover: coverUrl, key: coverKeyRef.current }];
+            // No crossOrigin: the canvas is never read back, so a cover without CORS headers draws as well.
+            const image = new Image();
+            image.decoding = 'async';
+            image.src = effectiveUrl;
+            image.decode().then(() => {
+                const fit = Math.min(1, COVER_SOURCE_MAX / Math.max(image.naturalWidth, image.naturalHeight));
+                return createImageBitmap(image, {
+                    resizeWidth: Math.max(1, Math.round(image.naturalWidth * fit)),
+                    resizeHeight: Math.max(1, Math.round(image.naturalHeight * fit)),
+                    resizeQuality: 'high',
+                });
+            }).then((bitmap) => {
+                if (cancelled) {
+                    bitmap.close();
+                    return;
+                }
+                openBitmapsRef.current.add(bitmap);
+                setCoverLayers((prev) => {
+                    const top = prev[prev.length - 1];
+                    if (top && top.sourceCover === coverUrl) return prev;
+                    coverKeyRef.current += 1;
+                    // Keep only the current top (to fade out beneath the newcomer) plus the newcomer.
+                    return [...(top ? [top] : []), { image: bitmap, sourceCover: coverUrl, key: coverKeyRef.current }];
+                });
+            }, () => {
+                if (cancelled) return;
+                // A broken cover (e.g. a stale one whose object URL was revoked before it finished loading)
+                // is not stacked over the current one; only with no layer at all does it stand, drawing
+                // nothing. The copy starts anyway, so a change never waits on it.
+                setCoverLayers((prev) => {
+                    if (prev.length > 0) return prev;
+                    coverKeyRef.current += 1;
+                    return [{ image: null, sourceCover: coverUrl, key: coverKeyRef.current }];
+                });
+                coverDrawn();
             });
-            coverDrawn();
-        });
+        };
+
+        if (extractAssetIdFromCoverUrl(coverUrl)) {
+            const cached = getCachedLocalCoverObjectUrl(coverUrl);
+            if (cached) {
+                decodeAndStack(cached);
+            } else {
+                void resolveLocalCoverObjectUrl(coverUrl).then(resolved => {
+                    decodeAndStack(resolved || coverUrl);
+                });
+            }
+        } else {
+            decodeAndStack(coverUrl);
+        }
+
         return () => { cancelled = true; };
     }, [coverUrl, isIOSSafari, coverDrawn]);
     const unseen = useLayerUnseen();

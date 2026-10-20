@@ -29,8 +29,12 @@ import { getLocalLibraryAvailability } from './localLibraryAvailability';
 import { hasFoliaAndroidBridge } from './android/foliaAndroidBridge';
 import {
     createLightweightStatFile,
+    ensureLoadedSafFile,
+    invalidateAndroidSafTreeCache,
+    isAndroidSafDirectoryHandle,
     isAndroidSafFileHandle,
     pickAndroidDirectoryHandle,
+    type AndroidSafFileHandle,
 } from './android/androidSafDirectoryHandle';
 import { useLyricSettingsStore } from '../stores/useLyricSettingsStore';
 import { getLocalLyricFilePriority, isSameLocalLyricFormatOrder, normalizeLocalLyricFormatOrder, type LocalLyricFileFormat } from '../utils/lyrics/localLyricFormatOrder';
@@ -108,11 +112,59 @@ const SNAPSHOT_HASH_SEED = 2166136261;
 const REIMPORT_HANDLE_MISSING_ERROR = 'Missing persisted directory handle for reimport';
 const PREFERRED_FOLDER_COVER_FILES = ['cover.png', 'cover.jpg', 'cover.jpeg'];
 
-interface LocalMusicScanProgressDetail {
+export interface LocalMusicScanProgressDetail {
     active: boolean;
     folderName: string;
+    phase?: 'discovering' | 'importing' | 'hydrating' | 'completed' | 'cancelled' | 'error';
     totalSongs: number;
     completedSongs: number;
+    discoveredSongs?: number;
+    processedSongs?: number;
+    skippedSongs?: number;
+    failedSongs?: number;
+    cancelled?: boolean;
+}
+
+let activeScanProgress: LocalMusicScanProgressDetail | null = null;
+let globalScanCancelEpoch = 0;
+const cancelledScanRoots = new Map<string, number>();
+const inFlightRootImports = new Map<string, Promise<LocalSong[]>>();
+
+export function getActiveLocalMusicScanProgress(): LocalMusicScanProgressDetail | null {
+    return activeScanProgress;
+}
+
+export function cancelLocalLibraryScan(rootFolderName?: string): void {
+    if (rootFolderName) {
+        const normalized = rootFolderName.split('/')[0] || rootFolderName;
+        cancelledScanRoots.set(normalized, (cancelledScanRoots.get(normalized) || 0) + 1);
+    } else {
+        globalScanCancelEpoch += 1;
+        if (activeScanProgress?.folderName) {
+            const normalized = activeScanProgress.folderName.split('/')[0] || activeScanProgress.folderName;
+            cancelledScanRoots.set(normalized, (cancelledScanRoots.get(normalized) || 0) + 1);
+        }
+    }
+    if (activeScanProgress && activeScanProgress.active) {
+        const nextDetail: LocalMusicScanProgressDetail = {
+            ...activeScanProgress,
+            active: false,
+            phase: 'cancelled',
+            cancelled: true,
+        };
+        activeScanProgress = nextDetail;
+        window.dispatchEvent(new CustomEvent(LOCAL_MUSIC_SCAN_PROGRESS_EVENT, { detail: nextDetail }));
+    }
+}
+
+export function isLocalLibraryScanCancelled(
+    rootFolderName: string,
+    startedGlobalEpoch: number,
+    startedRootEpoch: number,
+): boolean {
+    const normalized = rootFolderName.split('/')[0] || rootFolderName;
+    return globalScanCancelEpoch !== startedGlobalEpoch
+        || (cancelledScanRoots.get(normalized) || 0) !== startedRootEpoch;
 }
 
 function formatImportDuration(ms: number): string {
@@ -154,6 +206,7 @@ async function removeDeletedSongIdsFromPlaylists(songIds: string[]): Promise<voi
 }
 
 function notifyLocalMusicScanProgress(detail: LocalMusicScanProgressDetail) {
+    activeScanProgress = detail;
     window.dispatchEvent(new CustomEvent(LOCAL_MUSIC_SCAN_PROGRESS_EVENT, { detail }));
 }
 
@@ -448,6 +501,65 @@ async function extractEmbeddedMetadata(file: File, includeCover = false): Promis
     return parsed;
 }
 
+async function extractSafHandleEmbeddedMetadata(
+    fileHandle: AndroidSafFileHandle,
+    includeCover = false,
+): Promise<{ metadata: EmbeddedMetadata; statSize: number; statLastModified: number; mimeType: string; fileName: string }> {
+    const stat = fileHandle.getStatMetadata();
+    const nativeMeta = await fileHandle.extractNativeMetadata({
+        includeCover,
+        maxCoverDimension: 512,
+    });
+
+    let preparedNativeCover: PreparedLocalCoverBlob | undefined;
+    if (includeCover && nativeMeta?.cover) {
+        try {
+            preparedNativeCover = await prepareLocalCoverBlob(nativeMeta.cover);
+        } catch (err) {
+            console.warn(`[LocalMusic] Failed to prepare native cover thumbnail for ${stat.name}:`, err);
+        }
+    }
+
+    // Read only a bounded header slice for tag parsing (embedded lyrics, ReplayGain, multi-artist tags).
+    const needWorkerCover = includeCover && !preparedNativeCover;
+    let workerMeta: EmbeddedMetadata = {};
+    try {
+        const headerFile = await fileHandle.getMetadataFile({ includeCover: needWorkerCover });
+        workerMeta = await extractEmbeddedMetadata(headerFile, needWorkerCover);
+    } catch (workerErr) {
+        if (!nativeMeta) {
+            throw workerErr;
+        }
+    }
+
+    const durationMs = workerMeta.duration
+        || (nativeMeta?.durationMs && nativeMeta.durationMs > 0 ? Math.round(nativeMeta.durationMs) : undefined);
+
+    const merged: EmbeddedMetadata = {
+        ...workerMeta,
+        title: workerMeta.title || nativeMeta?.title,
+        artist: workerMeta.artist || nativeMeta?.artist,
+        artists: workerMeta.artists?.length
+            ? workerMeta.artists
+            : (nativeMeta?.artist ? [nativeMeta.artist] : undefined),
+        album: workerMeta.album || nativeMeta?.album,
+        duration: durationMs,
+        bitrate: workerMeta.bitrate || nativeMeta?.bitrate,
+        trackNumber: workerMeta.trackNumber ?? nativeMeta?.trackNumber,
+        discNumber: workerMeta.discNumber ?? nativeMeta?.discNumber,
+        cover: preparedNativeCover?.blob ?? workerMeta.cover,
+        coverAssetId: preparedNativeCover?.assetId ?? workerMeta.coverAssetId,
+    };
+
+    return {
+        metadata: merged,
+        statSize: stat.size,
+        statLastModified: stat.lastModified,
+        mimeType: stat.type,
+        fileName: stat.name,
+    };
+}
+
 async function buildSnapshotTree(
     handle: FileSystemDirectoryHandle,
     currentPath: string,
@@ -543,7 +655,7 @@ async function buildSnapshotTree(
         const fileHandle = entry as FileSystemFileHandle;
 
         try {
-            const file = kind === 'audio' && isAndroidSafFileHandle(fileHandle)
+            const file = isAndroidSafFileHandle(fileHandle)
                 ? createLightweightStatFile(fileHandle)
                 : await fileHandle.getFile();
             const relativePath = `${currentPath}/${file.name}`;
@@ -610,6 +722,9 @@ async function collectImportDiffPlan(
     previousSnapshot: LocalLibrarySnapshot | null,
     lyricFormatOrder: LocalLyricFileFormat[]
 ): Promise<ImportDiffPlan> {
+    if (isAndroidSafDirectoryHandle(dirHandle)) {
+        invalidateAndroidSafTreeCache(dirHandle.treeUri);
+    }
     const ignoredFolderPaths = previousSnapshot?.ignoredFolderPaths || [];
     const traversalResult = await buildSnapshotTree(dirHandle, rootFolderName, rootFolderName, [], new Map(), new Set(ignoredFolderPaths));
     const snapshot: LocalLibrarySnapshot = {
@@ -622,7 +737,23 @@ async function collectImportDiffPlan(
 
     const currentFiles = flattenSnapshotFiles(snapshot.tree);
     const previousFiles = previousSnapshot ? flattenSnapshotFiles(previousSnapshot.tree) : new Map<string, LocalLibrarySnapshotFile>();
-    const existingSongsByPath = new Map(existingSongs.map(song => [song.filePath, song]));
+    const existingSongsByPath = new Map<string, LocalSong>();
+    const duplicateExistingSongs: LocalSong[] = [];
+    for (const song of existingSongs) {
+        const prev = existingSongsByPath.get(song.filePath);
+        if (!prev) {
+            existingSongsByPath.set(song.filePath, song);
+            continue;
+        }
+        const prevHydrated = prev.embeddedMetadataVersion === EMBEDDED_METADATA_VERSION && !prev.localCoverNeedsAssetMigration;
+        const currHydrated = song.embeddedMetadataVersion === EMBEDDED_METADATA_VERSION && !song.localCoverNeedsAssetMigration;
+        if (currHydrated && !prevHydrated) {
+            duplicateExistingSongs.push(prev);
+            existingSongsByPath.set(song.filePath, song);
+        } else {
+            duplicateExistingSongs.push(song);
+        }
+    }
     const currentAudioPaths = new Set<string>();
     const changedAudioPaths = new Set<string>();
     const changedLyricBasePaths = new Set<string>();
@@ -708,7 +839,11 @@ async function collectImportDiffPlan(
 
     const changedEntries: FileEntryForImport[] = [];
     const reusedSongs: LocalSong[] = [];
-    const removedSongs = existingSongs.filter(song => !currentAudioPaths.has(song.filePath));
+    const duplicateSongIds = new Set(duplicateExistingSongs.map(song => song.id));
+    const removedSongs = [
+        ...duplicateExistingSongs,
+        ...existingSongs.filter(song => !duplicateSongIds.has(song.id) && !currentAudioPaths.has(song.filePath)),
+    ];
     const allRelevantFiles = Array.from(currentFiles.values()).sort((a, b) => a.relativePath.localeCompare(b.relativePath));
 
     for (const snapshotFile of allRelevantFiles) {
@@ -840,7 +975,8 @@ async function buildImportedSong(
     } else if (lrcMap.has(baseName)) {
         try {
             const lyricCandidate = lrcMap.get(baseName)!;
-            localLyricsContent = await readLyricFile(lyricCandidate.file);
+            const loadedLyricFile = await ensureLoadedSafFile(lyricCandidate.file);
+            localLyricsContent = await readLyricFile(loadedLyricFile);
             localLyricsFormat = lyricCandidate.format;
         } catch (e) {
             console.error(`[LocalMusic] Failed to read local lyric for ${file.name}`, e);
@@ -851,7 +987,8 @@ async function buildImportedSong(
         localTranslationLyricsContent = existingSong?.localTranslationLyricsContent;
     } else if (tlrcMap.has(baseName)) {
         try {
-            localTranslationLyricsContent = await readLyricFile(tlrcMap.get(baseName)!);
+            const loadedTranslationFile = await ensureLoadedSafFile(tlrcMap.get(baseName)!);
+            localTranslationLyricsContent = await readLyricFile(loadedTranslationFile);
         } catch (e) {
             console.error(`[LocalMusic] Failed to read local translation lyric for ${file.name}`, e);
         }
@@ -864,7 +1001,8 @@ async function buildImportedSong(
         if (!coverBlobCache.has(entry.folderName)) {
             coverBlobCache.set(entry.folderName, (async () => {
                 try {
-                    return (await prepareLocalCoverBlob(coverMap.get(entry.folderName)!)) || undefined;
+                    const loadedCoverFile = await ensureLoadedSafFile(coverMap.get(entry.folderName)!);
+                    return (await prepareLocalCoverBlob(loadedCoverFile)) || undefined;
                 } catch (error) {
                     console.warn(`[LocalMusic] Failed to read folder cover for ${entry.folderName}:`, error);
                     return undefined;
@@ -899,37 +1037,58 @@ async function buildImportedSong(
     }
 
     const songId = existingSong?.id || generateId();
-    const importedMetadata = buildImportedMetadataSnapshot({
-        fileName: file.name,
-        embeddedTitle: embeddedMetadata.title,
-        fallbackTitle: metadata.title,
-        embeddedArtist: embeddedMetadata.artist,
-        embeddedArtists: embeddedMetadata.artists,
-        fallbackArtist: metadata.artist,
-        embeddedAlbum: embeddedMetadata.album,
-    });
+    const nextFileSignature = buildFileSignature(entry.relativePath, file.size, file.lastModified);
+    const preserveHydratedAudioMetadata = Boolean(
+        !includeEmbeddedMetadata
+        && existingSong
+        && existingSong.fileSignature === nextFileSignature
+        && existingSong.embeddedMetadataVersion === EMBEDDED_METADATA_VERSION
+        && !existingSong.localCoverNeedsAssetMigration
+    );
+    const importedMetadata = preserveHydratedAudioMetadata && existingSong?.importedMetadata
+        ? existingSong.importedMetadata
+        : buildImportedMetadataSnapshot({
+            fileName: file.name,
+            embeddedTitle: embeddedMetadata.title,
+            fallbackTitle: metadata.title,
+            embeddedArtist: embeddedMetadata.artist,
+            embeddedArtists: embeddedMetadata.artists,
+            fallbackArtist: metadata.artist,
+            embeddedAlbum: embeddedMetadata.album,
+        });
     const titleOrigin = existingSong?.titleOrigin || 'import';
     const localSong: LocalSong = {
         ...existingSong,
         id: songId,
         fileName: file.name,
         filePath: entry.relativePath,
-        duration,
+        duration: preserveHydratedAudioMetadata ? (existingSong?.duration || 0) : duration,
         fileSize: file.size,
         fileLastModified: file.lastModified,
-        fileSignature: buildFileSignature(entry.relativePath, file.size, file.lastModified),
+        fileSignature: nextFileSignature,
         mimeType: file.type,
-        bitrate: embeddedMetadata.bitrate || 0,
+        bitrate: preserveHydratedAudioMetadata ? (existingSong?.bitrate || 0) : (embeddedMetadata.bitrate || 0),
         addedAt: existingSong?.addedAt || Date.now(),
         title: titleOrigin === 'import' ? importedMetadata.title : existingSong?.title || importedMetadata.title,
         titleOrigin,
         importedMetadata,
         onlineMetadata: existingSong?.onlineMetadata,
-        trackNumber: embeddedMetadata.trackNumber,
-        discNumber: embeddedMetadata.discNumber,
-        localCoverAssetId: folderCover?.assetId,
-        localCoverSource: folderCover ? 'folder' : undefined,
-        localCoverNeedsAssetMigration: folderCover && !folderCover.assetId ? true : undefined,
+        trackNumber: preserveHydratedAudioMetadata ? existingSong?.trackNumber : embeddedMetadata.trackNumber,
+        discNumber: preserveHydratedAudioMetadata ? existingSong?.discNumber : embeddedMetadata.discNumber,
+        embeddedMetadataVersion: preserveHydratedAudioMetadata ? existingSong?.embeddedMetadataVersion : undefined,
+        localCoverAssetId: folderCover
+            ? folderCover.assetId
+            : (preserveHydratedAudioMetadata && existingSong?.localCoverSource === 'embedded'
+                ? existingSong.localCoverAssetId
+                : undefined),
+        localCoverSource: folderCover
+            ? 'folder'
+            : (preserveHydratedAudioMetadata && existingSong?.localCoverSource === 'embedded'
+                ? 'embedded'
+                : undefined),
+        localCoverNeedsAssetMigration: folderCover && !folderCover.assetId
+            ? true
+            : (preserveHydratedAudioMetadata ? existingSong?.localCoverNeedsAssetMigration : undefined),
         hasManualLyricSelection: existingSong?.hasManualLyricSelection ?? false,
         folderName: entry.folderName,
         hasLocalLyrics: !!localLyricsContent,
@@ -939,15 +1098,15 @@ async function buildImportedSong(
         hasLocalTranslationLyrics: !!localTranslationLyricsContent,
         localTranslationLyricsContent,
         localTranslationLyricsOrigin: localTranslationLyricsContent ? (keepUploadedTranslation ? 'upload' : 'sidecar') : undefined,
-        hasEmbeddedLyrics: !!embeddedMetadata.lyrics,
-        embeddedLyricsContent: embeddedMetadata.lyrics,
-        hasEmbeddedTranslationLyrics: !!embeddedMetadata.translationLyrics,
-        embeddedTranslationLyricsContent: embeddedMetadata.translationLyrics,
-        replayGain: embeddedMetadata.replayGain,
-        replayGainTrackGain: embeddedMetadata.replayGainTrackGain,
-        replayGainTrackPeak: embeddedMetadata.replayGainTrackPeak,
-        replayGainAlbumGain: embeddedMetadata.replayGainAlbumGain,
-        replayGainAlbumPeak: embeddedMetadata.replayGainAlbumPeak,
+        hasEmbeddedLyrics: preserveHydratedAudioMetadata ? Boolean(existingSong?.hasEmbeddedLyrics) : !!embeddedMetadata.lyrics,
+        embeddedLyricsContent: preserveHydratedAudioMetadata ? existingSong?.embeddedLyricsContent : embeddedMetadata.lyrics,
+        hasEmbeddedTranslationLyrics: preserveHydratedAudioMetadata ? Boolean(existingSong?.hasEmbeddedTranslationLyrics) : !!embeddedMetadata.translationLyrics,
+        embeddedTranslationLyricsContent: preserveHydratedAudioMetadata ? existingSong?.embeddedTranslationLyricsContent : embeddedMetadata.translationLyrics,
+        replayGain: preserveHydratedAudioMetadata ? existingSong?.replayGain : embeddedMetadata.replayGain,
+        replayGainTrackGain: preserveHydratedAudioMetadata ? existingSong?.replayGainTrackGain : embeddedMetadata.replayGainTrackGain,
+        replayGainTrackPeak: preserveHydratedAudioMetadata ? existingSong?.replayGainTrackPeak : embeddedMetadata.replayGainTrackPeak,
+        replayGainAlbumGain: preserveHydratedAudioMetadata ? existingSong?.replayGainAlbumGain : embeddedMetadata.replayGainAlbumGain,
+        replayGainAlbumPeak: preserveHydratedAudioMetadata ? existingSong?.replayGainAlbumPeak : embeddedMetadata.replayGainAlbumPeak,
         matchedLyrics: existingSong?.matchedLyrics,
         matchedIsPureMusic: existingSong?.matchedIsPureMusic,
         markedPureMusic: existingSong?.markedPureMusic,
@@ -975,37 +1134,69 @@ async function buildImportedSong(
     };
 }
 
-async function hydrateSongMetadata(song: LocalSong): Promise<LocalSong> {
-    const fileHandle = fileHandleMap.get(song.id) || song.fileHandle;
+async function hydrateSongMetadata(song: LocalSong): Promise<{ song: LocalSong; failed: boolean }> {
+    let fileHandle = fileHandleMap.get(song.id) || song.fileHandle;
     if (!fileHandle) {
-        return song;
+        fileHandle = (await recoverFileHandleFromPersistedDirectory(song)) ?? undefined;
+    }
+    if (!fileHandle) {
+        return { song, failed: true };
     }
 
     try {
-        const file = await fileHandle.getFile();
         const includeCover = song.localCoverSource !== 'folder';
         let embeddedMetadata: EmbeddedMetadata;
         let coverHydrationFailed = false;
+        let fileSize = song.fileSize;
+        let fileLastModified = song.fileLastModified;
+        let mimeType = song.mimeType;
+        let fileName = song.fileName;
 
-        try {
-            embeddedMetadata = await extractEmbeddedMetadata(file, includeCover);
-        } catch (coverError) {
-            if (!includeCover) throw coverError;
-            coverHydrationFailed = true;
-            console.warn(`[LocalMusic][Import] Cover-aware metadata parsing failed for ${song.fileName}; retrying without covers.`, coverError);
-            embeddedMetadata = await extractEmbeddedMetadata(file, false);
+        if (isAndroidSafFileHandle(fileHandle)) {
+            try {
+                const extracted = await extractSafHandleEmbeddedMetadata(fileHandle, includeCover);
+                embeddedMetadata = extracted.metadata;
+                fileSize = extracted.statSize || fileSize;
+                fileLastModified = extracted.statLastModified || fileLastModified;
+                mimeType = extracted.mimeType || mimeType;
+                fileName = extracted.fileName || fileName;
+            } catch (coverError) {
+                if (!includeCover) throw coverError;
+                coverHydrationFailed = true;
+                console.warn(`[LocalMusic][Import] Cover-aware SAF metadata parsing failed for ${song.fileName}; retrying without covers.`, coverError);
+                const extracted = await extractSafHandleEmbeddedMetadata(fileHandle, false);
+                embeddedMetadata = extracted.metadata;
+                fileSize = extracted.statSize || fileSize;
+                fileLastModified = extracted.statLastModified || fileLastModified;
+                mimeType = extracted.mimeType || mimeType;
+                fileName = extracted.fileName || fileName;
+            }
+        } else {
+            const file = await fileHandle.getFile();
+            fileSize = file.size;
+            fileLastModified = file.lastModified;
+            mimeType = file.type;
+            fileName = file.name;
+            try {
+                embeddedMetadata = await extractEmbeddedMetadata(file, includeCover);
+            } catch (coverError) {
+                if (!includeCover) throw coverError;
+                coverHydrationFailed = true;
+                console.warn(`[LocalMusic][Import] Cover-aware metadata parsing failed for ${song.fileName}; retrying without covers.`, coverError);
+                embeddedMetadata = await extractEmbeddedMetadata(file, false);
+            }
         }
 
         song.duration = embeddedMetadata.duration || song.duration || 0;
-        song.fileSize = file.size;
+        song.fileSize = fileSize;
         // Kept in step with fileSize: buildLocalSourceRevision reads both, so refreshing only one
         // makes every cached playback representation look stale and re-transcode on each play.
-        song.fileLastModified = file.lastModified;
-        song.mimeType = file.type;
+        song.fileLastModified = fileLastModified;
+        song.mimeType = mimeType;
         song.bitrate = embeddedMetadata.bitrate || song.bitrate || 0;
-        const filenameMetadata = extractMetadataFromFilename(file.name);
+        const filenameMetadata = extractMetadataFromFilename(fileName);
         song.importedMetadata = buildImportedMetadataSnapshot({
-            fileName: file.name,
+            fileName,
             embeddedTitle: embeddedMetadata.title,
             fallbackTitle: filenameMetadata.title,
             embeddedArtist: embeddedMetadata.artist,
@@ -1032,28 +1223,77 @@ async function hydrateSongMetadata(song: LocalSong): Promise<LocalSong> {
             song.localCoverSource = embeddedMetadata.cover ? 'embedded' : undefined;
             song.localCoverNeedsAssetMigration = coverHydrationFailed ? true : undefined;
         }
+        return { song, failed: false };
     } catch (error) {
         console.warn(`[LocalMusic][Import] Failed to hydrate metadata for ${song.fileName}:`, error);
+        return { song, failed: true };
     }
-
-    return song;
 }
 
 const removedRootGenerations = new Map<string, number>();
 
-async function hydrateImportedSongsInBackground(rootFolderName: string, songs: LocalSong[]) {
-    const rootGeneration = removedRootGenerations.get(rootFolderName);
+interface HydrationScanSummaryContext {
+    discoveredSongs: number;
+    skippedSongs: number;
+    initialFailedSongs: number;
+    alreadyHydratedChangedSongs: number;
+    startedGlobalEpoch: number;
+    startedRootEpoch: number;
+}
+
+async function hydrateImportedSongsInBackground(
+    rootFolderName: string,
+    songs: LocalSong[],
+    context?: Partial<HydrationScanSummaryContext>,
+) {
+    const normalizedRoot = rootFolderName.split('/')[0] || rootFolderName;
+    const rootGeneration = removedRootGenerations.get(normalizedRoot);
+    const startedGlobalEpoch = context?.startedGlobalEpoch ?? globalScanCancelEpoch;
+    const startedRootEpoch = context?.startedRootEpoch ?? (cancelledScanRoots.get(normalizedRoot) || 0);
+    const discoveredSongs = context?.discoveredSongs ?? songs.length;
+    const skippedSongs = context?.skippedSongs ?? 0;
+    const baseProcessedSongs = context?.alreadyHydratedChangedSongs ?? 0;
+    let failedSongs = context?.initialFailedSongs ?? 0;
+
+    if (songs.length === 0) {
+        notifyLocalMusicScanProgress({
+            active: false,
+            folderName: rootFolderName,
+            phase: 'completed',
+            totalSongs: discoveredSongs,
+            completedSongs: discoveredSongs,
+            discoveredSongs,
+            processedSongs: baseProcessedSongs,
+            skippedSongs,
+            failedSongs,
+            cancelled: false,
+        });
+        return;
+    }
+
     const hydrationStartedAt = performance.now();
     const pendingBatch: LocalSong[] = [];
     let savedCount = 0;
     let nextIndex = 0;
     let flushInFlight: Promise<void> | null = null;
+    let wasCancelled = false;
+
+    const isCancelled = () => (
+        removedRootGenerations.get(normalizedRoot) !== rootGeneration
+        || isLocalLibraryScanCancelled(normalizedRoot, startedGlobalEpoch, startedRootEpoch)
+    );
 
     notifyLocalMusicScanProgress({
         active: true,
         folderName: rootFolderName,
+        phase: 'hydrating',
         totalSongs: songs.length,
-        completedSongs: 0
+        completedSongs: 0,
+        discoveredSongs,
+        processedSongs: baseProcessedSongs,
+        skippedSongs,
+        failedSongs,
+        cancelled: false,
     });
 
     const flushBatch = async (forceNotify = false) => {
@@ -1067,7 +1307,7 @@ async function hydrateImportedSongsInBackground(rootFolderName: string, songs: L
         const batch = pendingBatch.splice(0, pendingBatch.length);
         const currentFlush = (async () => {
             await runLocalFolderMutation(async () => {
-                if (removedRootGenerations.get(rootFolderName) !== rootGeneration) return;
+                if (removedRootGenerations.get(normalizedRoot) !== rootGeneration) return;
                 const ignoredPaths = (await getLocalLibrarySnapshot(rootFolderName))?.ignoredFolderPaths || [];
                 const visibleBatch = batch.filter(song => !isLocalFolderIgnored(song.folderName || song.filePath, ignoredPaths));
                 if (visibleBatch.length > 0) await saveLocalSongs(visibleBatch);
@@ -1076,12 +1316,20 @@ async function hydrateImportedSongsInBackground(rootFolderName: string, songs: L
             if (forceNotify || savedCount % HYDRATION_REFRESH_EVERY === 0 || savedCount === songs.length) {
                 notifyLocalMusicUpdated();
             }
-            notifyLocalMusicScanProgress({
-                active: true,
-                folderName: rootFolderName,
-                totalSongs: songs.length,
-                completedSongs: savedCount
-            });
+            if (!isCancelled()) {
+                notifyLocalMusicScanProgress({
+                    active: true,
+                    folderName: rootFolderName,
+                    phase: 'hydrating',
+                    totalSongs: songs.length,
+                    completedSongs: savedCount,
+                    discoveredSongs,
+                    processedSongs: baseProcessedSongs + savedCount,
+                    skippedSongs,
+                    failedSongs,
+                    cancelled: false,
+                });
+            }
             console.log(`[LocalMusic][Import] Background metadata hydration saved ${savedCount}/${songs.length} songs for "${rootFolderName}".`);
         })();
         flushInFlight = currentFlush;
@@ -1096,12 +1344,24 @@ async function hydrateImportedSongsInBackground(rootFolderName: string, songs: L
 
     const worker = async () => {
         while (true) {
+            if (isCancelled()) {
+                wasCancelled = true;
+                return;
+            }
             const currentIndex = nextIndex++;
             if (currentIndex >= songs.length) {
                 return;
             }
 
-            const hydratedSong = await hydrateSongMetadata(songs[currentIndex]);
+            const { song: hydratedSong, failed } = await hydrateSongMetadata(songs[currentIndex]);
+            if (failed) {
+                failedSongs += 1;
+            }
+
+            if (isCancelled()) {
+                wasCancelled = true;
+                return;
+            }
 
             pendingBatch.push(hydratedSong);
 
@@ -1120,15 +1380,58 @@ async function hydrateImportedSongsInBackground(rootFolderName: string, songs: L
         if (flushInFlight) {
             await flushInFlight;
         }
-        console.log(`[LocalMusic][Import] Background metadata hydration for "${rootFolderName}" finished in ${formatImportDuration(performance.now() - hydrationStartedAt)}.`);
+        console.log(`[LocalMusic][Import] Background metadata hydration for "${rootFolderName}" ${wasCancelled ? 'cancelled' : 'finished'} in ${formatImportDuration(performance.now() - hydrationStartedAt)}.`);
     } finally {
         notifyLocalMusicScanProgress({
             active: false,
             folderName: rootFolderName,
+            phase: wasCancelled ? 'cancelled' : 'completed',
             totalSongs: songs.length,
-            completedSongs: savedCount
+            completedSongs: savedCount,
+            discoveredSongs,
+            processedSongs: baseProcessedSongs + savedCount,
+            skippedSongs,
+            failedSongs,
+            cancelled: wasCancelled,
         });
     }
+}
+
+/**
+ * Recovers and resumes metadata hydration for any local tracks whose previous scan was interrupted
+ * before `embeddedMetadataVersion` reached `EMBEDDED_METADATA_VERSION`.
+ */
+export async function resumeInterruptedLocalLibraryScans(): Promise<number> {
+    const allSongs = await getLocalSongs();
+    const unhydratedByRoot = new Map<string, LocalSong[]>();
+    for (const song of allSongs) {
+        if (song.embeddedMetadataVersion === EMBEDDED_METADATA_VERSION && !song.localCoverNeedsAssetMigration) {
+            continue;
+        }
+        const rootName = getRootFolderName(song);
+        if (!rootName) continue;
+        const group = unhydratedByRoot.get(rootName);
+        if (group) {
+            group.push(song);
+        } else {
+            unhydratedByRoot.set(rootName, [song]);
+        }
+    }
+
+    let totalResumed = 0;
+    for (const [rootFolderName, songsToHydrate] of unhydratedByRoot.entries()) {
+        totalResumed += songsToHydrate.length;
+        const rootTotal = allSongs.filter(song => getRootFolderName(song) === rootFolderName).length;
+        void hydrateImportedSongsInBackground(rootFolderName, songsToHydrate, {
+            discoveredSongs: rootTotal,
+            skippedSongs: Math.max(0, rootTotal - songsToHydrate.length),
+            initialFailedSongs: 0,
+            alreadyHydratedChangedSongs: 0,
+        }).catch(err => {
+            console.warn(`[LocalMusic] Failed to resume interrupted scan for "${rootFolderName}":`, err);
+        });
+    }
+    return totalResumed;
 }
 
 
@@ -1182,123 +1485,252 @@ async function importFolderContents(dirHandle: FileSystemDirectoryHandle, expect
             }
         }
 
-        const traversalStartedAt = performance.now();
-        const allSongs = await getLocalSongs();
-        const existingRootSongs = allSongs.filter(song =>
-            song.folderName === rootFolderName || (song.folderName && song.folderName.startsWith(`${rootFolderName}/`))
-        );
-        const previousSnapshot = await getLocalLibrarySnapshot(rootFolderName);
-        const diffPlan = await collectImportDiffPlan(
-            rootFolderName,
-            dirHandle,
-            existingRootSongs,
-            previousSnapshot,
-            useLyricSettingsStore.getState().localLyricFormatOrder
-        );
-        console.log(`[LocalMusic][Import] Traversed ${diffPlan.relevantFileCount} relevant files in ${formatImportDuration(performance.now() - traversalStartedAt)}.`);
-
-        // Save directory handle for persistence after a successful scan plan is built
-        try {
-            const { getDirHandles, saveDirHandles } = await import('./db');
-            const dirHandles = await getDirHandles();
-            dirHandles[rootFolderName] = dirHandle;
-            await saveDirHandles(dirHandles);
-            console.log(`[LocalMusic] Saved directory handle for ${rootFolderName}`);
-        } catch (e) {
-            console.error('[LocalMusic] Failed to save directory handle:', e);
+        const normalizedRoot = rootFolderName.split('/')[0] || rootFolderName;
+        if (inFlightRootImports.has(normalizedRoot)) {
+            return await inFlightRootImports.get(normalizedRoot)!;
         }
 
-        const lyricIndexStartedAt = performance.now();
-        console.log(`[LocalMusic][Import] Indexed ${diffPlan.lrcMap.size} lyric files, ${diffPlan.tlrcMap.size} translated lyric files, and ${diffPlan.coverMap.size} folder cover files in ${formatImportDuration(performance.now() - lyricIndexStartedAt)}.`);
-        console.log(`[LocalMusic][Import] Snapshot diff for "${rootFolderName}": ${diffPlan.changedEntries.length} changed/new audio files, ${diffPlan.reusedSongs.length} unchanged audio files, ${diffPlan.removedSongs.length} removed audio files.`);
+        const startedGlobalEpoch = globalScanCancelEpoch;
+        const startedRootEpoch = cancelledScanRoots.get(normalizedRoot) || 0;
+        const checkCancelled = () => isLocalLibraryScanCancelled(normalizedRoot, startedGlobalEpoch, startedRootEpoch);
 
-        // Second pass: Process audio files with limited concurrency
-        const metadataStartedAt = performance.now();
-        const existingSongsByPath = new Map(existingRootSongs.map(song => [song.filePath, song]));
-        const coverBlobCache = new Map<string, Promise<PreparedLocalCoverBlob | undefined>>();
-        const processedSongs = await mapWithConcurrency(diffPlan.changedEntries, IMPORT_CONCURRENCY, async (entry) => {
+        const runRootImport = async (): Promise<LocalSong[]> => {
+            notifyLocalMusicScanProgress({
+                active: true,
+                folderName: rootFolderName,
+                phase: 'discovering',
+                totalSongs: 0,
+                completedSongs: 0,
+                discoveredSongs: 0,
+                processedSongs: 0,
+                skippedSongs: 0,
+                failedSongs: 0,
+                cancelled: false,
+            });
+
+            const traversalStartedAt = performance.now();
+            const allSongs = await getLocalSongs();
+            const existingRootSongs = allSongs.filter(song =>
+                song.folderName === rootFolderName
+                || (song.folderName && song.folderName.startsWith(`${rootFolderName}/`))
+                || (song.filePath && song.filePath.startsWith(`${rootFolderName}/`))
+            );
+            const previousSnapshot = await getLocalLibrarySnapshot(rootFolderName);
+            const diffPlan = await collectImportDiffPlan(
+                rootFolderName,
+                dirHandle,
+                existingRootSongs,
+                previousSnapshot,
+                useLyricSettingsStore.getState().localLyricFormatOrder
+            );
+            console.log(`[LocalMusic][Import] Traversed ${diffPlan.relevantFileCount} relevant files in ${formatImportDuration(performance.now() - traversalStartedAt)}.`);
+
+            if (checkCancelled()) {
+                notifyLocalMusicScanProgress({
+                    active: false,
+                    folderName: rootFolderName,
+                    phase: 'cancelled',
+                    totalSongs: diffPlan.totalAudioFiles,
+                    completedSongs: 0,
+                    discoveredSongs: diffPlan.totalAudioFiles,
+                    processedSongs: 0,
+                    skippedSongs: diffPlan.reusedSongs.length,
+                    failedSongs: 0,
+                    cancelled: true,
+                });
+                return existingRootSongs;
+            }
+
+            // Save directory handle for persistence after a successful scan plan is built
             try {
-                return await buildImportedSong(
-                    entry,
-                    diffPlan.lrcMap,
-                    diffPlan.tlrcMap,
-                    diffPlan.coverMap,
-                    coverBlobCache,
-                    false,
-                    existingSongsByPath.get(entry.relativePath)
-                );
-            } catch (error) {
-                console.error(`Failed to import file ${entry.relativePath}:`, error);
-                return {
-                    song: null,
-                    metrics: {
-                        getFileMs: 0,
-                        lyricReadMs: 0,
-                        coverReadMs: 0,
-                        parseMetadataMs: 0,
-                        durationFallbackMs: 0,
-                        usedDurationFallback: false
+                const dirHandles = await getDirHandles();
+                dirHandles[rootFolderName] = dirHandle;
+                await saveDirHandles(dirHandles);
+                console.log(`[LocalMusic] Saved directory handle for ${rootFolderName}`);
+            } catch (e) {
+                console.error('[LocalMusic] Failed to save directory handle:', e);
+            }
+
+            const lyricIndexStartedAt = performance.now();
+            console.log(`[LocalMusic][Import] Indexed ${diffPlan.lrcMap.size} lyric files, ${diffPlan.tlrcMap.size} translated lyric files, and ${diffPlan.coverMap.size} folder cover files in ${formatImportDuration(performance.now() - lyricIndexStartedAt)}.`);
+            console.log(`[LocalMusic][Import] Snapshot diff for "${rootFolderName}": ${diffPlan.changedEntries.length} changed/new audio files, ${diffPlan.reusedSongs.length} unchanged audio files, ${diffPlan.removedSongs.length} removed audio files.`);
+
+            notifyLocalMusicScanProgress({
+                active: diffPlan.changedEntries.length > 0,
+                folderName: rootFolderName,
+                phase: diffPlan.changedEntries.length > 0 ? 'importing' : 'completed',
+                totalSongs: Math.max(1, diffPlan.changedEntries.length),
+                completedSongs: 0,
+                discoveredSongs: diffPlan.totalAudioFiles,
+                processedSongs: 0,
+                skippedSongs: diffPlan.reusedSongs.length,
+                failedSongs: 0,
+                cancelled: false,
+            });
+
+            // Second pass: Process audio files with limited concurrency
+            const metadataStartedAt = performance.now();
+            const existingSongsByPath = new Map<string, LocalSong>();
+            for (const song of existingRootSongs) {
+                if (!existingSongsByPath.has(song.filePath)) {
+                    existingSongsByPath.set(song.filePath, song);
+                }
+            }
+            const coverBlobCache = new Map<string, Promise<PreparedLocalCoverBlob | undefined>>();
+            let initialFailedSongs = 0;
+            const processedSongs = await mapWithConcurrency(diffPlan.changedEntries, IMPORT_CONCURRENCY, async (entry) => {
+                if (checkCancelled()) {
+                    return {
+                        song: null,
+                        cancelled: true,
+                        metrics: {
+                            getFileMs: 0,
+                            lyricReadMs: 0,
+                            coverReadMs: 0,
+                            parseMetadataMs: 0,
+                            durationFallbackMs: 0,
+                            usedDurationFallback: false
+                        }
+                    };
+                }
+                try {
+                    const built = await buildImportedSong(
+                        entry,
+                        diffPlan.lrcMap,
+                        diffPlan.tlrcMap,
+                        diffPlan.coverMap,
+                        coverBlobCache,
+                        false,
+                        existingSongsByPath.get(entry.relativePath)
+                    );
+                    if (!built.song) {
+                        initialFailedSongs += 1;
                     }
-                };
+                    return { ...built, cancelled: false };
+                } catch (error) {
+                    initialFailedSongs += 1;
+                    console.error(`Failed to import file ${entry.relativePath}:`, error);
+                    return {
+                        song: null,
+                        cancelled: false,
+                        metrics: {
+                            getFileMs: 0,
+                            lyricReadMs: 0,
+                            coverReadMs: 0,
+                            parseMetadataMs: 0,
+                            durationFallbackMs: 0,
+                            usedDurationFallback: false
+                        }
+                    };
+                }
+            });
+
+            // Deduplicate songsToPersist by filePath so duplicate database writes cannot occur
+            const uniqueSongsByPath = new Map<string, LocalSong>();
+            for (const result of processedSongs) {
+                if (result.song && !uniqueSongsByPath.has(result.song.filePath)) {
+                    uniqueSongsByPath.set(result.song.filePath, result.song);
+                }
             }
-        });
+            const songsToPersist = Array.from(uniqueSongsByPath.values());
+            const aggregateMetrics = processedSongs.reduce((acc, result) => {
+                acc.getFileMs += result.metrics.getFileMs;
+                acc.lyricReadMs += result.metrics.lyricReadMs;
+                acc.coverReadMs += result.metrics.coverReadMs;
+                acc.parseMetadataMs += result.metrics.parseMetadataMs;
+                acc.durationFallbackMs += result.metrics.durationFallbackMs;
+                acc.durationFallbackCount += result.metrics.usedDurationFallback ? 1 : 0;
+                return acc;
+            }, {
+                getFileMs: 0,
+                lyricReadMs: 0,
+                coverReadMs: 0,
+                parseMetadataMs: 0,
+                durationFallbackMs: 0,
+                durationFallbackCount: 0
+            });
+            console.log(`[LocalMusic][Import] Prepared ${songsToPersist.length} changed audio files with concurrency=${IMPORT_CONCURRENCY} in ${formatImportDuration(performance.now() - metadataStartedAt)}.`);
+            console.log(
+                `[LocalMusic][Import] Preparation breakdown: getFile=${formatImportDuration(aggregateMetrics.getFileMs)}, ` +
+                `lyrics=${formatImportDuration(aggregateMetrics.lyricReadMs)}, ` +
+                `folderCover=${formatImportDuration(aggregateMetrics.coverReadMs)}, ` +
+                `parseBlob=${formatImportDuration(aggregateMetrics.parseMetadataMs)}, ` +
+                `durationFallback=${formatImportDuration(aggregateMetrics.durationFallbackMs)} ` +
+                `(${aggregateMetrics.durationFallbackCount} files).`
+            );
 
-        const songsToPersist = processedSongs
-            .map(result => result.song)
-            .filter((song): song is LocalSong => song !== null);
-        const aggregateMetrics = processedSongs.reduce((acc, result) => {
-            acc.getFileMs += result.metrics.getFileMs;
-            acc.lyricReadMs += result.metrics.lyricReadMs;
-            acc.coverReadMs += result.metrics.coverReadMs;
-            acc.parseMetadataMs += result.metrics.parseMetadataMs;
-            acc.durationFallbackMs += result.metrics.durationFallbackMs;
-            acc.durationFallbackCount += result.metrics.usedDurationFallback ? 1 : 0;
-            return acc;
-        }, {
-            getFileMs: 0,
-            lyricReadMs: 0,
-            coverReadMs: 0,
-            parseMetadataMs: 0,
-            durationFallbackMs: 0,
-            durationFallbackCount: 0
-        });
-        console.log(`[LocalMusic][Import] Prepared ${songsToPersist.length} changed audio files with concurrency=${IMPORT_CONCURRENCY} in ${formatImportDuration(performance.now() - metadataStartedAt)}.`);
-        console.log(
-            `[LocalMusic][Import] Preparation breakdown: getFile=${formatImportDuration(aggregateMetrics.getFileMs)}, ` +
-            `lyrics=${formatImportDuration(aggregateMetrics.lyricReadMs)}, ` +
-            `folderCover=${formatImportDuration(aggregateMetrics.coverReadMs)}, ` +
-            `parseBlob=${formatImportDuration(aggregateMetrics.parseMetadataMs)}, ` +
-            `durationFallback=${formatImportDuration(aggregateMetrics.durationFallbackMs)} ` +
-            `(${aggregateMetrics.durationFallbackCount} files).`
-        );
-
-        if (diffPlan.removedSongs.length > 0) {
-            for (const song of diffPlan.removedSongs) {
-                fileHandleMap.delete(song.id);
-                await dbDeleteLocalSong(song.id);
+            if (diffPlan.removedSongs.length > 0 && !checkCancelled()) {
+                const removedIds = diffPlan.removedSongs.map(song => song.id);
+                removedIds.forEach(id => fileHandleMap.delete(id));
+                await dbDeleteLocalSongs(removedIds);
             }
-        }
 
-        const importedSongs = [...diffPlan.reusedSongs];
+            const importedSongs = [...diffPlan.reusedSongs];
+            try {
+                const persistStartedAt = performance.now();
+                if (songsToPersist.length > 0) {
+                    await saveLocalSongs(songsToPersist);
+                }
+                if (!checkCancelled()) {
+                    await saveLocalLibrarySnapshot(diffPlan.snapshot);
+                }
+                console.log(`[LocalMusic][Import] Persisted ${songsToPersist.length} changed songs in ${formatImportDuration(performance.now() - persistStartedAt)}.`);
+                importedSongs.push(...songsToPersist);
+            } catch (saveError) {
+                console.error('Failed to save imported songs:', saveError);
+                songsToPersist.forEach(song => fileHandleMap.delete(song.id));
+                throw saveError;
+            }
+
+            console.log(`[LocalMusic][Import] Finished importing "${rootFolderName}" with ${importedSongs.length}/${diffPlan.totalAudioFiles} available songs in ${formatImportDuration(performance.now() - importStartedAt)}.`);
+            if (songsToPersist.length > 0 || diffPlan.removedSongs.length > 0) {
+                notifyLocalMusicUpdated();
+            }
+
+            if (checkCancelled()) {
+                notifyLocalMusicScanProgress({
+                    active: false,
+                    folderName: rootFolderName,
+                    phase: 'cancelled',
+                    totalSongs: diffPlan.totalAudioFiles,
+                    completedSongs: songsToPersist.length,
+                    discoveredSongs: diffPlan.totalAudioFiles,
+                    processedSongs: songsToPersist.length,
+                    skippedSongs: diffPlan.reusedSongs.length,
+                    failedSongs: initialFailedSongs,
+                    cancelled: true,
+                });
+                return importedSongs;
+            }
+
+            const songsNeedingHydration = songsToPersist.filter(
+                song => song.embeddedMetadataVersion !== EMBEDDED_METADATA_VERSION || song.localCoverNeedsAssetMigration
+            );
+            const alreadyHydratedChangedSongs = songsToPersist.length - songsNeedingHydration.length;
+
+            void hydrateImportedSongsInBackground(rootFolderName, songsNeedingHydration, {
+                discoveredSongs: diffPlan.totalAudioFiles,
+                skippedSongs: diffPlan.reusedSongs.length,
+                initialFailedSongs,
+                alreadyHydratedChangedSongs,
+                startedGlobalEpoch,
+                startedRootEpoch,
+            }).catch(error => {
+                console.error(`[LocalMusic][Import] Background metadata hydration failed for "${rootFolderName}":`, error);
+            });
+
+            return importedSongs;
+        };
+
+        const importPromise = runRootImport();
+        inFlightRootImports.set(normalizedRoot, importPromise);
         try {
-            const persistStartedAt = performance.now();
-            await saveLocalSongs(songsToPersist);
-            await saveLocalLibrarySnapshot(diffPlan.snapshot);
-            console.log(`[LocalMusic][Import] Persisted ${songsToPersist.length} changed songs in ${formatImportDuration(performance.now() - persistStartedAt)}.`);
-            importedSongs.push(...songsToPersist);
-        } catch (saveError) {
-            console.error('Failed to save imported songs:', saveError);
-            songsToPersist.forEach(song => fileHandleMap.delete(song.id));
-            throw saveError;
+            return await importPromise;
+        } finally {
+            if (inFlightRootImports.get(normalizedRoot) === importPromise) {
+                inFlightRootImports.delete(normalizedRoot);
+            }
         }
-
-        console.log(`[LocalMusic][Import] Finished importing "${rootFolderName}" with ${importedSongs.length}/${diffPlan.totalAudioFiles} available songs in ${formatImportDuration(performance.now() - importStartedAt)}.`);
-        notifyLocalMusicUpdated();
-        void hydrateImportedSongsInBackground(rootFolderName, songsToPersist).catch(error => {
-            console.error(`[LocalMusic][Import] Background metadata hydration failed for "${rootFolderName}":`, error);
-        });
-
-        return importedSongs;
     } catch (error) {
         if ((error as Error).name === 'AbortError') {
             // User cancelled the picker
@@ -1710,10 +2142,20 @@ async function extractAndPersistSongCover(
     song: LocalSong,
     fileHandle: FileSystemFileHandle,
 ): Promise<LocalSong> {
-    const file = await fileHandle.getFile();
-    const fileRevision = `${file.size}:${file.lastModified}`;
-    if (songsWithoutEmbeddedCover.get(song.id) === fileRevision) return song;
-    const metadata = await extractEmbeddedMetadata(file, true);
+    let metadata: EmbeddedMetadata;
+    let fileRevision: string;
+    if (isAndroidSafFileHandle(fileHandle)) {
+        const stat = fileHandle.getStatMetadata();
+        fileRevision = `${stat.size}:${stat.lastModified}`;
+        if (songsWithoutEmbeddedCover.get(song.id) === fileRevision) return song;
+        const extracted = await extractSafHandleEmbeddedMetadata(fileHandle, true);
+        metadata = extracted.metadata;
+    } else {
+        const file = await fileHandle.getFile();
+        fileRevision = `${file.size}:${file.lastModified}`;
+        if (songsWithoutEmbeddedCover.get(song.id) === fileRevision) return song;
+        metadata = await extractEmbeddedMetadata(file, true);
+    }
     if (!metadata.cover || !metadata.coverAssetId) {
         songsWithoutEmbeddedCover.set(song.id, fileRevision);
         return song;

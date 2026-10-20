@@ -137,7 +137,9 @@ const VisualizerCladdagh: React.FC<VisualizerSharedProps> = (props) => {
                 lineEl.style.filter = 'none';
             }
 
-            frameId = requestAnimationFrame(updateColors);
+            if (!paused || Math.abs(targetIntensity - glowIntensityRef.current) > 0.01) {
+                frameId = requestAnimationFrame(updateColors);
+            }
         };
 
         frameId = requestAnimationFrame(updateColors);
@@ -145,7 +147,7 @@ const VisualizerCladdagh: React.FC<VisualizerSharedProps> = (props) => {
         return () => {
             cancelAnimationFrame(frameId);
         };
-    }, [smoothedBass, smoothedVocal, theme.primaryColor, theme.accentColor, theme.secondaryColor, centerNormalTiltDeg, paused, isChorus, claddaghTuning.showAxisLine]);
+    }, [smoothedBass, smoothedVocal, theme.primaryColor, theme.accentColor, theme.secondaryColor, centerNormalTiltDeg, paused, isChorus, claddaghTuning.showAxisLine, normalizePower]);
 
     // Initialize dimensions on mount to avoid zero size on first render
     useEffect(() => {
@@ -258,71 +260,75 @@ const VisualizerCladdagh: React.FC<VisualizerSharedProps> = (props) => {
             >
                 {/* Background Dedicated Visuals */}
                 <div className="absolute inset-0 overflow-hidden pointer-events-none z-[1]">
-                    {/* Center Axis Line with blurred/faded endpoints */}
+                    <div
+                        className="absolute inset-0 opacity-20"
+                        style={{
+                            background: `radial-gradient(circle at 50% 50%, ${theme.primaryColor}33 0%, transparent 60%)`,
+                            transform: 'scale(1.2)',
+                        }}
+                    />
                     {claddaghTuning.showAxisLine && (
                         <div
                             ref={axisLineRef}
+                            className="absolute top-1/2 left-1/2 w-[50vw] max-w-[600px] h-[2px] -translate-x-1/2 -translate-y-1/2"
                             style={{
-                                position: 'absolute',
-                                left: '50%',
-                                top: '50%',
-                                width: '300px',
-                                height: '4px',
-                                transform: `translate(-50%, -50%) rotate(${centerNormalTiltDeg}deg) scale(1, 1)`,
-                                transformOrigin: 'center center',
-                                willChange: 'background, transform, filter',
+                                background: `linear-gradient(90deg, transparent, ${theme.primaryColor || '#ffffff'} 20%, ${theme.primaryColor || '#ffffff'} 80%, transparent)`,
+                                opacity: 1.0,
+                                transform: `translate(-50%, -50%) rotate(${centerNormalTiltDeg}deg)`,
                             }}
                         />
                     )}
                 </div>
 
-                <div style={{ width: '100%', height: '100%', position: 'relative', zIndex: 10 }}>
-                    {showText && Rx > 0 && Ry > 0 && lineIndicesToRender.map(idx => (
-                        <RingLine
-                            key={idx}
-                            line={lines[idx]}
-                            lineIndex={idx}
-                            centerLineIndex={centerLineIndex}
-                            currentTime={currentTime}
-                            lineOffset={lineOffset}
-                            theme={theme}
-                            lyricsFontScale={lyricsFontScale}
-                            Rx={Rx}
-                            Ry={Ry}
-                            audioPower={smoothedBass}
-                            containerWidth={dimensions.width}
-                            containerHeight={dimensions.height}
-                            activeSpacingInfo={activeSpacingInfo}
-                            renderBaseIndex={renderBaseIndex}
-                            lines={lines}
-                            focusScaleRatio={claddaghTuning.focusScaleRatio}
-                            ellipseTiltDeg={claddaghTuning.ellipseTiltDeg}
-                            textSpacingScale={activeTextSpacingScale}
-                            letterSpacingOffset={claddaghTuning.letterSpacingOffset}
-                        />
-                    ))}
-                </div>
+                {/* Central Ring Stage */}
+                {showText && (
+                    <div
+                        className="relative w-full h-full flex items-center justify-center z-10 pointer-events-none"
+                        style={{ perspective: '1200px' }}
+                    >
+                        {lineIndicesToRender.map(idx => (
+                            <RingLine
+                                key={`${idx}-${lines[idx]?.startTime}`}
+                                line={lines[idx]}
+                                lineIndex={idx}
+                                currentLineIndex={currentLineIndex}
+                                renderBaseIndex={renderBaseIndex}
+                                lineOffset={lineOffset}
+                                currentTime={currentTime}
+                                theme={theme}
+                                Rx={Rx}
+                                Ry={Ry}
+                                fontSize={baseFontSize}
+                                fontSpec={fontSpec}
+                                fontWeight={fontWeight}
+                                activeSpacingInfo={activeSpacingInfo}
+                                activeTextSpacingScale={activeTextSpacingScale}
+                                paused={paused}
+                                tuning={claddaghTuning}
+                            />
+                        ))}
+                    </div>
+                )}
             </motion.div>
 
-            {showText && (
-                <VisualizerSubtitleOverlay
-                    showText={showText}
-                    activeLine={activeLine}
-                    recentCompletedLine={recentCompletedLine}
-                    nextLines={nextLines}
-                    theme={theme}
-                    subtitleTheme={subtitleTheme}
-                    translationFontSize="clamp(1.1rem, 2.2vw, 1.45rem)"
-                    upcomingFontSize="clamp(0.95rem, 1.8vw, 1.2rem)"
-                    subtitleOverlayOpacity={subtitleOverlayOpacity}
-                    subtitleOverlayBackground={subtitleOverlayBackground}
-                    subtitleUpcomingLyricsBlur={subtitleUpcomingLyricsBlur}
-                    subtitleFontScale={subtitleFontScale}
-                    hideTranslationSubtitle={hideTranslationSubtitle}
-                    showSubtitleTranslation={showSubtitleTranslation}
-                    subtitleContentMode={subtitleContentMode}
-                />
-            )}
+            {/* Bottom Subtitle Overlay */}
+            <VisualizerSubtitleOverlay
+                showText={showText}
+                activeLine={activeLine}
+                recentCompletedLine={recentCompletedLine}
+                nextLines={nextLines}
+                theme={theme}
+                subtitleTheme={subtitleTheme}
+                translationFontSize={`clamp(1.1rem, ${(2.2 * lyricsFontScale).toFixed(2)}vw, ${(1.35 * lyricsFontScale).toFixed(2)}rem)`}
+                upcomingFontSize={`clamp(0.95rem, ${(1.8 * lyricsFontScale).toFixed(2)}vw, ${(1.1 * lyricsFontScale).toFixed(2)}rem)`}
+                subtitleFontScale={subtitleFontScale}
+                subtitleOverlayOpacity={subtitleOverlayOpacity}
+                subtitleOverlayBackground={subtitleOverlayBackground}
+                subtitleUpcomingLyricsBlur={subtitleUpcomingLyricsBlur}
+                hideTranslationSubtitle={hideTranslationSubtitle}
+                showSubtitleTranslation={showSubtitleTranslation}
+                subtitleContentMode={subtitleContentMode}
+            />
         </VisualizerShell>
     );
 };

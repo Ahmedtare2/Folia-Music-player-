@@ -1151,14 +1151,21 @@ export function usePlaybackQueueController({
             notifyPlaybackFailed({ song: currentSong, reason: shown?.case ?? null, phase: 'mid-playback', willAutoSkip });
         };
         // A refusal the listener can act on stops the song where it is: it was playing, so PAUSED.
-        const stopHere = (stopped: OnlineFailure) => {
+        const stopHere = (stopped?: OnlineFailure) => {
             shouldAutoPlayRef.current = false;
             audioRef.current?.pause();
             setPlayerState(PlayerState.PAUSED);
-            setStatusMsg(withSignInAction(stopped, said, t));
+            setStatusMsg(stopped ? withSignInAction(stopped, said, t) : said);
         };
 
-        if (shown && stopsPlayback(shown, readAutoSkipUnplayable())) {
+        // Never auto-advance to the next track when a local track fails or when no skippable online failure is given.
+        if (!shown || isLocalPlaybackSong(currentSong)) {
+            stopHere();
+            tell(false);
+            return;
+        }
+
+        if (stopsPlayback(shown, readAutoSkipUnplayable())) {
             stopHere(shown);
             tell(false);
             return;

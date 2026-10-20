@@ -106,3 +106,26 @@ export const useHomeLayoutSettingsStore = create<HomeLayoutSettingsState>((set) 
         setStoredBoolean('show_home_tab_explore', show);
     },
 }));
+
+/**
+ * The HomeLayoutSettings half of the former settings snapshot, for the surfaces that
+ * legitimately edit this whole domain at once. Ordinary consumers select one field instead.
+ */
+export const selectHomeLayoutSettingsSnapshot = (state: HomeLayoutSettingsState) => ({
+    rememberHomeCardPosition: state.rememberHomeCardPosition,
+    handleToggleRememberHomeCardPosition: state.handleToggleRememberHomeCardPosition,
+    grid3dCardStyle: state.grid3dCardStyle,
+    handleSetGrid3dCardStyle: state.handleSetGrid3dCardStyle,
+    homeLayoutStyle: state.homeLayoutStyle,
+    showHomeTabPlaylist: state.showHomeTabPlaylist,
+    showHomeTabRadio: state.showHomeTabRadio,
+    showHomeTabAlbums: state.showHomeTabAlbums,
+    showHomeTabLocal: state.showHomeTabLocal,
+    showHomeTabExplore: state.showHomeTabExplore,
+    handleSetHomeLayoutStyle: state.handleSetHomeLayoutStyle,
+    handleToggleHomeTabPlaylist: state.handleToggleHomeTabPlaylist,
+    handleToggleHomeTabRadio: state.handleToggleHomeTabRadio,
+    handleToggleHomeTabAlbums: state.handleToggleHomeTabAlbums,
+    handleToggleHomeTabLocal: state.handleToggleHomeTabLocal,
+    handleToggleHomeTabExplore: state.handleToggleHomeTabExplore,
+});

@@ -280,7 +280,16 @@ export const useFumeCanvasStage = (
         };
 
         draw();
+        // When paused, wake up and render one frame whenever currentTime changes (e.g. user seeks).
+        const unsubscribeTime = paused
+            ? currentTime.on('change', () => {
+                window.cancelAnimationFrame(frameId);
+                frameId = window.requestAnimationFrame(draw);
+            })
+            : undefined;
+
         return () => {
+            unsubscribeTime?.();
             window.cancelAnimationFrame(frameId);
             lastFrameAt = null;
         };

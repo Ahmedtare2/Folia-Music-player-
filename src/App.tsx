@@ -3,6 +3,7 @@ import { AnimatePresence, motion, useMotionValueEvent } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import { ChevronLeft } from 'lucide-react';
 import { loadCachedOrFetchCover } from './services/coverCache';
+import { getLocalCoverAssetUrl } from './services/localCoverAssetUrl';
 import VisualizerRenderer from './components/visualizer/VisualizerRenderer';
 import CommandPalette from './components/command-palette/CommandPalette';
 import AddToPlaylistHost from './components/app/AddToPlaylistHost';
@@ -69,7 +70,10 @@ import { usePlayerPanelModel } from './components/app/player-panel/usePlayerPane
 import { createQueueMutations } from './components/app/player-panel/createQueueMutations';
 import { Album, Artist, LyricData, Theme, PlayerState, SongResult, ReplayGainMode, StatusMessage, PlaybackContext, StageLoopMode, UnifiedSong } from './types';
 import type { LocalSong } from './types';
-import { getLocalSongArrayBuffer } from './services/localMusicService';
+import { getAudioFromFile, getFileFromLocalSong, getLocalSongArrayBuffer } from './services/localMusicService';
+import { isAndroidSafStreamUrl } from './services/android/foliaAndroidBridge';
+import { notifyPlaybackFailed } from './services/hostExtensionHooks';
+import { retireBlobUrl } from './services/playbackBlobUrls';
 import { registerLocalTrackFileReader } from './services/analysis/trackAudio';
 import type { MediaId, OnlineProviderId, ProviderCollection } from './types/onlineMusic';
 import { resolveSongCatalogRef } from './services/onlineMusic/catalogRefs';
@@ -2082,6 +2086,7 @@ export default function App() {
 
     const visualizerRendererModel = useVisualizerRendererModel({
         suspendAnimation: suspendVisualizerAnimation,
+        isMobileVisualizerActive,
         theme: visualizerTheme,
         subtitleTheme: visualizerSubtitleTheme,
         seed: visualizerGeometrySeed,
@@ -2189,14 +2194,34 @@ export default function App() {
         localLibraryCatalog.entities,
         localLibraryCatalog.assignments,
     ), [localLibraryCatalog.assignments, localLibraryCatalog.entities]);
+    const localSongsById = useMemo(
+        () => new Map(localSongs.map(song => [song.id, song])),
+        [localSongs],
+    );
+    const applyLocalSongCoverDisplay = useCallback((song: SongResult): SongResult => {
+        if (!isLocalPlaybackSong(song)) return song;
+        if (song.album?.coverUrl) return song;
+        const localRecord = localSongsById.get(song.localRef.songId);
+        if (!localRecord) return song;
+        const fallbackCoverUrl = getLocalCoverAssetUrl(localRecord.localCoverAssetId, 1024)
+            || (localRecord.useOnlineCover !== false ? localRecord.onlineMetadata?.coverUrl || undefined : undefined);
+        if (!fallbackCoverUrl) return song;
+        return {
+            ...song,
+            album: {
+                ...(song.album ?? { id: 0, name: localRecord.importedMetadata.albumName || "" }),
+                coverUrl: fallbackCoverUrl,
+            },
+        };
+    }, [localSongsById]);
     const playerDisplayCurrentSong = useMemo(() => (
         displaySong
-            ? applyLocalLibraryEntityDisplay(displaySong, localLibraryCatalog, playerDisplayCatalogIndex)
+            ? applyLocalSongCoverDisplay(applyLocalLibraryEntityDisplay(displaySong, localLibraryCatalog, playerDisplayCatalogIndex))
             : null
-    ), [displaySong, localLibraryCatalog, playerDisplayCatalogIndex]);
+    ), [applyLocalSongCoverDisplay, displaySong, localLibraryCatalog, playerDisplayCatalogIndex]);
     const playerDisplayQueue = useMemo(() => (
-        playQueue.map(song => applyLocalLibraryEntityDisplay(song, localLibraryCatalog, playerDisplayCatalogIndex))
-    ), [localLibraryCatalog, playQueue, playerDisplayCatalogIndex]);
+        playQueue.map(song => applyLocalSongCoverDisplay(applyLocalLibraryEntityDisplay(song, localLibraryCatalog, playerDisplayCatalogIndex)))
+    ), [applyLocalSongCoverDisplay, localLibraryCatalog, playQueue, playerDisplayCatalogIndex]);
     // 搜索结果同样在展示时按当前目录重算：结果是提交那一刻的快照，导入后紧接着搜，实体目录可能还没加载完。
     const resolveSearchResultDisplay = useCallback((track: UnifiedSong) => (
         track.isLocal
@@ -2397,10 +2422,15 @@ export default function App() {
         libraryOccludesPlayer,
         hasLibraryOcclusionSettled,
         handoffKeepsVisualizer: wallHandoff.keepsVisualizer,
+        isMobileVisualizerActive,
     });
     // 首页墙透出来的 visualizer 加模糊（bravais「墙后的画面」，stage 报告；只在首页墙露着时）。
     const libraryBackdropBlur = useLibraryPlayerOcclusionStore(state => selectLibraryPlayerBackdrop(state).blur);
-    const blursVisualizerBackdrop = resolveVisualizerBackdropBlur({ shouldRevealHomeSurface, backdropBlur: libraryBackdropBlur });
+    const blursVisualizerBackdrop = resolveVisualizerBackdropBlur({
+        shouldRevealHomeSurface,
+        backdropBlur: libraryBackdropBlur,
+        isMobileVisualizerActive,
+    });
 
     // The two automix decks are identical and interchangeable. Every handler below ignores the
     // deck that is not currently active, so a track fading out in the background can never drive
@@ -2466,13 +2496,8 @@ export default function App() {
                 // the transport state and play intent belong to that song now.
                 if (consumeProgrammaticPause(e.currentTarget)) return;
                 if (!automix.isActiveDeck(e.currentTarget)) return;
-                // A deck whose source failed fires `pause` immediately AFTER `error` - Chromium
-                // clears the play state as part of failing the load - and that is not the listener
-                // pausing. Read as one, it dropped the transport to PAUSED and spent the autoplay
-                // intent, and the transcode fallback then read that PAUSED back as "the listener
-                // paused during recovery" and cancelled the resume: the track was transcoded, the
-                // source re-pointed, and the deck left silent until play was pressed by hand.
-                // What happens to a failed source belongs to the error path below.
+                // Ignore stale queued pause events if playback has already resumed on this element.
+                if (!e.currentTarget.paused) return;
                 if (e.currentTarget.error) return;
                 shouldAutoPlay.current = false;
                 if (!e.currentTarget.ended) {
@@ -2522,6 +2547,11 @@ export default function App() {
                 // reads as playing. Letting it through would flip the transport back to PLAYING for
                 // the length of the fade and could arm a blend the listener just stopped.
                 if (playbackFade.isFadingOut()) return;
+                if (!isShowingTail && Number.isFinite(audioElement.duration) && audioElement.duration > 0) {
+                    if (duration <= 0 || Math.abs(audioElement.duration - duration) > 0.5) {
+                        setDuration(audioElement.duration);
+                    }
+                }
                 if (!audioElement.ended) setPlayerState(PlayerState.PLAYING);
                 automix.checkTransitionPoint(audioElement.currentTime);
             }}
@@ -2558,9 +2588,36 @@ export default function App() {
             //     }
             // }}
             onEnded={(e) => {
+                const audioElement = e.currentTarget;
                 // A track finishing in the background has already handed the queue over.
-                if (!automix.isActiveDeck(e.currentTarget)) {
+                if (!automix.isActiveDeck(audioElement)) {
                     automix.handleTailEnded();
+                    return;
+                }
+                if (!audioSrc || !audioElement.ended) {
+                    return;
+                }
+
+                // Guard against premature EOF or transient zero duration masquerading as track end.
+                const knownDurationSec = (currentSong?.durationMs && currentSong.durationMs > 0 ? currentSong.durationMs / 1000 : 0)
+                    || (Number.isFinite(duration) && duration > 0 ? duration : 0);
+                if (
+                    knownDurationSec > 10
+                    && audioElement.currentTime >= 0
+                    && audioElement.currentTime < Math.min(knownDurationSec * 0.5, knownDurationSec - 5)
+                ) {
+                    console.error('[Audio] Premature ended event detected before track completion', {
+                        song: currentSong?.name,
+                        currentTime: audioElement.currentTime,
+                        knownDurationSec,
+                        elementDuration: audioElement.duration,
+                    });
+                    shouldAutoPlay.current = false;
+                    setPlayerState(PlayerState.PAUSED);
+                    setStatusMsg({
+                        type: 'error',
+                        text: `Playback stopped unexpectedly at ${audioElement.currentTime.toFixed(1)}s / ${Math.round(knownDurationSec)}s (${currentSong?.name || 'track'})`,
+                    });
                     return;
                 }
 
@@ -2582,10 +2639,25 @@ export default function App() {
                     void handleNextTrack({ allowStopOnMissing: true, shouldNavigateToPlayer: false });
                 }
             }}
+            onDurationChange={(e) => {
+                const audioElement = e.currentTarget;
+                if (!automix.isActiveDeck(audioElement)) return;
+                if (Number.isFinite(audioElement.duration) && audioElement.duration > 0) {
+                    setDuration(audioElement.duration);
+                }
+            }}
             onLoadedMetadata={(e) => {
                 const audioElement = e.currentTarget;
                 if (!automix.isActiveDeck(audioElement)) return;
-                setDuration(audioElement.duration);
+                const fallbackDurationSec = currentSong?.durationMs && currentSong.durationMs > 0
+                    ? currentSong.durationMs / 1000
+                    : 0;
+                const resolvedDurationSec = Number.isFinite(audioElement.duration) && audioElement.duration > 0
+                    ? audioElement.duration
+                    : fallbackDurationSec;
+                if (resolvedDurationSec > 0) {
+                    setDuration(resolvedDurationSec);
+                }
                 // While the picture is held, this deck is the track ARRIVING: its length and its
                 // position belong to a song the listener cannot see yet, and writing either here
                 // would snap the bar to zero mid-blend. `duration` above is still set because the
@@ -2594,8 +2666,8 @@ export default function App() {
 
                 const pendingResumeTime = pendingResumeTimeRef.current;
                 if (pendingResumeTime !== null) {
-                    const safeDuration = Number.isFinite(audioElement.duration) && audioElement.duration > 0
-                        ? Math.max(audioElement.duration - 0.25, 0)
+                    const safeDuration = resolvedDurationSec > 0
+                        ? Math.max(resolvedDurationSec - 0.25, 0)
                         : pendingResumeTime;
                     const nextTime = Math.min(pendingResumeTime, safeDuration);
                     audioElement.currentTime = nextTime;
@@ -2664,6 +2736,64 @@ export default function App() {
                         audioElement, failedSrc, song: currentSong, recoverOnlinePlaybackSource, skipAfterPlaybackFailure,
                         autoplay: (!audioElement.paused && !audioElement.ended) || playerState === PlayerState.PLAYING || shouldAutoPlay.current,
                     });
+                    return;
+                }
+
+                // For local songs: if an Android SAF stream URL failed once (e.g., a FLAC header needing repairFlacMetadata),
+                // attempt one in-place fallback to a repaired Blob URL on the SAME track before reporting an error.
+                if (currentSong && isLocalPlaybackSong(currentSong)) {
+                    const localSongId = currentSong.localRef.songId;
+                    const localRecord = localSongs.find(item => item.id === localSongId);
+                    if (
+                        localRecord
+                        && isAndroidSafStreamUrl(failedSrc)
+                        && lastAudioRecoverySourceRef.current !== failedSrc
+                    ) {
+                        lastAudioRecoverySourceRef.current = failedSrc;
+                        const resumeAtSec = Math.max(0, audioElement.currentTime || currentTime.get());
+                        void (async () => {
+                            try {
+                                const file = await getFileFromLocalSong(localRecord);
+                                if (!file) throw new Error('Local file handle is unreadable');
+                                const fallbackBlobUrl = await getAudioFromFile(file);
+                                retireBlobUrl(blobUrlRef.current);
+                                blobUrlRef.current = fallbackBlobUrl;
+                                pendingResumeTimeRef.current = resumeAtSec;
+                                shouldAutoPlay.current = true;
+                                setAudioSrc(fallbackBlobUrl);
+                            } catch (recoveryErr) {
+                                console.error('[Audio] Local SAF stream fallback failed:', recoveryErr);
+                                shouldAutoPlay.current = false;
+                                setPlayerState(PlayerState.PAUSED);
+                                setStatusMsg({
+                                    type: 'error',
+                                    text: `Cannot play "${currentSong.name}": local file is inaccessible or corrupted.`,
+                                });
+                                notifyPlaybackFailed({ song: currentSong, reason: null, phase: 'mid-playback', willAutoSkip: false });
+                            }
+                        })();
+                        return;
+                    }
+
+                    const errCode = audioElement.error?.code;
+                    const codeDescription = errCode === 1
+                        ? 'MEDIA_ERR_ABORTED (load aborted)'
+                        : errCode === 2
+                            ? 'MEDIA_ERR_NETWORK (storage stream read failed)'
+                            : errCode === 3
+                                ? 'MEDIA_ERR_DECODE (audio decode failed)'
+                                : errCode === 4
+                                    ? 'MEDIA_ERR_SRC_NOT_SUPPORTED (unsupported format or unreadable source)'
+                                    : 'Media playback error';
+                    const detailMsg = audioElement.error?.message ? ` — ${audioElement.error.message}` : '';
+                    shouldAutoPlay.current = false;
+                    audioElement.pause();
+                    setPlayerState(PlayerState.PAUSED);
+                    setStatusMsg({
+                        type: 'error',
+                        text: `Failed to play "${currentSong.name}": ${codeDescription}${detailMsg}`,
+                    });
+                    notifyPlaybackFailed({ song: currentSong, reason: null, phase: 'mid-playback', willAutoSkip: false });
                     return;
                 }
 
@@ -2769,14 +2899,17 @@ export default function App() {
                                     invokeCommandById: commandPalette.invokeCommandById, canInvokeCommandById: commandPalette.canInvokeCommandById,
                                     isStageActive: isNowPlayingStageActive, disabled: isNowPlayingControlDisabled }}
                                 lyrics={commandPaletteContext.shared.lyrics}
-                                lyricSource={visualizerRendererModel}
+                                lyricSource={{
+                                    ...visualizerRendererModel,
+                                    paused: displayPlayerState !== PlayerState.PLAYING || !isActivityVisible || !isDocumentVisible,
+                                }}
                                 lyricKeywordColoringEnabled={visualizerRendererModel.visualizerTunings.monet.keywordColoringEnabled}
-                                currentSong={displaySong}
+                                currentSong={playerDisplayCurrentSong}
                                 playerState={displayPlayerState}
                                 currentTime={currentTime}
                                 playbackDuration={displayDuration}
                                 canTogglePlayback={canToggleCurrentPlayback}
-                                queue={playQueue}
+                                queue={playerDisplayQueue}
                                 isDaylight={isDaylight}
                                 onBack={navigateBackFromLattice}
                                 onGoHome={navigateToHome}
@@ -2907,6 +3040,9 @@ export default function App() {
                     isCommandPaletteOpen={commandPalette.isOpen}
                     onCloseCommandPalette={commandPalette.close}
                     onVisualizerVisibilityChange={setIsMobileVisualizerActive}
+                    isLatticeOpen={currentView === 'lattice'}
+                    onOpenLattice={navigateToLattice}
+                    onCloseLattice={navigateBackFromLattice}
                 />
             )}
 
