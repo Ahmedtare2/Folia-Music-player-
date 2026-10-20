@@ -123,10 +123,11 @@ jobs:
             fi
           done
 
-          echo "=== Importing validated files into repository root (preserving .git, .github/workflows, and ZIP) ==="
+          echo "=== Importing validated files into repository root (preserving .git, .github/workflows, apk-output, and ZIP) ==="
           rsync -a --delete \
             --exclude='.git/' \
             --exclude='.github/workflows/' \
+            --exclude='apk-output/' \
             --exclude='folia-android-source.zip' \
             "${STAGING_DIR}/" "./"
 
@@ -1129,8 +1130,10 @@ jobs:
           chmod +x ./gradlew
           ./gradlew assembleDebug --stacktrace --no-daemon
 
-      - name: Locate, verify, and stage Debug APK for download
+      - name: Locate, verify, and publish Debug APK to GitHub Releases & Repository
         id: verify_apk
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           FOUND_APK="$(find android/app/build/outputs/apk/debug -maxdepth 3 -name "*.apk" -type f | head -n 1)"
@@ -1147,9 +1150,9 @@ jobs:
           mkdir -p "${ARTIFACT_DIR}"
 
           VERSION="$(node -p "require('./package.json').version")"
-          STAGED_APK="${ARTIFACT_DIR}/Folia-${VERSION}-android-debug.apk"
+          APK_FILENAME="Folia-${VERSION}-android-debug.apk"
+          STAGED_APK="${ARTIFACT_DIR}/${APK_FILENAME}"
           cp "${FOUND_APK}" "${STAGED_APK}"
-          cp "${FOUND_APK}" "${ARTIFACT_DIR}/app-debug.apk"
 
           APK_SIZE="$(du -h "${STAGED_APK}" | cut -f1)"
           APK_SHA256="$(sha256sum "${STAGED_APK}" | awk '{print $1}')"
@@ -1160,23 +1163,49 @@ jobs:
           Version: ${VERSION}
           Branch: ${GITHUB_REF_NAME}
           Commit: ${GITHUB_SHA}
-          APK File: Folia-${VERSION}-android-debug.apk (also included as app-debug.apk)
+          APK File: ${APK_FILENAME}
           Size: ${APK_SIZE}
           SHA-256: ${APK_SHA256}
           EOF
 
+          # 1. Save a copy of the built APK directly in apk-output/ in the repository branch
+          # so the user can download it even if GitHub Actions Artifact storage quota is full.
+          mkdir -p apk-output
+          cp "${STAGED_APK}" "apk-output/${APK_FILENAME}"
+          cp "${ARTIFACT_DIR}/BUILD_INFO.txt" "apk-output/BUILD_INFO.txt"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f "apk-output/${APK_FILENAME}" "apk-output/BUILD_INFO.txt"
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(android): publish built ${APK_FILENAME} in apk-output/ [skip ci]" || true
+            git push origin "HEAD:${GITHUB_REF_NAME}" || echo "::warning::Could not push apk-output/ to branch."
+          fi
+
+          # 2. Publish/update a GitHub Release ('android-debug-latest') with the raw .apk attached.
+          # GitHub Releases do NOT count against GitHub Actions Artifact storage quota and allow
+          # direct one-tap .apk downloads on Android phones without extracting a .zip file!
+          RELEASE_TAG="android-debug-latest"
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" "${STAGED_APK}" "${ARTIFACT_DIR}/BUILD_INFO.txt" --clobber || true
+          else
+            gh release create "${RELEASE_TAG}" "${STAGED_APK}" "${ARTIFACT_DIR}/BUILD_INFO.txt" \
+              --title "Folia Android Debug APK (v${VERSION})" \
+              --notes "Automated Android Debug APK build from commit ${GITHUB_SHA}. Tap **${APK_FILENAME}** below under Assets to download and install directly on your Android phone." || true
+          fi
+
+          RELEASE_DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${APK_FILENAME}"
+          RAW_BRANCH_URL="https://github.com/${GITHUB_REPOSITORY}/raw/${GITHUB_REF_NAME}/apk-output/${APK_FILENAME}"
+
           cat << EOF >> "${GITHUB_STEP_SUMMARY}"
-          ## Folia Android Debug APK Built Successfully
-          - **Artifact Name**: \`Folia-Android-debug-APK\`
-          - **APK Filename**: \`Folia-${VERSION}-android-debug.apk\` (and \`app-debug.apk\`)
+          ## Folia Android Debug APK Built Successfully!
+          - **APK Filename**: \`${APK_FILENAME}\`
           - **Size**: \`${APK_SIZE}\`
           - **SHA-256**: \`${APK_SHA256}\`
 
-          ### How to Install on Your Android Phone
-          1. Scroll down to the **Artifacts** section at the bottom of this workflow summary page.
-          2. Tap **Folia-Android-debug-APK** to download the ZIP file to your phone.
-          3. Open your phone's **Files** app, tap the downloaded \`Folia-Android-debug-APK.zip\`, and extract it.
-          4. Tap **\`Folia-${VERSION}-android-debug.apk\`** (or \`app-debug.apk\`) and allow installation if prompted.
+          ### Direct One-Tap Download on Your Android Phone (No Unzipping Required!)
+          1. **[Tap Here to Download \`${APK_FILENAME}\` from GitHub Releases](${RELEASE_DOWNLOAD_URL})**
+          2. **[Backup Direct Link (\`apk-output/${APK_FILENAME}\` in Repository)](${RAW_BRANCH_URL})**
+          3. Once downloaded on your phone, tap **\`${APK_FILENAME}\`** in your browser notifications or **Files → Downloads** app and tap **Install**.
           EOF
 
       - name: Print build failure diagnostics
@@ -1199,13 +1228,13 @@ jobs:
           find android -path "*/build/reports/*" -type f -print -exec head -n 120 {} + || true
           echo "::endgroup::"
 
-      - name: Upload Folia-Android-debug-APK artifact
+      - name: Upload Folia-Android-debug-APK artifact (optional if Actions storage quota is full)
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: Folia-Android-debug-APK
           path: |
             /tmp/folia-apk-artifact/Folia-*-android-debug.apk
-            /tmp/folia-apk-artifact/app-debug.apk
             /tmp/folia-apk-artifact/BUILD_INFO.txt
-          if-no-files-found: error
-          retention-days: 30
+          if-no-files-found: warn
+          retention-days: 5
