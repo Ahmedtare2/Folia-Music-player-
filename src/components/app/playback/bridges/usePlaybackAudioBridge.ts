@@ -205,13 +205,16 @@ export function usePlaybackAudioBridge({
     }, [applyReplayGain]);
 
     useEffect(() => {
+        if (!audioContextRef.current && audioEqualizerSettings.enabled && audioRef.current) {
+            setupAudioAnalyzer();
+        }
         const context = audioContextRef.current;
         if (!context || equalizerNodesRef.current.length === 0) {
             return;
         }
         applyAudioEqualizerSettings(context, equalizerNodesRef.current, audioEqualizerSettings);
         effectChainRef.current?.apply(audioEqualizerSettings.effects, audioEqualizerSettings.enabled);
-    }, [audioContextRef, audioEqualizerSettings]);
+    }, [audioContextRef, audioEqualizerSettings, audioRef, setupAudioAnalyzer]);
 
     useEffect(() => () => {
         effectChainRef.current?.dispose();

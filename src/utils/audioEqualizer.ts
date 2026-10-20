@@ -44,6 +44,21 @@ export const AUDIO_EQUALIZER_CUSTOM_SLOT_IDS = ['custom1', 'custom2'] as const;
 export type AudioEqualizerCustomSlotId = typeof AUDIO_EQUALIZER_CUSTOM_SLOT_IDS[number];
 export type AudioEqualizerModeId = AudioEqualizerPresetId | AudioEqualizerCustomSlotId;
 
+export const AUDIO_EQUALIZER_PRESET_LABELS: Record<AudioEqualizerModeId, string> = {
+    flat: 'Flat',
+    rock: 'Rock',
+    pop: 'Pop',
+    classical: 'Classical',
+    jazz: 'Jazz',
+    bass: 'Bass Boost',
+    vocal: 'Vocal',
+    lofi: 'Lo-Fi',
+    radio: 'Radio',
+    hall: 'Hall',
+    custom1: 'Custom 1',
+    custom2: 'Custom 2',
+};
+
 export const AUDIO_EQUALIZER_PRESETS = Object.fromEntries(
     Object.entries(AUDIO_SOUND_PRESETS).map(([presetId, preset]) => [presetId, preset.gains]),
 ) as Record<AudioEqualizerPresetId, readonly number[]>;
@@ -71,6 +86,28 @@ export const DEFAULT_AUDIO_EQUALIZER_SETTINGS: AudioEqualizerSettings = {
     preset: 'flat',
     effects: createNeutralAudioEffects(),
     customSlots: createEmptyCustomSlots(),
+};
+
+export const isAudioEqualizerFlat = (settings: Pick<AudioEqualizerSettings, 'gains' | 'effects' | 'preset'>): boolean => (
+    settings.preset === 'flat'
+    && settings.gains.every(gain => Math.abs(gain) < 1e-4)
+    && areAudioEffectsEqual(settings.effects, createNeutralAudioEffects())
+);
+
+export const resetAudioEqualizerToFlat = (current: AudioEqualizerSettings): AudioEqualizerSettings => {
+    const flatGains = [...AUDIO_SOUND_PRESETS.flat.gains];
+    const neutralEffects = createNeutralAudioEffects();
+    const isCustom = isAudioEqualizerCustomSlotId(current.preset);
+    const activeSlotIdx = isCustom ? getAudioEqualizerCustomSlotIndex(current.preset) : -1;
+    return resolveAudioEqualizerSettings({
+        ...current,
+        preset: isCustom ? current.preset : 'flat',
+        gains: flatGains,
+        effects: neutralEffects,
+        customSlots: current.customSlots.map((slot, idx) => (
+            idx === activeSlotIdx ? { gains: [...flatGains], effects: { ...neutralEffects } } : slot
+        )),
+    });
 };
 
 const clampGain = (value: unknown): number => {
@@ -178,20 +215,6 @@ export const resolveAudioEqualizerSettings = (value: unknown): AudioEqualizerSet
     const hasStoredEffects = Boolean(candidate.effects) && typeof candidate.effects === 'object';
     const storedEffects = hasStoredEffects ? normalizeAudioEffects(candidate.effects) : createNeutralAudioEffects();
     const preset = resolveModeId(candidate.preset, gains, storedEffects);
-    // Settings written before the effect chain existed keep a NEUTRAL chain, even when the preset
-    // id they carry is one that now has effects attached to it.
-    //
-    // Upstream adopts the preset's effects here, on the reading that the id names a character and
-    // the character now includes them. The stored value is a record of what someone chose, though,
-    // and what they chose in that build was a tone curve: "Lo-Fi" meant a shape, not vinyl crackle
-    // and bit crush. Honouring the name changes what their music sounds like during an update,
-    // with no notice and no consent - reported here as "severe noise" by someone who never asked
-    // for any.
-    //
-    // The two mistakes are not the same size. Adding an effect costs the listener noticing it,
-    // finding the panel and switching it off; withholding one costs a click on a preset that is
-    // still right there, still named the same, and still selected - resolveModeId keeps the id,
-    // so re-picking it applies the full modern character deliberately.
     const effects = storedEffects;
 
     return {

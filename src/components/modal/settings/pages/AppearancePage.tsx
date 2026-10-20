@@ -3,10 +3,13 @@ import { Zap } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
 import { getVisualizerModeLabel } from '../../../visualizer/registry';
+import { useDynamicAlbumArtworkStore } from '../../../../stores/useDynamicAlbumArtworkStore';
 import { usePlayerChromeSettingsStore } from '../../../../stores/usePlayerChromeSettingsStore';
 import { openSettings } from '../../../../stores/useSettingsModalStore';
+import { useSystemBarSettingsStore } from '../../../../stores/useSystemBarSettingsStore';
 import { useThemeSettingsStore } from '../../../../stores/useThemeSettingsStore';
 import { useVisualizerSettingsStore } from '../../../../stores/useVisualizerSettingsStore';
+import type { DynamicAlbumArtworkIntensity } from '../../../../utils/dynamicAlbumArtwork';
 import { openAIEndpointOf } from '../../../../utils/openAIEndpoint';
 import { Button, FoldedGroup, Group, NumberField, Reveal, Row, Segmented, TextField, Toggle, Value, option, parseNumberText, type SettingsGroupDef, type SettingsOptionDef } from '../kit';
 import { settingsAnchorSubview } from '../navigation/settingsAnchorModel';
@@ -14,18 +17,23 @@ import { AiConnectionTestReply, useAiConnectionTest } from './AiConnectionTest';
 import { useSettingsPage, type AiApiKeyName } from './settingsPageContext';
 
 // src/components/modal/settings/pages/AppearancePage.tsx
-// The 外观 page: which lyric animation the player uses, light or dark, the colour theme, how a
-// song's own theme is made and applied, and (desktop app) the AI provider that makes those themes.
-// The lyric animation workbench and the theme colour editor are the existing overlays; their rows
-// here only open them.
+// The 外观 page: which lyric animation the player uses, Display and Immersive Mode system bar controls,
+// Dynamic Album Artwork controls, light or dark, the colour theme, how a song's own theme is made
+// and applied, and (desktop app) the AI provider that makes those themes.
 
 const LYRICS: SettingsGroupDef = { id: 'lyricsRenderer', titleKey: 'options.lyricsRenderer' };
+const DISPLAY_IMMERSIVE: SettingsGroupDef = { id: 'displayAndImmersiveMode', titleKey: 'options.displayAndImmersiveMode' };
 const THEME: SettingsGroupDef = { id: 'themePresets', titleKey: 'options.settingsHeadingTheme' };
 const SONG_THEME: SettingsGroupDef = { id: 'songTheme', titleKey: 'options.settingsHeadingSongTheme' };
 const AI: SettingsGroupDef = { id: 'electronSettings', titleKey: 'options.electronSettings', electronOnly: true };
 
 const O = {
     lyricsAnimation: option(LYRICS, 'lyricsAnimationAdjust', 'options.lyricsAnimationAdjust'),
+    dynamicArtwork: option(DISPLAY_IMMERSIVE, 'dynamicAlbumArtwork', 'options.dynamicAlbumArtwork'),
+    dynamicArtworkIntensity: option(DISPLAY_IMMERSIVE, 'dynamicAlbumArtworkIntensity', 'options.dynamicAlbumArtworkIntensity'),
+    hideStatusBar: option(DISPLAY_IMMERSIVE, 'hideStatusBar', 'options.hideStatusBar'),
+    hideNavigationBar: option(DISPLAY_IMMERSIVE, 'hideNavigationBar', 'options.hideNavigationBar'),
+    fullScreenLyricsMode: option(DISPLAY_IMMERSIVE, 'fullScreenLyricsMode', 'options.fullScreenLyricsMode'),
     daylight: option(THEME, 'daylightMode', 'options.daylightMode'),
     preset: option(THEME, 'themePreset', 'options.themePresets'),
     themePark: option(THEME, 'openThemePark', 'options.openThemePark'),
@@ -77,6 +85,32 @@ const AppearancePage: React.FC = () => {
         setDaylightPreference: state.setDaylightPreference,
         setFollowSystemTheme: state.setFollowSystemTheme,
     })));
+    const {
+        dynamicArtworkEnabled,
+        dynamicArtworkIntensity,
+        setDynamicArtworkEnabled,
+        setDynamicArtworkIntensity,
+    } = useDynamicAlbumArtworkStore(useShallow(state => ({
+        dynamicArtworkEnabled: state.enabled,
+        dynamicArtworkIntensity: state.intensity,
+        setDynamicArtworkEnabled: state.setDynamicAlbumArtworkEnabled,
+        setDynamicArtworkIntensity: state.setDynamicAlbumArtworkIntensity,
+    })));
+    const {
+        hideStatusBar,
+        hideNavigationBar,
+        fullScreenLyricsMode,
+        setHideStatusBar,
+        setHideNavigationBar,
+        setFullScreenLyricsMode,
+    } = useSystemBarSettingsStore(useShallow(state => ({
+        hideStatusBar: state.hideStatusBar,
+        hideNavigationBar: state.hideNavigationBar,
+        fullScreenLyricsMode: state.fullScreenLyricsMode,
+        setHideStatusBar: state.setHideStatusBar,
+        setHideNavigationBar: state.setHideNavigationBar,
+        setFullScreenLyricsMode: state.setFullScreenLyricsMode,
+    })));
     const visualizerMode = useVisualizerSettingsStore(state => state.visualizerMode);
     const randomEnabled = useVisualizerSettingsStore(state => state.randomVisualizerModePerSong);
     const nativeBlurEnabled = usePlayerChromeSettingsStore(state => state.enablePlayerPageNativeBlur);
@@ -98,8 +132,6 @@ const AppearancePage: React.FC = () => {
         }, usesOpenAi ? savedAiApiKeys.OPENAI_API_KEY : savedAiApiKeys.GEMINI_API_KEY);
     const setAi = (patch: Partial<typeof electronSettings>) => setElectronSettings({ ...electronSettings, ...patch });
     const savedKeyHint = (key: AiApiKeyName) => (savedAiApiKeys[key] ? t('options.aiApiKeySavedDesc') : undefined);
-    // The saved OpenAI-compatible key is sent only to the endpoint it was saved for: say so while the
-    // URL in the form points elsewhere and no replacement key has been typed.
     const boundOpenAiEndpoint = savedOpenAIKeyEndpoint
         && !(electronSettings.OPENAI_API_KEY || '').trim()
         && openAIEndpointOf(electronSettings.OPENAI_API_URL) !== savedOpenAIKeyEndpoint
@@ -112,6 +144,33 @@ const AppearancePage: React.FC = () => {
                 {nativeBlurEnabled && <Row notice={t('options.nativeBlurBackgroundNotice')} />}
                 <Row option={O.lyricsAnimation} hint={t('options.lyricsRendererDesc')} onClick={onOpenVisPlayground}>
                     <Value>{randomEnabled ? t('ui.visualizerRandom') : getVisualizerModeLabel(visualizerMode, t)}</Value>
+                </Row>
+            </Group>
+
+            <Group def={DISPLAY_IMMERSIVE}>
+                <Row option={O.dynamicArtwork} note={t('options.dynamicAlbumArtworkDesc', 'Animate the album cover on the player screen with subtle camera drift, layered parallax, ambient lighting, and feathered lower-edge blending.')}>
+                    <Toggle checked={dynamicArtworkEnabled} onChange={setDynamicArtworkEnabled} />
+                </Row>
+                <Reveal when={dynamicArtworkEnabled}>
+                    <Row sub option={O.dynamicArtworkIntensity}>
+                        <Segmented<DynamicAlbumArtworkIntensity>
+                            value={dynamicArtworkIntensity}
+                            options={[
+                                { value: 'low', label: t('options.dynamicAlbumArtworkIntensityLow', 'Low') },
+                                { value: 'normal', label: t('options.dynamicAlbumArtworkIntensityNormal', 'Normal') },
+                            ]}
+                            onChange={setDynamicArtworkIntensity}
+                        />
+                    </Row>
+                </Reveal>
+                <Row option={O.hideStatusBar} note={t('options.hideStatusBarDesc', 'Hide the top system status bar. Swipe from the top edge to reveal it temporarily.')}>
+                    <Toggle checked={hideStatusBar} onChange={setHideStatusBar} />
+                </Row>
+                <Row option={O.hideNavigationBar} note={t('options.hideNavigationBarDesc', 'Hide the bottom system navigation bar. Swipe from the screen edge to reveal it temporarily.')}>
+                    <Toggle checked={hideNavigationBar} onChange={setHideNavigationBar} />
+                </Row>
+                <Row option={O.fullScreenLyricsMode} note={t('options.fullScreenLyricsModeDesc', 'Automatically hide both the status bar and navigation bar together when viewing synchronized lyrics or the visualizer, and restore your previous bar state when leaving.')}>
+                    <Toggle checked={fullScreenLyricsMode} onChange={setFullScreenLyricsMode} />
                 </Row>
             </Group>
 
@@ -128,7 +187,6 @@ const AppearancePage: React.FC = () => {
                             if (choice === 'system') {
                                 setFollowSystemTheme(true);
                             } else {
-                                // A light or dark picked by hand also stops following the system.
                                 setDaylightPreference(choice === 'light');
                             }
                         }}
@@ -217,7 +275,6 @@ const AppearancePage: React.FC = () => {
                             />
                         </Row>
                         <Row option={O.openaiTemperature} hint={t('options.openaiApiTemperatureDesc')}>
-                            {/* Kept as text in the settings file; an emptied field stands for the default. */}
                             <NumberField
                                 value={parseNumberText(electronSettings.OPENAI_API_TEMPERATURE)}
                                 onChange={value => setAi({ OPENAI_API_TEMPERATURE: value === null ? '' : String(value) })}

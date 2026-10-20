@@ -3,6 +3,7 @@ import type { Container, Sprite } from 'pixi.js';
 import type { Line } from '../../../../types';
 import { createRng } from '../lumiereRandom';
 import { compressLight, lightAt, type ResolvedBeam } from '../light/rig';
+import { hasCursiveJoiningScript } from '../../../../utils/lyrics/arabicText';
 import { splitLyricGraphemes } from '../../../../utils/lyrics/graphemeTiming';
 import { buildGlyphLine, type GlyphLine } from './glyphLine';
 import { buildGlyphTimings } from './reveal';
@@ -15,11 +16,7 @@ import { keywordEchoColor, resolveGlyphKeywordColors } from './keywordColors';
 // 背景的歌词装饰：不是整句，而是「采集」来的分词。每个词被唱到时，就在主光源附近出现一个巨大的空心字
 // 碎片，随后沿主光束的方向（跟着光束的摆动）缓慢漂下去，约 7 秒淡出；碎片的大小、倾斜、拉伸按种子，
 // 许多碎片在光束里互相重叠。漂的过程中词会被拆开：字彼此散开、转动、斜切。平时很淡，光束里被照亮。
-// 每一帧只由 t 决定。
-//
-// 按需栅格化：随机量（落点、拆开方向）构建时一次抽完，与一次画完整个单元时逐项相同；巨大的空心字画布只在
-// 这一行第一个碎片出现前 PREPARE 秒才画（一帧最多提前画一行），最后一个碎片消失后就释放。整首歌一个单元
-// （轨迹过渡）时背景字的画布与纹理也只有正在漂的几行，构建时不再画整首歌的字。
+// 对于阿拉伯语等连写词，空心字碎片保持整词连写，不在漂移途中把词拆散成孤立字母。
 type PixiModule = typeof import('pixi.js');
 
 export interface LyricEchoOptions {
@@ -67,6 +64,8 @@ interface Fragment {
     /** 词在行里的字（字形序号）范围。 */
     start: number;
     end: number;
+    /** 是否为需要保持整词连写的阿拉伯语等词片。 */
+    cursive: boolean;
     glyphs: Array<{
         /** 这一行画好之后才有。 */
         sprite: Sprite | null;
@@ -131,6 +130,7 @@ export const createLyricEcho = (pixi: PixiModule, options: LyricEchoOptions): Ly
             const holder = new pixi.Container();
             view.addChild(holder);
             holders.push(holder);
+            const cursive = hasCursiveJoiningScript(word.text);
             fragments.push({
                 birth: timings[word.start]?.start ?? line.startTime,
                 across: (rng() - 0.5) * 2.8,
@@ -142,6 +142,7 @@ export const createLyricEcho = (pixi: PixiModule, options: LyricEchoOptions): Ly
                 spin: (rng() - 0.5) * 0.08,
                 start: word.start,
                 end,
+                cursive,
                 glyphs: graphemes.slice(word.start, end).map((char, offsetInWord) => {
                     const angle = rng() * Math.PI * 2;
                     return {
@@ -185,17 +186,18 @@ export const createLyricEcho = (pixi: PixiModule, options: LyricEchoOptions): Ly
         for (let index = echoLine.first; index < echoLine.last; index += 1) {
             const fragment = fragments[index]!;
             const slices = layout.glyphs.slice(fragment.start, fragment.end);
-            const left = slices[0]!.charX;
-            const right = slices[slices.length - 1]!.charX + slices[slices.length - 1]!.charWidth;
+            const left = Math.min(...slices.map(s => s.charX));
+            const right = Math.max(...slices.map(s => s.charX + s.charWidth));
             const middle = (left + right) / 2;
             fragment.glyphs.forEach((glyph, offsetInWord) => {
                 const slice = slices[offsetInWord]!;
                 const sprite = new pixi.Sprite(slice.texture);
                 sprite.anchor.set(slice.anchorX, slice.anchorY);
-                sprite.visible = !glyph.blank;
+                const hiddenContinuation = fragment.cursive && offsetInWord > 0;
+                sprite.visible = !glyph.blank && !hiddenContinuation;
                 holders[index]!.addChild(sprite);
                 glyph.sprite = sprite;
-                glyph.offset = slice.charX + slice.charWidth / 2 - middle;
+                glyph.offset = fragment.cursive ? 0 : slice.charX + slice.charWidth / 2 - middle;
             });
         }
     };
@@ -266,17 +268,17 @@ export const createLyricEcho = (pixi: PixiModule, options: LyricEchoOptions): Ly
             holder.rotation = fragment.rotation + fragment.spin * age;
             holder.scale.set(fragment.scale * fragment.stretch, fragment.scale);
             holder.skew.set(fragment.shear * age, 0);
-            // 拆开：字彼此散开（按 age^1.3 加速）、各自转动。
-            const split = 0.05 * age ** 1.3;
+            // 拆开：非连写词的字彼此散开（按 age^1.3 加速）、各自转动；连写词保持整词连写漂移。
+            const split = fragment.cursive ? 0 : 0.05 * age ** 1.3;
             const lit = compressLight(lightAt(beams, x / height, y / height));
             const glyphAlpha = alpha * (0.05 + 0.4 * lit);
             for (const glyph of fragment.glyphs) {
                 if (!glyph.sprite) continue;
                 glyph.sprite.position.set(
-                    glyph.offset + glyph.dx * fontPx * split * glyph.speed,
-                    glyph.dy * fontPx * split * glyph.speed,
+                    split === 0 ? glyph.offset : glyph.offset + glyph.dx * fontPx * split * glyph.speed,
+                    split === 0 ? 0 : glyph.dy * fontPx * split * glyph.speed,
                 );
-                glyph.sprite.rotation = glyph.spin * split * 4;
+                glyph.sprite.rotation = split === 0 ? 0 : glyph.spin * split * 4;
                 glyph.sprite.alpha = glyphAlpha;
                 glyph.sprite.tint = hasKeywords && glyph.keyword ? keywordTint(color, glyph.keyword) : color;
             }

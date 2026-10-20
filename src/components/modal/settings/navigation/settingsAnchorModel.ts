@@ -11,6 +11,7 @@ import type { SettingsSubviewId } from '../../../../stores/useSettingsModalStore
 export const SETTINGS_ANCHOR_DEFINITIONS = {
     // pages/AppearancePage
     lyricsRenderer: { section: 'appearance' },
+    displayAndImmersiveMode: { section: 'appearance' },
     themePresets: { section: 'appearance' },
     electronSettings: { section: 'appearance' },
 

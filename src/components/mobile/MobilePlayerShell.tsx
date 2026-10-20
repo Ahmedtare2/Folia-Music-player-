@@ -6,11 +6,13 @@ import {
     Disc3,
     FileUp,
     FolderOpen,
+    Globe,
     Grid,
     Heart,
     Library,
     ListMusic,
     Loader2,
+    Maximize2,
     Moon,
     Music,
     Play,
@@ -42,7 +44,15 @@ import { getCachedLocalCoverObjectUrl, resolveLocalCoverObjectUrl } from '../../
 import { isLocalCoverAssetUrl } from '../../services/localCoverAssetUrl';
 import { detectTextDirection } from '../../utils/lyrics/arabicText';
 import { VISUALIZER_REGISTRY, getVisualizerModeLabel } from '../visualizer/registry';
-import { minimizeAndroidApp } from '../../services/android/foliaAndroidBridge';
+import { ANDROID_VISIBILITY_EVENT, minimizeAndroidApp } from '../../services/android/foliaAndroidBridge';
+import type { NavidromeSong } from '../../types/navidrome';
+import { AUDIO_EQUALIZER_PRESET_LABELS } from '../../utils/audioEqualizer';
+import { useAudioSettingsStore } from '../../stores/useAudioSettingsStore';
+import { useDynamicAlbumArtworkStore } from '../../stores/useDynamicAlbumArtworkStore';
+import { useSystemBarSettingsStore } from '../../stores/useSystemBarSettingsStore';
+import { useShallow } from 'zustand/react/shallow';
+import MobileEqualizerSheet from './MobileEqualizerSheet';
+import MobileOnlineHub from './MobileOnlineHub';
 import MobileMiniPlayer from './MobileMiniPlayer';
 import MobileNowPlayingSheet from './MobileNowPlayingSheet';
 import {
@@ -64,9 +74,10 @@ import {
 
 // src/components/mobile/MobilePlayerShell.tsx
 // Phase 4 cohesive, OLED-friendly, mobile-first Android music player shell.
-// Organizes navigation around local music (Songs, Albums/Artists, Folders/Playlists, Settings),
+// Organizes navigation around local music (Songs, Albums/Artists, Folders/Playlists, Online, Settings),
 // provides a persistent mini-player and full-screen Cover/Lyrics/Visualizer sheet, and integrates
-// Android system Back navigation and safe-area insets without breaking desktop/browser modes.
+// Android system Back navigation, Display & Immersive Mode system bar controls, Dynamic Album Artwork,
+// and safe-area insets.
 
 export interface MobilePlayerShellProps {
     localSongs: LocalSong[];
@@ -104,6 +115,7 @@ export interface MobilePlayerShellProps {
     onChangeLyricsSource: (source: 'local' | 'embedded' | 'online') => void;
     onImportLocalLyricsFile: (content: string, fileName: string) => void;
     onOpenLyricMatch: () => void;
+    onAutoMatchLyrics?: () => void;
     onTogglePureMusic?: () => void;
     onImportFolder: () => Promise<unknown>;
     onRefreshFolders: () => Promise<unknown>;
@@ -132,6 +144,11 @@ export interface MobilePlayerShellProps {
     isLatticeOpen?: boolean;
     onOpenLattice?: () => void;
     onCloseLattice?: () => void;
+    onPlayOnlineSong?: (song: SongResult, queue?: SongResult[]) => void;
+    onAddOnlineSongToQueue?: (song: SongResult) => void;
+    onPlayNavidromeSong?: (song: NavidromeSong, queue?: NavidromeSong[]) => void;
+    onAddNavidromeSongsToQueue?: (songs: NavidromeSong[]) => void;
+    onOpenFullSearchWorkspace?: () => void;
 }
 
 const MAX_RENDERED_SONGS_STEP = 120;
@@ -226,6 +243,7 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
     onChangeLyricsSource,
     onImportLocalLyricsFile,
     onOpenLyricMatch,
+    onAutoMatchLyrics,
     onTogglePureMusic,
     onImportFolder,
     onRefreshFolders,
@@ -254,7 +272,52 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
     isLatticeOpen = false,
     onOpenLattice,
     onCloseLattice,
+    onPlayOnlineSong,
+    onAddOnlineSongToQueue,
+    onPlayNavidromeSong,
+    onAddNavidromeSongsToQueue,
+    onOpenFullSearchWorkspace,
 }) => {
+    const equalizerSettings = useAudioSettingsStore(state => state.audioEqualizerSettings);
+    const setEqualizerSettings = useAudioSettingsStore(state => state.handleSetAudioEqualizerSettings);
+    const openDesktopEqualizer = useAudioSettingsStore(state => state.openAudioEqualizer);
+    const {
+        dynamicArtworkEnabled,
+        dynamicArtworkIntensity,
+        setDynamicArtworkEnabled,
+        setDynamicArtworkIntensity,
+    } = useDynamicAlbumArtworkStore(
+        useShallow(state => ({
+            dynamicArtworkEnabled: state.enabled,
+            dynamicArtworkIntensity: state.intensity,
+            setDynamicArtworkEnabled: state.setDynamicAlbumArtworkEnabled,
+            setDynamicArtworkIntensity: state.setDynamicAlbumArtworkIntensity,
+        })),
+    );
+    const {
+        hideStatusBar,
+        hideNavigationBar,
+        fullScreenLyricsMode,
+        effectiveSystemBars,
+        setHideStatusBar,
+        setHideNavigationBar,
+        setFullScreenLyricsMode,
+        setLyricsOrVisualizerScreenActive,
+        reapplySystemBars,
+    } = useSystemBarSettingsStore(
+        useShallow(state => ({
+            hideStatusBar: state.hideStatusBar,
+            hideNavigationBar: state.hideNavigationBar,
+            fullScreenLyricsMode: state.fullScreenLyricsMode,
+            effectiveSystemBars: state.effectiveState,
+            setHideStatusBar: state.setHideStatusBar,
+            setHideNavigationBar: state.setHideNavigationBar,
+            setFullScreenLyricsMode: state.setFullScreenLyricsMode,
+            setLyricsOrVisualizerScreenActive: state.setLyricsOrVisualizerScreenActive,
+            reapplySystemBars: state.reapplySystemBars,
+        })),
+    );
+    const [isShellEqualizerOpen, setIsShellEqualizerOpen] = useState(false);
     const { t } = useTranslation();
     const [navState, setNavState] = useState<MobileNavigationState>(INITIAL_MOBILE_NAVIGATION_STATE);
     const [searchQuery, setSearchQuery] = useState('');
@@ -271,6 +334,34 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
     isLatticeOpenRef.current = isLatticeOpen;
     const onCloseLatticeRef = useRef(onCloseLattice);
     onCloseLatticeRef.current = onCloseLattice;
+
+    const isPlayerExpanded = navState.playerSheet === 'expanded' && Boolean(currentSong);
+    const isLyricsOrVisualizerScreen = Boolean(
+        !externalModals.isSettingsModalOpen
+        && (
+            isLatticeOpen
+            || (isPlayerExpanded && (navState.playerDisplayMode === 'lyrics' || navState.playerDisplayMode === 'stage'))
+        ),
+    );
+
+    // Restore persisted system bar settings on startup and when returning to foreground
+    useEffect(() => {
+        reapplySystemBars();
+        if (typeof window === 'undefined') return undefined;
+        const handleNativeVisibility = (event: Event) => {
+            const detail = (event as CustomEvent<{ visible?: boolean }>).detail;
+            if (detail?.visible) {
+                reapplySystemBars();
+            }
+        };
+        window.addEventListener(ANDROID_VISIBILITY_EVENT, handleNativeVisibility);
+        return () => window.removeEventListener(ANDROID_VISIBILITY_EVENT, handleNativeVisibility);
+    }, [reapplySystemBars]);
+
+    // Apply or restore system bar visibility when entering or leaving the lyrics / visualizer screen
+    useEffect(() => {
+        setLyricsOrVisualizerScreenActive(isLyricsOrVisualizerScreen);
+    }, [isLyricsOrVisualizerScreen, setLyricsOrVisualizerScreenActive]);
 
     // Report whether the full-screen visualizer is visible so App.tsx can pause GPU loops when hidden
     useEffect(() => {
@@ -289,7 +380,14 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
     }, []);
 
     // Register global Android hardware Back handler called by MainActivity.java OnBackPressedCallback
+    const isShellEqualizerOpenRef = useRef(isShellEqualizerOpen);
+    isShellEqualizerOpenRef.current = isShellEqualizerOpen;
+
     const handleHardwareBack = useCallback((): boolean => {
+        if (isShellEqualizerOpenRef.current) {
+            setIsShellEqualizerOpen(false);
+            return true;
+        }
         if (isLatticeOpenRef.current && onCloseLatticeRef.current) {
             onCloseLatticeRef.current();
             return true;
@@ -346,7 +444,6 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
 
     const accentColor = theme.accentColor || theme.primaryColor || '#f4f4f5';
     const hasLyrics = Boolean(lyrics && lyrics.lines.length > 0);
-    const isPlayerExpanded = navState.playerSheet === 'expanded' && Boolean(currentSong);
 
     const handleSelectTab = (tab: MobilePrimaryTab) => {
         setNavState(prev => ({
@@ -618,18 +715,27 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
         return null;
     }
 
+    const topShellSafePadding = effectiveSystemBars.hideStatusBar
+        ? 'max(var(--folia-native-cutout-top, env(safe-area-inset-top, 0px)), 8px)'
+        : 'max(var(--folia-native-inset-top, env(safe-area-inset-top, 0px)), 8px)';
+    const bottomNavSafePadding = effectiveSystemBars.hideNavigationBar
+        ? '8px'
+        : 'max(var(--folia-native-inset-bottom, env(safe-area-inset-bottom, 0px)), 8px)';
+
     return (
         <div
             data-testid="mobile-player-shell"
+            data-hide-status-bar={effectiveSystemBars.hideStatusBar ? 'true' : 'false'}
+            data-hide-navigation-bar={effectiveSystemBars.hideNavigationBar ? 'true' : 'false'}
             className={`fixed inset-0 z-40 flex flex-col overflow-hidden text-zinc-100 select-none ${
                 isPlayerExpanded
-                    ? (navState.playerDisplayMode === 'stage' ? 'bg-transparent' : 'bg-[#060609]')
+                    ? ((navState.playerDisplayMode === 'stage' || navState.playerDisplayMode === 'lyrics') ? 'bg-transparent' : 'bg-[#060609]')
                     : 'bg-[#060609]'
             }`}
             style={{
-                paddingTop: 'max(env(safe-area-inset-top, 0px), 8px)',
-                paddingLeft: 'env(safe-area-inset-left, 0px)',
-                paddingRight: 'env(safe-area-inset-right, 0px)',
+                paddingTop: topShellSafePadding,
+                paddingLeft: 'max(var(--folia-native-inset-left, env(safe-area-inset-left, 0px)), 0px)',
+                paddingRight: 'max(var(--folia-native-inset-right, env(safe-area-inset-right, 0px)), 0px)',
             }}
         >
             <input
@@ -668,6 +774,22 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                         </div>
 
                         <div className="flex items-center gap-2">
+                            <button
+                                type="button"
+                                data-testid="mobile-header-equalizer-btn"
+                                onClick={() => setIsShellEqualizerOpen(true)}
+                                className="relative flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-white/[0.05] text-zinc-200 active:scale-95 transition-transform"
+                                aria-label="Open Audio Equalizer"
+                                title="Audio Equalizer & Effects"
+                            >
+                                <Sliders size={15} />
+                                {equalizerSettings.enabled && (
+                                    <span
+                                        className="absolute right-2 top-2 h-2 w-2 rounded-full"
+                                        style={{ backgroundColor: accentColor }}
+                                    />
+                                )}
+                            </button>
                             {onOpenLattice && (
                                 <button
                                     type="button"
@@ -994,13 +1116,181 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                                     </div>
                                 )}
                             </div>
+                        ) : navState.activeTab === 'online' ? (
+                            <MobileOnlineHub
+                                accentColor={accentColor}
+                                activeSubTab={navState.onlineSubTab ?? 'discover'}
+                                onChangeSubTab={(sub) => setNavState(prev => ({ ...prev, onlineSubTab: sub }))}
+                                onPlayOnlineSong={(song, queue) => onPlayOnlineSong?.(song, queue)}
+                                onAddOnlineSongToQueue={(song) => onAddOnlineSongToQueue?.(song)}
+                                onPlayNavidromeSong={(song, queue) => onPlayNavidromeSong?.(song, queue)}
+                                onAddNavidromeSongsToQueue={(songs) => onAddNavidromeSongsToQueue?.(songs)}
+                                onOpenFullSearchWorkspace={onOpenFullSearchWorkspace}
+                            />
                         ) : (
-                            /* Settings Tab: Mobile-First Local Library, Visualizer, Typography, and Audio Settings */
+                            /* Settings Tab: Mobile-First Local Library, Display & Immersive Mode, Dynamic Album Artwork, Visualizer, Equalizer, and Audio Settings */
                             <div
                                 data-testid="mobile-settings-view"
                                 className="flex-1 overflow-y-auto overscroll-contain px-4 pb-8 space-y-5"
                             >
-                                {/* Section 1: Local Music Storage (SAF) */}
+                                {/* Section 1: Display and Immersive Mode (System Bar Visibility & Dynamic Album Artwork) */}
+                                <section
+                                    data-testid="mobile-settings-display-immersive-card"
+                                    className="rounded-3xl border border-white/10 bg-white/[0.04] p-4 space-y-3.5"
+                                >
+                                    <div className="flex items-center justify-between gap-3">
+                                        <div>
+                                            <h3 className="text-sm font-bold text-white">
+                                                {t('options.displayAndImmersiveMode', 'Display and Immersive Mode')}
+                                            </h3>
+                                            <p className="text-xs text-zinc-400">
+                                                Dynamic album artwork & native Android edge-to-edge system bar controls
+                                            </p>
+                                        </div>
+                                        <Maximize2 size={18} style={{ color: accentColor }} />
+                                    </div>
+
+                                    <div className="space-y-2.5">
+                                        {/* Switch 0: Dynamic Album Artwork (On/Off + Low/Normal Motion Intensity) */}
+                                        <div
+                                            data-testid="mobile-settings-dynamic-artwork-row"
+                                            className="rounded-2xl border border-white/10 bg-white/[0.03] px-3.5 py-2.5 space-y-2"
+                                        >
+                                            <div className="flex items-center justify-between gap-3">
+                                                <div className="min-w-0">
+                                                    <div className="text-xs font-semibold text-white">
+                                                        {t('options.dynamicAlbumArtwork', 'Dynamic Album Artwork')}
+                                                    </div>
+                                                    <p className="text-[11px] text-zinc-400">
+                                                        Subtle camera drift, layered parallax & feathered lower-edge blend on the Cover screen
+                                                    </p>
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    role="switch"
+                                                    data-testid="switch-dynamic-album-artwork"
+                                                    aria-label="Dynamic Album Artwork"
+                                                    aria-checked={dynamicArtworkEnabled}
+                                                    onClick={() => setDynamicArtworkEnabled(!dynamicArtworkEnabled)}
+                                                    className={`h-8 shrink-0 rounded-full border px-3.5 text-xs font-semibold transition-all ${
+                                                        dynamicArtworkEnabled
+                                                            ? 'border-white bg-white text-zinc-950'
+                                                            : 'border-white/15 bg-white/[0.06] text-zinc-300'
+                                                    }`}
+                                                >
+                                                    {dynamicArtworkEnabled ? 'On' : 'Off'}
+                                                </button>
+                                            </div>
+                                            {dynamicArtworkEnabled && (
+                                                <div className="flex items-center justify-between border-t border-white/[0.06] pt-2">
+                                                    <span className="text-[11px] font-medium text-zinc-300">
+                                                        Motion Intensity
+                                                    </span>
+                                                    <div className="flex items-center gap-1.5">
+                                                        {(['low', 'normal'] as const).map(level => (
+                                                            <button
+                                                                key={level}
+                                                                type="button"
+                                                                data-testid={`dynamic-artwork-intensity-${level}`}
+                                                                onClick={() => setDynamicArtworkIntensity(level)}
+                                                                className={`h-7 rounded-lg border px-2.5 text-[11px] font-medium capitalize transition-all ${
+                                                                    dynamicArtworkIntensity === level
+                                                                        ? 'border-white bg-white text-zinc-950 font-semibold'
+                                                                        : 'border-white/10 bg-white/[0.04] text-zinc-300'
+                                                                }`}
+                                                            >
+                                                                {level}
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        {/* Switch 1: Hide status bar */}
+                                        <div className="flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/[0.03] px-3.5 py-2.5">
+                                            <div className="min-w-0">
+                                                <div className="text-xs font-semibold text-white">
+                                                    {t('options.hideStatusBar', 'Hide status bar')}
+                                                </div>
+                                                <p className="text-[11px] text-zinc-400">
+                                                    Hide the top Android status bar across the app
+                                                </p>
+                                            </div>
+                                            <button
+                                                type="button"
+                                                role="switch"
+                                                data-testid="switch-hide-status-bar"
+                                                aria-label="Hide status bar"
+                                                aria-checked={hideStatusBar}
+                                                onClick={() => setHideStatusBar(!hideStatusBar)}
+                                                className={`h-8 shrink-0 rounded-full border px-3.5 text-xs font-semibold transition-all ${
+                                                    hideStatusBar
+                                                        ? 'border-white bg-white text-zinc-950'
+                                                        : 'border-white/15 bg-white/[0.06] text-zinc-300'
+                                                }`}
+                                            >
+                                                {hideStatusBar ? 'On' : 'Off'}
+                                            </button>
+                                        </div>
+
+                                        {/* Switch 2: Hide navigation bar */}
+                                        <div className="flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/[0.03] px-3.5 py-2.5">
+                                            <div className="min-w-0">
+                                                <div className="text-xs font-semibold text-white">
+                                                    {t('options.hideNavigationBar', 'Hide navigation bar')}
+                                                </div>
+                                                <p className="text-[11px] text-zinc-400">
+                                                    Hide the bottom Android navigation bar across the app
+                                                </p>
+                                            </div>
+                                            <button
+                                                type="button"
+                                                role="switch"
+                                                data-testid="switch-hide-navigation-bar"
+                                                aria-label="Hide navigation bar"
+                                                aria-checked={hideNavigationBar}
+                                                onClick={() => setHideNavigationBar(!hideNavigationBar)}
+                                                className={`h-8 shrink-0 rounded-full border px-3.5 text-xs font-semibold transition-all ${
+                                                    hideNavigationBar
+                                                        ? 'border-white bg-white text-zinc-950'
+                                                        : 'border-white/15 bg-white/[0.06] text-zinc-300'
+                                                }`}
+                                            >
+                                                {hideNavigationBar ? 'On' : 'Off'}
+                                            </button>
+                                        </div>
+
+                                        {/* Switch 3: Full-screen lyrics mode */}
+                                        <div className="flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/[0.03] px-3.5 py-2.5">
+                                            <div className="min-w-0">
+                                                <div className="text-xs font-semibold text-white">
+                                                    {t('options.fullScreenLyricsMode', 'Full-screen lyrics mode')}
+                                                </div>
+                                                <p className="text-[11px] text-zinc-400">
+                                                    Hide both status and navigation bars together in Lyrics & Visualizer views, and restore when leaving
+                                                </p>
+                                            </div>
+                                            <button
+                                                type="button"
+                                                role="switch"
+                                                data-testid="switch-fullscreen-lyrics-mode"
+                                                aria-label="Full-screen lyrics mode"
+                                                aria-checked={fullScreenLyricsMode}
+                                                onClick={() => setFullScreenLyricsMode(!fullScreenLyricsMode)}
+                                                className={`h-8 shrink-0 rounded-full border px-3.5 text-xs font-semibold transition-all ${
+                                                    fullScreenLyricsMode
+                                                        ? 'border-white bg-white text-zinc-950'
+                                                        : 'border-white/15 bg-white/[0.06] text-zinc-300'
+                                                }`}
+                                            >
+                                                {fullScreenLyricsMode ? 'On' : 'Off'}
+                                            </button>
+                                        </div>
+                                    </div>
+                                </section>
+
+                                {/* Section 2: Local Music Storage (SAF) */}
                                 <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-4 space-y-3">
                                     <div className="flex items-center justify-between">
                                         <div>
@@ -1033,7 +1323,7 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                                     </div>
                                 </section>
 
-                                {/* Section 2: Folia Lyric Visualizer & Appearance */}
+                                {/* Section 3: Folia Lyric Visualizer & Appearance */}
                                 <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-4 space-y-3.5">
                                     <div className="flex items-center justify-between">
                                         <div>
@@ -1045,7 +1335,7 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                                         <Sparkles size={19} style={{ color: accentColor }} />
                                     </div>
 
-                                    <div className="grid grid-cols-3 gap-2">
+                                    <div className="grid grid-cols-3 sm:grid-cols-4 landscape:grid-cols-5 gap-2">
                                         {VISUALIZER_REGISTRY.map(entry => {
                                             const active = visualizerMode === entry.mode;
                                             return (
@@ -1053,7 +1343,7 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                                                     key={entry.mode}
                                                     type="button"
                                                     onClick={() => onVisualizerModeChange(entry.mode)}
-                                                    className={`rounded-xl border px-2.5 py-2 text-xs font-medium truncate ${
+                                                    className={`min-h-[38px] rounded-xl border px-2.5 py-2 text-xs font-medium truncate ${
                                                         active
                                                             ? 'border-white bg-white text-zinc-950 font-semibold'
                                                             : 'border-white/10 bg-white/[0.03] text-zinc-300'
@@ -1091,7 +1381,84 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                                     </div>
                                 </section>
 
-                                {/* Section 3: Audio & ReplayGain */}
+                                {/* Section 4: Real 10-Band Audio Equalizer & Effects */}
+                                <section
+                                    data-testid="mobile-settings-equalizer-card"
+                                    className="rounded-3xl border border-white/10 bg-white/[0.04] p-4 space-y-3"
+                                >
+                                    <div className="flex items-center justify-between gap-3">
+                                        <div>
+                                            <h3 className="text-sm font-bold text-white">Audio Equalizer & Effects</h3>
+                                            <p className="text-xs text-zinc-400">
+                                                {equalizerSettings.enabled ? 'Processing On' : 'Processing Off'} · Preset: {AUDIO_EQUALIZER_PRESET_LABELS[equalizerSettings.preset] ?? equalizerSettings.preset}
+                                            </p>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            role="switch"
+                                            aria-checked={equalizerSettings.enabled}
+                                            onClick={() => setEqualizerSettings({ ...equalizerSettings, enabled: !equalizerSettings.enabled })}
+                                            className={`h-9 rounded-full border px-3.5 text-xs font-semibold transition-all ${
+                                                equalizerSettings.enabled
+                                                    ? 'border-white bg-white text-zinc-950'
+                                                    : 'border-white/15 bg-white/[0.06] text-zinc-300'
+                                            }`}
+                                        >
+                                            {equalizerSettings.enabled ? 'EQ On' : 'EQ Off'}
+                                        </button>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-2.5">
+                                        <button
+                                            type="button"
+                                            data-testid="mobile-settings-open-eq-btn"
+                                            onClick={() => setIsShellEqualizerOpen(true)}
+                                            className="flex h-11 items-center justify-center gap-2 rounded-2xl bg-white text-xs font-semibold text-zinc-950 active:scale-95"
+                                        >
+                                            <Sliders size={15} />
+                                            <span>Open Equalizer</span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={openDesktopEqualizer}
+                                            className="flex h-11 items-center justify-center gap-2 rounded-2xl border border-white/15 bg-white/[0.06] text-xs font-semibold text-white active:scale-95"
+                                        >
+                                            <Sparkles size={15} style={{ color: accentColor }} />
+                                            <span>Studio EQ Dialog</span>
+                                        </button>
+                                    </div>
+                                </section>
+
+                                {/* Section 5: Online Services, Accounts & Navidrome */}
+                                <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-4 space-y-3">
+                                    <div className="flex items-center justify-between">
+                                        <div>
+                                            <h3 className="text-sm font-bold text-white">Online Music, Accounts & Navidrome</h3>
+                                            <p className="text-xs text-zinc-400">
+                                                Playlists, discovery, online lyrics & self-hosted streaming
+                                            </p>
+                                        </div>
+                                        <Globe size={18} style={{ color: accentColor }} />
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => setNavState(prev => ({ ...prev, activeTab: 'online', onlineSubTab: 'discover' }))}
+                                            className="flex h-10 items-center justify-center gap-1.5 rounded-xl border border-white/12 bg-white/[0.06] text-xs font-medium text-zinc-100"
+                                        >
+                                            <Globe size={14} />
+                                            <span>Online & Playlists</span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setNavState(prev => ({ ...prev, activeTab: 'online', onlineSubTab: 'navidrome' }))}
+                                            className="flex h-10 items-center justify-center gap-1.5 rounded-xl border border-white/12 bg-white/[0.06] text-xs font-medium text-zinc-100"
+                                        >
+                                            <span>Navidrome Server</span>
+                                        </button>
+                                    </div>
+                                </section>
+
+                                {/* Section 6: Audio & ReplayGain */}
                                 <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-4 space-y-3">
                                     <h3 className="text-sm font-bold text-white">Audio & Playback</h3>
                                     <div className="flex items-center justify-between">
@@ -1115,7 +1482,7 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                                     </div>
                                 </section>
 
-                                {/* Section 4: Advanced Folia Settings & Custom Tunings */}
+                                {/* Section 7: Advanced Folia Settings & Custom Tunings */}
                                 <button
                                     type="button"
                                     onClick={onOpenFullSettingsModal}
@@ -1167,13 +1534,14 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                             aria-label="Primary mobile navigation"
                             className="flex shrink-0 items-center justify-around border-t border-white/10 bg-[#08080c]/95 px-2 pt-1.5 backdrop-blur-xl"
                             style={{
-                                paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 8px)',
+                                paddingBottom: bottomNavSafePadding,
                             }}
                         >
                             {([
                                 { id: 'songs' as const, label: 'Library', icon: Library },
                                 { id: 'albums' as const, label: 'Albums', icon: Disc3 },
                                 { id: 'folders' as const, label: 'Folders', icon: FolderOpen },
+                                { id: 'online' as const, label: 'Online', icon: Globe },
                                 { id: 'settings' as const, label: 'Settings', icon: Settings },
                             ]).map(item => {
                                 const Icon = item.icon;
@@ -1231,6 +1599,7 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                 onChangeLyricsSource={onChangeLyricsSource}
                 onImportLocalLyricsFile={onImportLocalLyricsFile}
                 onOpenLyricMatch={onOpenLyricMatch}
+                onAutoMatchLyrics={onAutoMatchLyrics}
                 onTogglePureMusic={onTogglePureMusic}
                 onSeek={onSeek}
                 onLyricLineSeek={onLyricLineSeek}
@@ -1247,6 +1616,24 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                 onOpenVisualizerSettings={onOpenFullSettingsModal}
                 onOpenLattice={onOpenLattice}
             />
+
+            {isShellEqualizerOpen && (
+                <div
+                    className="fixed inset-0 z-[230] flex flex-col justify-end bg-black/65 backdrop-blur-sm"
+                    onClick={(e) => {
+                        if (e.target === e.currentTarget) setIsShellEqualizerOpen(false);
+                    }}
+                >
+                    <MobileEqualizerSheet
+                        accentColor={accentColor}
+                        onClose={() => setIsShellEqualizerOpen(false)}
+                        onOpenFullDesktopEqualizer={() => {
+                            setIsShellEqualizerOpen(false);
+                            openDesktopEqualizer();
+                        }}
+                    />
+                </div>
+            )}
         </div>
     );
 };

@@ -3,7 +3,8 @@ import { isAndroidNativeApp } from '../../utils/platform';
 // src/services/android/foliaAndroidBridge.ts
 // Typed interface and runtime bridge to the native Android Capacitor plugin (FoliaNativeBridgePlugin)
 // for Storage Access Framework (SAF) local folder/file access, byte-range media streaming,
-// off-thread native metadata/artwork extraction, and AndroidX Media3 foreground playback notification.
+// off-thread native metadata/artwork extraction, AndroidX Media3 foreground playback notification,
+// and AndroidX WindowInsetsControllerCompat system bar visibility.
 
 export interface FoliaSafPickedDirectory {
     treeUri: string;
@@ -67,6 +68,16 @@ export interface FoliaAndroidMediaActionEvent {
     seekTimeMs?: number;
 }
 
+export interface FoliaAndroidSystemBarsConfig {
+    hideStatusBar: boolean;
+    hideNavigationBar: boolean;
+}
+
+export interface FoliaAndroidSystemBarsState extends FoliaAndroidSystemBarsConfig {
+    supported: boolean;
+    behavior?: string;
+}
+
 export interface FoliaNativeBridgePluginContract {
     pickDirectory?: () => Promise<FoliaSafPickedDirectory | { cancelled?: boolean }>;
     pickAudioFiles?: () => Promise<FoliaSafPickedFilesResult | { cancelled?: boolean }>;
@@ -99,6 +110,8 @@ export interface FoliaNativeBridgePluginContract {
     syncPlaybackState?: (payload: FoliaAndroidPlaybackMetadataPayload) => Promise<void>;
     stopPlaybackService?: () => Promise<void>;
     minimizeApp?: () => Promise<void>;
+    setSystemBarsVisibility?: (options: FoliaAndroidSystemBarsConfig) => Promise<FoliaAndroidSystemBarsState>;
+    getSystemBarsVisibility?: () => Promise<FoliaAndroidSystemBarsState>;
     addListener?: (
         eventName: 'mediaAction',
         listenerFunc: (event: FoliaAndroidMediaActionEvent) => void,
@@ -107,6 +120,8 @@ export interface FoliaNativeBridgePluginContract {
 
 export const ANDROID_SAF_STREAM_PATH = '/__folia_saf/stream';
 export const ANDROID_VISIBILITY_EVENT = 'folia:native-visibility';
+export const ANDROID_SYSTEM_BARS_STATE_EVENT = 'folia:system-bars-state';
+export const ANDROID_SYSTEM_INSETS_EVENT = 'folia:system-insets';
 
 const getNativePlugin = (): FoliaNativeBridgePluginContract | null => {
     if (typeof globalThis === 'undefined') return null;
@@ -140,6 +155,69 @@ export const minimizeAndroidApp = async (): Promise<boolean> => {
         return true;
     } catch {
         return false;
+    }
+};
+
+/**
+ * Applies native Android system bar visibility via WindowInsetsControllerCompat with
+ * BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE. No-ops gracefully on web and desktop.
+ */
+export const applyAndroidSystemBarsVisibility = async (
+    config: FoliaAndroidSystemBarsConfig,
+): Promise<FoliaAndroidSystemBarsState> => {
+    const plugin = getNativePlugin();
+    if (!plugin?.setSystemBarsVisibility) {
+        return {
+            supported: false,
+            hideStatusBar: Boolean(config.hideStatusBar),
+            hideNavigationBar: Boolean(config.hideNavigationBar),
+        };
+    }
+    try {
+        const res = await plugin.setSystemBarsVisibility({
+            hideStatusBar: Boolean(config.hideStatusBar),
+            hideNavigationBar: Boolean(config.hideNavigationBar),
+        });
+        return {
+            supported: res?.supported ?? true,
+            hideStatusBar: res?.hideStatusBar ?? Boolean(config.hideStatusBar),
+            hideNavigationBar: res?.hideNavigationBar ?? Boolean(config.hideNavigationBar),
+            behavior: res?.behavior ?? 'SHOW_TRANSIENT_BARS_BY_SWIPE',
+        };
+    } catch (error) {
+        console.warn('[AndroidBridge] Failed to set system bars visibility:', error);
+        return {
+            supported: false,
+            hideStatusBar: Boolean(config.hideStatusBar),
+            hideNavigationBar: Boolean(config.hideNavigationBar),
+        };
+    }
+};
+
+/** Queries the current native Android system bar visibility state. */
+export const getAndroidSystemBarsVisibility = async (): Promise<FoliaAndroidSystemBarsState> => {
+    const plugin = getNativePlugin();
+    if (!plugin?.getSystemBarsVisibility) {
+        return {
+            supported: false,
+            hideStatusBar: false,
+            hideNavigationBar: false,
+        };
+    }
+    try {
+        const res = await plugin.getSystemBarsVisibility();
+        return {
+            supported: res?.supported ?? true,
+            hideStatusBar: Boolean(res?.hideStatusBar),
+            hideNavigationBar: Boolean(res?.hideNavigationBar),
+            behavior: res?.behavior ?? 'SHOW_TRANSIENT_BARS_BY_SWIPE',
+        };
+    } catch {
+        return {
+            supported: false,
+            hideStatusBar: false,
+            hideNavigationBar: false,
+        };
     }
 };
 
@@ -290,10 +368,6 @@ export interface ReadAndroidBytesOptions {
     maxBytes?: number;
 }
 
-/**
- * Reads the raw bytes (or a bounded byte slice) of an Android SAF content:// URI via local
- * HTTP 206 stream fetch or native base64 bridge fallback.
- */
 export const readAndroidContentUriBytes = async (
     contentUri: string,
     treeUri?: string,
@@ -347,10 +421,6 @@ export const readAndroidContentUriBytes = async (
     throw new Error(`Unable to read Android SAF content URI: ${contentUri}`);
 };
 
-/**
- * Extracts audio metadata and downscaled embedded cover artwork via Android's native
- * MediaMetadataRetriever when available on the bridge.
- */
 export const extractAndroidAudioMetadata = async (
     contentUri: string,
     options?: { includeCover?: boolean; maxCoverDimension?: number },

@@ -15,6 +15,8 @@ import Home from './components/app/Home';
 import PlayerPanel from './components/app/PlayerPanel';
 import ThemeQuickEditorHost from './components/panelTab/ThemeQuickEditor';
 import AppDialogs from './components/app/dialogs/AppDialogs';
+import AudioEqualizerDialog from './components/panelTab/AudioEqualizerDialog';
+import { useSystemBarSettingsStore } from './stores/useSystemBarSettingsStore';
 import { useProviderSignOut } from './components/app/dialogs/useProviderSignOut';
 import LoginHost from './components/login/LoginHost';
 import { useSettingsDialogModel } from './components/app/dialogs/useSettingsDialogModel';
@@ -2076,6 +2078,15 @@ export default function App() {
 
     const isMobileShellActive = shouldUseAndroidMobileShell();
     const [isMobileVisualizerActive, setIsMobileVisualizerActive] = useState(false);
+    useEffect(() => {
+        if (isMobileShellActive) return;
+        useSystemBarSettingsStore.getState().reapplySystemBars();
+    }, [isMobileShellActive]);
+    useEffect(() => {
+        if (isMobileShellActive) return;
+        const inFullLyricsOrVis = !settingsModalState.isOpen && (currentView === 'player' || currentView === 'lattice');
+        useSystemBarSettingsStore.getState().setLyricsOrVisualizerScreenActive(inFullLyricsOrVis);
+    }, [currentView, isMobileShellActive, settingsModalState.isOpen]);
     const { isDocumentVisible, isActivityVisible } = useDocumentVisibility();
     const suspendVisualizerAnimation = shouldSuspendVisualizerForVisibility({
         isActivityVisible,
@@ -3043,6 +3054,14 @@ export default function App() {
                     isLatticeOpen={currentView === 'lattice'}
                     onOpenLattice={navigateToLattice}
                     onCloseLattice={navigateBackFromLattice}
+                    onPlayOnlineSong={(song, queue) => { void playSong(song, queue); }}
+                    onAddOnlineSongToQueue={addOnlineSongToQueue}
+                    onPlayNavidromeSong={(song, queue) => { void onPlayNavidromeSong(song, queue); }}
+                    onAddNavidromeSongsToQueue={addNavidromeSongsToQueue}
+                    onOpenFullSearchWorkspace={navigateToSearch}
+                    onCloseSearch={closeSearchView}
+                    isSearchOpen={isSearchOpen}
+                    onAutoMatchLyrics={() => { void handleAutoMatchBestLyricForCurrentSong(); }}
                 />
             )}
 
@@ -3092,6 +3111,7 @@ export default function App() {
             />
 
             <AppDialogs model={appDialogsModel} />
+            <AudioEqualizerDialog isDaylight={isDaylight} />
             {/* 登录窗口挂在最外层：每个资料库界面（网格、Bravais、文本）都用 openLoginWindow 打开同一个窗口。 */}
             <LoginHost account={accountController} />
             {signOutDialog}

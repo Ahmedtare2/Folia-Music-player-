@@ -81,6 +81,9 @@ const PlaybackPage: React.FC = () => {
         setTranscode: state.handleToggleTranscodeFallback,
         setQueueBehavior: state.handleSetQueueAddBehavior,
         setAutoSkipUnplayable: state.handleToggleAutoSkipUnplayable,
+        equalizerEnabled: state.audioEqualizerSettings.enabled,
+        equalizerPreset: state.audioEqualizerSettings.preset,
+        openAudioEqualizer: state.openAudioEqualizer,
     })));
     const preventSleep = useDesktopSettingsStore(state => state.preventDisplaySleepDuringPlayback);
     const setPreventSleep = useDesktopSettingsStore(state => state.handleTogglePreventDisplaySleepDuringPlayback);
@@ -190,6 +193,17 @@ const PlaybackPage: React.FC = () => {
 
             <Group def={SOUND}>
                 <AudioOutputDeviceRow option={O.outputDevice} onDeviceChange={onAudioOutputDeviceChange} />
+                <div className="flex items-center justify-between gap-4 py-2.5 border-b border-[var(--st-line)]">
+                    <div className="min-w-0 flex-1">
+                        <div className="text-[13px] font-medium text-[color:var(--st-t1)]">{t('ui.equalizerTitle')}</div>
+                        <div className="text-xs text-[color:var(--st-t2)]">
+                            {t('ui.equalizerDescription')} · {t(audio.equalizerEnabled ? 'ui.equalizerEnabled' : 'ui.equalizerDisabled')} ({t(`ui.equalizerPreset.${audio.equalizerPreset}`, audio.equalizerPreset)})
+                        </div>
+                    </div>
+                    <Button onClick={audio.openAudioEqualizer}>
+                        {t('ui.equalizerTitle')}
+                    </Button>
+                </div>
                 <Row option={O.replayGain} note={t('options.replayGainModeDesc')}>
                     <Segmented
                         value={replayGainMode}

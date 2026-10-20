@@ -1,7 +1,14 @@
 // Copyright (c) 2026 chthollyphile
 import { measureNaturalWidth, prepareWithSegments } from '@chenglou/pretext';
 import { measureRichInlineStats, prepareRichInline, walkRichInlineLineRanges, type RichInlineItem, type RichInlineLineRange } from '@chenglou/pretext/rich-inline';
-import { detectTextDirection, hasCursiveJoiningScript, orderBidiItemsForVisualRow, resolveTokenDirection } from '../../../../utils/lyrics/arabicText';
+import {
+    containsRtlText,
+    detectTextDirection,
+    hasCursiveJoiningScript,
+    orderBidiItemsForVisualRow,
+    resolveTokenDirection,
+    type TextDirection,
+} from '../../../../utils/lyrics/arabicText';
 import { glyphFont } from './glyphLine';
 import type { WordSpan } from './wordStyle';
 
@@ -102,6 +109,8 @@ export interface FlowGlyph {
 /** 一行在某种朝向、某种折法下的排版：每个字相对整块中心的位置，追字光斑走的路，整块的尺寸（逻辑像素，未缩放）。 */
 export interface LineVariant {
     points: Point[];
+    /** 连写词（如阿拉伯语）整词精灵的中心位置；非连写字与 points 相同。 */
+    wordPoints?: Point[];
     /** 追字光斑沿着走的点：行心线（横排）或列心线（竖排）上，按阅读顺序。 */
     spots: Point[];
     /** 沿行方向的长度（最长一行 / 一列）与垂直于行方向的厚度。 */
@@ -212,7 +221,7 @@ const breakLines = (
     advances: readonly number[],
     heroPx: number,
     lines: number,
-    isRtlHorizontal = false,
+    bidiBaseDirection: TextDirection | null = null,
 ) => {
     const extentOf = (unit: Unit) => advances.slice(unit.start, unit.end).reduce((sum, advance) => sum + advance, 0);
     const items: RichInlineItem[] = [];
@@ -268,9 +277,10 @@ const breakLines = (
 
     const row = new Array<number>(glyphs.length).fill(-1);
     const offset = new Array<number>(glyphs.length).fill(0);
+    const effectiveAdvances = [...advances];
     const lengths = rows.map(line => line.width);
     rows.forEach((line, r) => {
-        if (isRtlHorizontal && line.fragments.length > 0) {
+        if (bidiBaseDirection !== null && line.fragments.length > 0) {
             const leadGap = line.fragments[0]?.gapBefore ?? 0;
             const gaps = line.fragments.slice(1).map(fragment => fragment.gapBefore);
             const visualFragments = orderBidiItemsForVisualRow(
@@ -279,7 +289,7 @@ const breakLines = (
                     const unit = unitOfItem[fragment.itemIndex];
                     return unit ? textOf(glyphs, unit.start, unit.end) : '';
                 },
-                'rtl',
+                bidiBaseDirection,
             );
             let cursor = leadGap;
             visualFragments.forEach((fragment, fragIdx) => {
@@ -290,13 +300,14 @@ const breakLines = (
                 const unit = unitOfItem[fragment.itemIndex];
                 if (!unit) return;
                 const unitFullText = textOf(glyphs, unit.start, unit.end);
-                const unitRtl = resolveTokenDirection(unitFullText, 'rtl') === 'rtl';
+                const unitRtl = resolveTokenDirection(unitFullText, bidiBaseDirection) === 'rtl';
                 const extent = extentOf(unit);
                 const ratio = extent > 0 ? fragment.occupiedWidth / extent : 0;
                 if (unitRtl) {
                     let inner = cursor + fragment.occupiedWidth;
                     for (let index = unit.start; index < unit.end; index += 1) {
                         const advance = advances[index]! * ratio;
+                        effectiveAdvances[index] = advance;
                         row[index] = r;
                         offset[index] = inner - advance / 2;
                         inner -= advance;
@@ -309,6 +320,7 @@ const breakLines = (
                     let inner = cursor;
                     for (let index = unit.start; index < unit.end; index += 1) {
                         const advance = advances[index]! * ratio;
+                        effectiveAdvances[index] = advance;
                         row[index] = r;
                         offset[index] = inner + advance / 2;
                         inner += advance;
@@ -340,6 +352,7 @@ const breakLines = (
             let inner = cursor;
             for (let index = unit.start; index < unit.end; index += 1) {
                 const advance = advances[index]! * ratio;
+                effectiveAdvances[index] = advance;
                 row[index] = r;
                 offset[index] = inner + advance / 2;
                 inner += advance;
@@ -361,7 +374,7 @@ const breakLines = (
         row[index] = index + 1 < glyphs.length && row[index + 1] !== -1 ? row[index + 1]! : 0;
         offset[index] = index + 1 < glyphs.length ? Math.max(0, offset[index + 1]! - advances[index + 1]! / 2) : 0;
     }
-    return { row, offset, lengths: lengths.length ? lengths : [0] };
+    return { row, offset, effectiveAdvances, lengths: lengths.length ? lengths : [0] };
 };
 
 /** 太长的单位（一个词就超过行长上限）拆成单字，标点仍黏在前一个字上。阿拉伯语连写词不拆字。 */
@@ -402,18 +415,22 @@ export const flowLine = (
 ): LineFlow => {
     const { heroPx } = options;
     const fullLineText = textOf(glyphs, 0, glyphs.length);
-    const isRtlLine = detectTextDirection(fullLineText) === 'rtl';
+    const baseDirection = detectTextDirection(fullLineText);
+    const hasRtl = containsRtlText(fullLineText);
     const hasCursive = hasCursiveJoiningScript(fullLineText);
     const spans = spansOf(glyphs, words);
     const basePieces = unitsOf(glyphs, spans, heroPx);
 
     // 横排逐字宽度：每段（词 / 标点 / 空白）的 pretext 宽度按画布宽度分摊到字上。
+    // 连写词（如阿拉伯语）直接使用画布整词成形的宽度之和（canvas），避免被逐字累加的测量拉开字距。
     const horizontal = new Array<number>(glyphs.length).fill(0);
     for (const span of spans) {
         const px = heroPx * glyphs[span.start]!.scale;
         const text = textOf(glyphs, span.start, span.end);
-        const width = measurer.natural(text, px);
         const canvas = glyphs.slice(span.start, span.end).reduce((sum, glyph) => sum + glyph.advance, 0);
+        const width = hasCursiveJoiningScript(text) && canvas > 0
+            ? canvas
+            : measurer.natural(text, px);
         for (let index = span.start; index < span.end; index += 1) {
             horizontal[index] = canvas > 0 ? (width * glyphs[index]!.advance) / canvas : width / (span.end - span.start);
         }
@@ -429,7 +446,15 @@ export const flowLine = (
         }
         const advances = orient === 0 ? horizontal : vertical;
         const pieces = splitLongUnits(glyphs, basePieces, advances, orient === 0 ? options.limits.horizontal : options.limits.vertical, heroPx);
-        const { row, offset, lengths } = breakLines(measurer, glyphs, pieces, advances, heroPx, lines, orient === 0 && isRtlLine);
+        const { row, offset, effectiveAdvances, lengths } = breakLines(
+            measurer,
+            glyphs,
+            pieces,
+            advances,
+            heroPx,
+            lines,
+            orient === 0 && hasRtl ? baseDirection : null,
+        );
         const count = lengths.length;
         const along = Math.max(...lengths);
         const pitch = (orient === 0 ? ROW_PITCH : COLUMN_PITCH) * heroPx;
@@ -464,7 +489,42 @@ export const flowLine = (
             }
             points.push(point);
         });
-        return { points, spots, along, across: (count - 1) * pitch + heroPx, lines: count, inkWidth: inkX * 2, inkHeight: inkY * 2 };
+
+        // 连写词（如阿拉伯语）整词精灵的中心坐标：取该词所有字素在行内的左右边界中点，
+        // 使整词纹理精灵精确对准词位，而 points 仍保留从右向左的逐字素中心供光斑、光晕与星芒推进。
+        const wordPoints: Point[] = points.map(point => ({ x: point.x, y: point.y }));
+        if (orient === 0 && hasCursive) {
+            for (const span of spans) {
+                if (span.kind !== 'word') continue;
+                const spanText = textOf(glyphs, span.start, span.end);
+                if (!hasCursiveJoiningScript(spanText)) continue;
+                let wordLeft = Number.POSITIVE_INFINITY;
+                let wordRight = Number.NEGATIVE_INFINITY;
+                for (let index = span.start; index < span.end; index += 1) {
+                    const halfAdv = (effectiveAdvances[index] ?? advances[index]!) / 2;
+                    wordLeft = Math.min(wordLeft, points[index]!.x - halfAdv);
+                    wordRight = Math.max(wordRight, points[index]!.x + halfAdv);
+                }
+                if (Number.isFinite(wordLeft) && Number.isFinite(wordRight)) {
+                    const centerX = (wordLeft + wordRight) / 2;
+                    const centerY = points[span.start]!.y;
+                    for (let index = span.start; index < span.end; index += 1) {
+                        wordPoints[index] = { x: centerX, y: centerY };
+                    }
+                }
+            }
+        }
+
+        return {
+            points,
+            wordPoints,
+            spots,
+            along,
+            across: (count - 1) * pitch + heroPx,
+            lines: count,
+            inkWidth: inkX * 2,
+            inkHeight: inkY * 2,
+        };
     };
     return [
         [variant(0, 1), variant(0, MAX_LINES)],

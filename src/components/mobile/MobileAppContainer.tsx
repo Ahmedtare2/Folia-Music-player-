@@ -27,7 +27,10 @@ import { closeSettings, openSettings, useSettingsModalStore } from '../../stores
 import { setStatusMessage } from '../../stores/useStatusMessageStore';
 import { useThemeSettingsStore } from '../../stores/useThemeSettingsStore';
 import { useTypographySettingsStore } from '../../stores/useTypographySettingsStore';
+import type { NavidromeSong } from '../../types/navidrome';
+import { useAudioSettingsStore } from '../../stores/useAudioSettingsStore';
 import { useVisualizerSettingsStore } from '../../stores/useVisualizerSettingsStore';
+import { closeLoginWindow, useLoginWindowStore } from '../login/loginWindowStore';
 import MobilePlayerShell from './MobilePlayerShell';
 
 // src/components/mobile/MobileAppContainer.tsx
@@ -81,6 +84,14 @@ interface MobileAppContainerProps {
     isLatticeOpen?: boolean;
     onOpenLattice?: () => void;
     onCloseLattice?: () => void;
+    onPlayOnlineSong?: (song: SongResult, queue?: SongResult[]) => void;
+    onAddOnlineSongToQueue?: (song: SongResult) => void;
+    onPlayNavidromeSong?: (song: NavidromeSong, queue?: NavidromeSong[]) => void;
+    onAddNavidromeSongsToQueue?: (songs: NavidromeSong[]) => void;
+    onOpenFullSearchWorkspace?: () => void;
+    onCloseSearch?: () => void;
+    isSearchOpen?: boolean;
+    onAutoMatchLyrics?: () => void;
 }
 
 export const MobileAppContainer: React.FC<MobileAppContainerProps> = ({
@@ -131,7 +142,18 @@ export const MobileAppContainer: React.FC<MobileAppContainerProps> = ({
     isLatticeOpen = false,
     onOpenLattice,
     onCloseLattice,
+    onPlayOnlineSong,
+    onAddOnlineSongToQueue,
+    onPlayNavidromeSong,
+    onAddNavidromeSongsToQueue,
+    onOpenFullSearchWorkspace,
+    onCloseSearch,
+    isSearchOpen = false,
+    onAutoMatchLyrics,
 }) => {
+    const isEqualizerOpen = useAudioSettingsStore(state => state.isAudioEqualizerOpen);
+    const closeEqualizer = useAudioSettingsStore(state => state.closeAudioEqualizer);
+    const isLoginWindowOpen = useLoginWindowStore(state => state.isOpen);
     const { t } = useTranslation();
     const activeLocalLyricsSource = usePlaybackStore(state => state.activeLocalLyricsSource);
     const isSettingsModalOpen = useSettingsModalStore(state => state.settingsModalState.isOpen);
@@ -259,15 +281,26 @@ export const MobileAppContainer: React.FC<MobileAppContainerProps> = ({
         isLyricMatchOpen,
         isSettingsModalOpen,
         isCommandPaletteOpen,
+        isEqualizerOpen,
+        isSearchOpen,
+        isLoginWindowOpen,
         closeLyricMatch: onCloseLyricMatch,
         closeSettingsModal: closeSettings,
         closeCommandPalette: onCloseCommandPalette,
+        closeEqualizer,
+        closeSearch: onCloseSearch,
+        closeLoginWindow,
     }), [
+        closeEqualizer,
         isCommandPaletteOpen,
+        isEqualizerOpen,
+        isLoginWindowOpen,
         isLyricMatchOpen,
+        isSearchOpen,
         isSettingsModalOpen,
         onCloseCommandPalette,
         onCloseLyricMatch,
+        onCloseSearch,
     ]);
 
     return (
@@ -307,6 +340,7 @@ export const MobileAppContainer: React.FC<MobileAppContainerProps> = ({
             onChangeLyricsSource={onChangeLyricsSource}
             onImportLocalLyricsFile={(content, fileName) => onUpdateLocalLyrics(content, false, fileName)}
             onOpenLyricMatch={onOpenLyricMatch}
+            onAutoMatchLyrics={onAutoMatchLyrics}
             onTogglePureMusic={onTogglePureMusic}
             onImportFolder={handleImportFolder}
             onRefreshFolders={handleRefreshFolders}
@@ -337,6 +371,11 @@ export const MobileAppContainer: React.FC<MobileAppContainerProps> = ({
             isLatticeOpen={isLatticeOpen}
             onOpenLattice={onOpenLattice}
             onCloseLattice={onCloseLattice}
+            onPlayOnlineSong={onPlayOnlineSong}
+            onAddOnlineSongToQueue={onAddOnlineSongToQueue}
+            onPlayNavidromeSong={onPlayNavidromeSong}
+            onAddNavidromeSongsToQueue={onAddNavidromeSongsToQueue}
+            onOpenFullSearchWorkspace={onOpenFullSearchWorkspace}
         />
     );
 };

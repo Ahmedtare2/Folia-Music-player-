@@ -65,7 +65,9 @@
     "android:sync": "node packaging/android/sync-android.mjs",
     "build:android": "npm run build:android:web && npm run android:sync",
     "android:apk:debug": "npm run build:android && node packaging/android/build-apk.mjs --debug",
-    "android:assets": "python3 packaging/android/generate-android-assets.py"
+    "android:assets": "python3 packaging/android/generate-android-assets.py",
+    "android:apk:release": "npm run build:android && node packaging/android/build-apk.mjs --release --require-signed",
+    "android:apk": "npm run android:apk:release"
   },
   "build": {
     "appId": "top.izuna.foliamajor",

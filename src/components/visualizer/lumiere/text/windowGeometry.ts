@@ -304,47 +304,70 @@ export const createWindowGeometry = ({
     /**
      * 字在行内的位置（未缩放）、转角与缩放：换槽位时沿自己的贝塞尔曲线飞过去，途中缩小、转动、发亮
      * （flying 为飞行强度 0..1）。再加上聚合、崩解与呼吸。
+     * 连写词（如阿拉伯语）同时返回整词中心位置 (spriteX, spriteY)，使整词纹理精灵不发生词内位移撕裂。
      */
     const glyphLocal = (view: LineView, glyph: GlyphView, time: number, transform: LineTransform) => {
-        const at = (orient: number, wrap: number) => view.flow[orient >= 0.5 ? 1 : 0][wrap >= 0.5 ? 1 : 0].points[glyph.index]!;
+        const variantAt = (orient: number, wrap: number) => view.flow[orient >= 0.5 ? 1 : 0][wrap >= 0.5 ? 1 : 0];
+        const at = (orient: number, wrap: number) => variantAt(orient, wrap).points[glyph.index]!;
+        const atWord = (orient: number, wrap: number) => {
+            const v = variantAt(orient, wrap);
+            return (v.wordPoints ?? v.points)[glyph.index] ?? v.points[glyph.index]!;
+        };
         // 从上一次走完的换位的终点出发，依次叠上还在进行的换位：每一次都从上一次此刻的位置起飞（或滑过去），
         // 前一次还没飞完就换行时，字接着从它在曲线上的位置出发，不会跳回起点。
         let point = at(transform.restOrient, transform.restWrap);
+        let wordPoint = atWord(transform.restOrient, transform.restWrap);
         let orientation = transform.restOrient;
         let flying = 0;
         for (const move of transform.moves) {
             const target = at(move.toOrient, move.toWrap);
+            const wordTarget = atWord(move.toOrient, move.toWrap);
             if (move.fly) {
                 const s = flightProgress(glyph.flight, move.phase);
                 point = flightPoint(glyph.flight, point, target, s);
+                wordPoint = flightPoint(glyph.flight, wordPoint, wordTarget, s);
                 orientation = lerp(orientation, move.toOrient, s);
                 flying = Math.max(flying, Math.sin(Math.PI * s));
             } else {
                 // 不飞的时候，单行与折行之间（邻行变成当前行、需要折开时）字随滑动缓动过去。
                 const k = easeInOutSine(move.phase);
                 point = lerpPoint(point, target, k);
+                wordPoint = lerpPoint(wordPoint, wordTarget, k);
                 orientation = lerp(orientation, move.toOrient, k);
             }
         }
-        let x = point.x;
-        let y = point.y;
-        let rotation = glyph.vRotation * orientation + glyph.flight.spin * flying;
+        const rotation = glyph.vRotation * orientation + glyph.flight.spin * flying;
         const pulse = 1 - 0.28 * flying;
         // 聚合：未唱的行从散开的位置逐渐收拢。
         const gather = smooth((time - (view.line.startTime - LEAD - GATHER_LEAD)) / GATHER);
         const scatter = (1 - gather) ** 2 * decay.strength;
-        x += glyph.scatter.x * heroPx * scatter;
-        y += glyph.scatter.y * heroPx * scatter;
-        // 崩解：点亮一会儿之后沿各自的方向漂离、转动。
-        const amount = decayAmount(decay, glyph.timing.start, time) * glyph.drift.speed;
-        x += glyph.drift.dx * heroPx * amount;
-        y += glyph.drift.dy * heroPx * amount;
-        rotation += glyph.drift.spin * amount * 0.18;
+        // 崩解：连写词按整词 wordTiming.start 同步崩解，绝不把同一个阿拉伯词撕成先后飘散的碎字母。
+        const decayStart = (glyph.cursiveWordLead || glyph.cursiveWordContinuation)
+            ? glyph.wordTiming.start
+            : glyph.timing.start;
+        const amount = decayAmount(decay, decayStart, time) * glyph.drift.speed;
         // 呼吸：一直有一点轻微晃动。
         const breath = heroPx * 0.022 * Math.min(1, decay.strength + 0.3);
-        x += Math.sin(time * 0.9 + glyph.phase) * breath;
-        y += Math.cos(time * 1.13 + glyph.phase * 1.7) * breath;
-        return { x, y, rotation, gather, flying, scale: glyph.scale * pulse };
+        const offsetX = glyph.scatter.x * heroPx * scatter
+            + glyph.drift.dx * heroPx * amount
+            + Math.sin(time * 0.9 + glyph.phase) * breath;
+        const offsetY = glyph.scatter.y * heroPx * scatter
+            + glyph.drift.dy * heroPx * amount
+            + Math.cos(time * 1.13 + glyph.phase * 1.7) * breath;
+        const x = point.x + offsetX;
+        const y = point.y + offsetY;
+        const spriteX = wordPoint.x + offsetX;
+        const spriteY = wordPoint.y + offsetY;
+        return {
+            x,
+            y,
+            spriteX,
+            spriteY,
+            rotation: rotation + glyph.drift.spin * amount * 0.18,
+            gather,
+            flying,
+            scale: glyph.scale * pulse,
+        };
     };
 
     /**

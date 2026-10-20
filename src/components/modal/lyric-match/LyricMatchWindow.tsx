@@ -117,13 +117,13 @@ export const LyricMatchWindow: React.FC<LyricMatchWindowProps> = ({
     return (
         <div
             data-folia-keyboard-window={keepsHotkeys ? undefined : 'true'}
-            className={`fixed inset-0 ${overAllLayers ? 'z-[200]' : 'z-50'} bg-black/60 backdrop-blur-xl flex items-center justify-center p-6`}
+            className={`fixed inset-0 ${overAllLayers ? 'z-[260]' : 'z-[250]'} bg-black/60 backdrop-blur-xl flex items-center justify-center p-3 sm:p-6`}
             onMouseDown={closesOnBackdropClick ? event => { isMouseDownOnOverlayRef.current = event.target === event.currentTarget; } : undefined}
             onClick={closesOnBackdropClick ? event => { if (event.target === event.currentTarget && isMouseDownOnOverlayRef.current) onClose(); } : undefined}
         >
             <div
                 data-ponder="lyric-match"
-                className={`${bgClass} border rounded-2xl max-w-5xl w-full max-h-[80vh] flex flex-col shadow-2xl backdrop-blur-md`}
+                className={`${bgClass} border rounded-2xl max-w-5xl w-full max-h-[90dvh] sm:max-h-[82vh] flex flex-col shadow-2xl backdrop-blur-md`}
                 onClick={closesOnBackdropClick ? event => event.stopPropagation() : undefined}
             >
                 {/* Header */}
@@ -148,9 +148,9 @@ export const LyricMatchWindow: React.FC<LyricMatchWindowProps> = ({
                 </div>
 
                 {/* Body: Two-panel layout */}
-                <div className="flex-1 flex min-h-0 overflow-hidden">
+                <div className="flex-1 flex flex-col md:flex-row min-h-0 overflow-y-auto md:overflow-hidden">
                     {/* LEFT PANEL: Search + Results (wider) */}
-                    <div className={`w-[62%] flex flex-col border-r ${borderColor}`}>
+                    <div className={`w-full md:w-[62%] min-h-[260px] flex flex-col border-b md:border-b-0 md:border-r ${borderColor}`}>
                         {/* Search Bar */}
                         <div className="p-4">
                             <div className={`flex border-b ${borderColor} pb-2 mb-3.5 gap-4`}>

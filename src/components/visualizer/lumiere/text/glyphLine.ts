@@ -1,6 +1,6 @@
 // Copyright (c) 2026 chthollyphile
 import type { Texture } from 'pixi.js';
-import { containsRtlText } from '../../../../utils/lyrics/arabicText';
+import { containsRtlText, hasCursiveJoiningScript } from '../../../../utils/lyrics/arabicText';
 import { splitLyricGraphemes } from '../../../../utils/lyrics/graphemeTiming';
 import { measurePrefixOffsets } from '../../textMeasureCache';
 
@@ -11,8 +11,10 @@ const LUMIERE_NEUTRAL_OFFSET = ((0xe562ea44 ^ lumiereScaleMask) + Math.imul(523 
 
 
 // src/components/visualizer/lumiere/text/glyphLine.ts
-// 一行歌词排成一张画布纹理，再按字形偏移切成逐字的子纹理（与 fume 一样用 Canvas 2D 画字）。
+// 一行歌词排成一张画布纹理，再按字形偏移切成子纹理（与 fume 一样用 Canvas 2D 画字）。
 // 白字，着色靠 tint；纹理按渲染倍率（resolution）画，高 DPI 下不糊。
+// 对于阿拉伯语等连写文字（cursive script），整词作为一个完整成形（HarfBuzz / Canvas 2D 整词连写）的纹理块绘制与切出，
+// 绝不把词内相连的字母切成彼此独立的碎片，同时保留词内从右向左的字素偏移供追字光斑、星芒与柔光晕使用。
 type PixiModule = typeof import('pixi.js');
 
 export interface GlyphSlice {
@@ -30,6 +32,15 @@ export interface GlyphSlice {
     blank: boolean;
     /** 竖排时直立（中日韩字、全角符号）；否则侧转 90°（拉丁字母、数字）。 */
     upright: boolean;
+    /** 连写词首字：持整词完整成形纹理，按整词中心定位渲染。 */
+    cursiveWordLead?: boolean;
+    /** 连写词后续字素：不单独渲染字片精灵，仅提供词内从右向左的字素位置给光斑、光晕与闪点。 */
+    cursiveWordContinuation?: boolean;
+    /** 所属连写词的完整原文字串与字素区间 [wordStart, wordEnd)。 */
+    wordText?: string;
+    wordStart?: number;
+    wordEnd?: number;
+    wordWidth?: number;
 }
 
 export interface GlyphLine {
@@ -43,6 +54,7 @@ export interface GlyphLine {
 }
 
 const UPRIGHT = /[ᄀ-ᇿ⺀-⿿　-〿぀-ヿ㄀-ㇿ㈀-鿿가-힯豈-﫿︰-﹏＀-￯]|[\u{20000}-\u{3134f}]/u;
+const NON_WORD_GRAPHEME = /^[\s\p{P}\p{S}]+$/u;
 
 /** Canvas 2D / pretext 的字体串：画字与测量必须用同一个格式。 */
 export const glyphFont = (weight: number, px: number, family: string) => `${weight} ${px}px ${family}`;
@@ -50,35 +62,125 @@ export const glyphFont = (weight: number, px: number, family: string) => `${weig
 /** 竖排时是否直立。 */
 export const isUprightGlyph = (char: string) => UPRIGHT.test(char);
 
-interface DirectionalRun {
+/** 是否属于需要保持词内连写造型的字素（如阿拉伯语字母及其附着音标、延伸符 tatweel）。 */
+export const isCursiveWordGrapheme = (char: string): boolean => (
+    char.trim().length > 0 && !NON_WORD_GRAPHEME.test(char) && hasCursiveJoiningScript(char)
+);
+
+interface AtlasRun {
     start: number;
     end: number;
+    graphemes: string[];
     text: string;
     rtl: boolean;
+    cursive: boolean;
     blank: boolean;
+    width: number;
+    localOffsets: number[];
+    logicalStart: number;
+    atlasDrawX: number;
 }
 
-const buildDirectionalRuns = (graphemes: readonly string[]): DirectionalRun[] => {
-    const runs: DirectionalRun[] = [];
+const buildAtlasRuns = (
+    graphemes: readonly string[],
+    measure: (s: string) => number,
+    spacing: number,
+    pad: number,
+    runPad: number,
+): { runs: AtlasRun[]; totalLogicalWidth: number; totalAtlasWidth: number } => {
+    const rawRuns: Array<{
+        start: number;
+        end: number;
+        graphemes: string[];
+        text: string;
+        rtl: boolean;
+        cursive: boolean;
+        blank: boolean;
+    }> = [];
+
     for (let index = 0; index < graphemes.length; index += 1) {
         const char = graphemes[index]!;
         const blank = char.trim().length === 0;
-        const rtl = !blank && containsRtlText(char);
-        const previous = runs[runs.length - 1];
-        if (previous && previous.blank === blank && previous.rtl === rtl) {
+        const cursive = !blank && isCursiveWordGrapheme(char);
+        const rtl = !blank && (cursive || containsRtlText(char));
+        const previous = rawRuns[rawRuns.length - 1];
+
+        if (blank && previous && previous.blank) {
             previous.end = index + 1;
+            previous.graphemes.push(char);
+            previous.text += char;
+        } else if (cursive && previous && previous.cursive) {
+            previous.end = index + 1;
+            previous.graphemes.push(char);
             previous.text += char;
         } else {
-            runs.push({
+            rawRuns.push({
                 start: index,
                 end: index + 1,
+                graphemes: [char],
                 text: char,
                 rtl,
+                cursive,
                 blank,
             });
         }
     }
-    return runs;
+
+    let logicalCursor = 0;
+    let atlasCursor = pad;
+    const runs: AtlasRun[] = rawRuns.map(raw => {
+        let runWidth = 0;
+        let localOffsets: number[] = [0];
+
+        if (raw.blank) {
+            const measured = measure(raw.text);
+            runWidth = Math.max(0.5 * raw.graphemes.length, measured);
+            localOffsets = Array.from(
+                { length: raw.graphemes.length + 1 },
+                (_, i) => (runWidth * i) / raw.graphemes.length,
+            );
+        } else if (raw.cursive) {
+            const shapedWidth = Math.max(1, measure(raw.text));
+            const prefixOffsets = measurePrefixOffsets(raw.graphemes, prefix => measure(prefix));
+            const rawTotal = prefixOffsets[prefixOffsets.length - 1] ?? 0;
+            if (rawTotal > 0) {
+                localOffsets = prefixOffsets.map(offset => (offset / rawTotal) * shapedWidth);
+            } else {
+                localOffsets = Array.from(
+                    { length: raw.graphemes.length + 1 },
+                    (_, i) => (shapedWidth * i) / raw.graphemes.length,
+                );
+            }
+            localOffsets[0] = 0;
+            localOffsets[raw.graphemes.length] = shapedWidth;
+            runWidth = shapedWidth;
+        } else {
+            const measured = Math.max(0.5, measure(raw.text) + spacing);
+            runWidth = measured;
+            localOffsets = [0, measured];
+        }
+
+        const logicalStart = logicalCursor;
+        logicalCursor += runWidth;
+
+        let atlasDrawX = pad + logicalStart;
+        if (!raw.blank) {
+            atlasDrawX = atlasCursor + runPad;
+            atlasCursor = atlasDrawX + runWidth + runPad;
+        }
+
+        return {
+            ...raw,
+            width: runWidth,
+            localOffsets,
+            logicalStart,
+            atlasDrawX,
+        };
+    });
+
+    const totalLogicalWidth = Math.max(1, logicalCursor);
+    const totalAtlasWidth = Math.max(totalLogicalWidth + pad * 2, atlasCursor + pad);
+    return { runs, totalLogicalWidth, totalAtlasWidth };
 };
 
 export const buildGlyphLine = (
@@ -104,8 +206,165 @@ export const buildGlyphLine = (
     context.font = fontSpec;
     const hasRtl = containsRtlText(text);
     const spacing = hasRtl ? 0 : (options.letterSpacing ?? 0) * fontPx;
+    const height = Math.ceil(fontPx * 1.5);
+    const pad = Math.ceil(fontPx * 0.25);
+    const runPad = Math.ceil(fontPx * 0.22);
+    const limit = options.maxCanvasPx ?? (8192 + LUMIERE_NEUTRAL_OFFSET);
 
-    // 前缀宽度：保留字距调整（kerning）与阿拉伯语连写造型（ZWJ 边界），逐字的边界落在前缀宽度上。
+    const draw = (str: string, x: number) => {
+        if (options.outline) {
+            // 空心字：细描边 + 很淡的填充。
+            context.globalAlpha = 0.14;
+            context.fillText(str, x, pad + height / 2);
+            context.globalAlpha = 1;
+            context.lineWidth = fontPx * options.outline;
+            context.strokeText(str, x, pad + height / 2);
+        } else {
+            context.fillText(str, x, pad + height / 2);
+        }
+    };
+
+    if (hasRtl) {
+        const { runs, totalLogicalWidth, totalAtlasWidth } = buildAtlasRuns(
+            graphemes,
+            s => context.measureText(s).width,
+            spacing,
+            pad,
+            runPad,
+        );
+        const width = totalLogicalWidth;
+        const resolution = Math.min(options.resolution, limit / totalAtlasWidth, limit / (height + pad * 2));
+        canvas.width = Math.ceil(totalAtlasWidth * resolution);
+        canvas.height = Math.ceil((height + pad * 2) * resolution);
+        context.setTransform(resolution, 0, 0, resolution, 0, 0);
+        context.font = fontSpec;
+        context.textAlign = 'left';
+        context.textBaseline = 'middle';
+        context.fillStyle = '#ffffff';
+        context.strokeStyle = '#ffffff';
+
+        for (const run of runs) {
+            if (run.blank) continue;
+            context.direction = run.rtl ? 'rtl' : 'ltr';
+            context.textAlign = 'left';
+            draw(run.text, run.atlasDrawX);
+        }
+
+        const source = new pixi.CanvasSource({ resource: canvas, resolution: 1, autoGarbageCollect: true });
+        source.resolution = resolution;
+        const base = new pixi.Texture({ source });
+
+        const glyphs: GlyphSlice[] = new Array<GlyphSlice>(graphemes.length);
+        for (const run of runs) {
+            if (run.cursive) {
+                const frameLeft = Math.max(0, run.atlasDrawX - runPad);
+                const frameRight = Math.min(totalAtlasWidth, run.atlasDrawX + run.width + runPad);
+                const frameWidth = Math.max(1, frameRight - frameLeft);
+                const wordFrame = new pixi.Rectangle(frameLeft, 0, frameWidth, height + pad * 2);
+                const wordAnchorX = (run.atlasDrawX + run.width / 2 - frameLeft) / frameWidth;
+
+                for (let index = run.start; index < run.end; index += 1) {
+                    const localIndex = index - run.start;
+                    const localStart = run.localOffsets[localIndex]!;
+                    const localEnd = run.localOffsets[localIndex + 1]!;
+                    const charW = Math.max(0.5, localEnd - localStart);
+                    // 词内从右向左推进：第 0 个字素在词的最右端，最末字素在词的最左端。
+                    const visualLocalX = Math.max(0, run.width - localEnd);
+                    const charX = run.logicalStart + visualLocalX;
+                    const isLead = index === run.start;
+
+                    if (isLead) {
+                        glyphs[index] = {
+                            char: graphemes[index]!,
+                            x: run.logicalStart - runPad,
+                            width: frameWidth,
+                            charX,
+                            charWidth: charW,
+                            anchorX: wordAnchorX,
+                            anchorY: 0.5,
+                            texture: new pixi.Texture({ source, frame: wordFrame }),
+                            blank: false,
+                            upright: false,
+                            cursiveWordLead: true,
+                            cursiveWordContinuation: false,
+                            wordText: run.text,
+                            wordStart: run.start,
+                            wordEnd: run.end,
+                            wordWidth: run.width,
+                        };
+                    } else {
+                        const subLeft = Math.max(0, run.atlasDrawX + visualLocalX);
+                        const subRight = Math.min(totalAtlasWidth, subLeft + charW);
+                        const subWidth = Math.max(0.5, subRight - subLeft);
+                        const subFrame = new pixi.Rectangle(subLeft, 0, subWidth, height + pad * 2);
+                        glyphs[index] = {
+                            char: graphemes[index]!,
+                            x: charX,
+                            width: subWidth,
+                            charX,
+                            charWidth: charW,
+                            anchorX: 0.5,
+                            anchorY: 0.5,
+                            texture: new pixi.Texture({ source, frame: subFrame }),
+                            blank: false,
+                            upright: false,
+                            cursiveWordLead: false,
+                            cursiveWordContinuation: true,
+                            wordText: run.text,
+                            wordStart: run.start,
+                            wordEnd: run.end,
+                            wordWidth: run.width,
+                        };
+                    }
+                }
+            } else {
+                for (let index = run.start; index < run.end; index += 1) {
+                    const localIndex = index - run.start;
+                    const localStart = run.localOffsets[localIndex]!;
+                    const localEnd = run.localOffsets[localIndex + 1]!;
+                    const charW = Math.max(0.5, localEnd - localStart);
+                    const charX = run.logicalStart + localStart;
+                    const frameLeft = run.blank ? pad + charX : Math.max(0, run.atlasDrawX - runPad);
+                    const frameRight = run.blank
+                        ? Math.min(totalAtlasWidth, pad + charX + charW)
+                        : Math.min(totalAtlasWidth, run.atlasDrawX + run.width + runPad);
+                    const frameWidth = Math.max(0.5, frameRight - frameLeft);
+                    const frame = new pixi.Rectangle(frameLeft, 0, frameWidth, height + pad * 2);
+                    const anchorX = run.blank
+                        ? 0.5
+                        : (run.atlasDrawX + charW / 2 - frameLeft) / frameWidth;
+                    glyphs[index] = {
+                        char: graphemes[index]!,
+                        x: charX - (run.blank ? 0 : runPad),
+                        width: frameWidth,
+                        charX,
+                        charWidth: charW,
+                        anchorX,
+                        anchorY: 0.5,
+                        texture: new pixi.Texture({ source, frame }),
+                        blank: run.blank,
+                        upright: isUprightGlyph(graphemes[index]!),
+                        cursiveWordLead: false,
+                        cursiveWordContinuation: false,
+                    };
+                }
+            }
+        }
+
+        return {
+            text,
+            fontPx,
+            width,
+            height,
+            glyphs,
+            destroy: () => {
+                glyphs.forEach(glyph => glyph.texture.destroy(false));
+                base.destroy(true);
+            },
+        };
+    }
+
+    // 非 RTL 行：保持原有逐字偏移测量与切分逻辑。
     const offsets = spacing === 0
         ? measurePrefixOffsets(graphemes, prefix => context.measureText(prefix).width)
         : (() => {
@@ -118,77 +377,32 @@ export const buildGlyphLine = (
             return list;
         })();
     const width = Math.max(1, offsets[offsets.length - 1]!);
-    const height = Math.ceil(fontPx * 1.5);
-    const pad = Math.ceil(fontPx * 0.25);
-
-    const limit = options.maxCanvasPx ?? (8192 + LUMIERE_NEUTRAL_OFFSET);
     const resolution = Math.min(options.resolution, limit / (width + pad * 2), limit / (height + pad * 2));
     canvas.width = Math.ceil((width + pad * 2) * resolution);
     canvas.height = Math.ceil((height + pad * 2) * resolution);
     context.setTransform(resolution, 0, 0, resolution, 0, 0);
     context.font = fontSpec;
+    context.textAlign = 'left';
     context.textBaseline = 'middle';
     context.fillStyle = '#ffffff';
     context.strokeStyle = '#ffffff';
-    const draw = (char: string, x: number) => {
-        if (options.outline) {
-            // 空心字：细描边 + 很淡的填充。
-            context.globalAlpha = 0.14;
-            context.fillText(char, x, pad + height / 2);
-            context.globalAlpha = 1;
-            context.lineWidth = fontPx * options.outline;
-            context.strokeText(char, x, pad + height / 2);
-        } else {
-            context.fillText(char, x, pad + height / 2);
-        }
-    };
-    const runs = hasRtl ? buildDirectionalRuns(graphemes) : [];
-    if (hasRtl) {
-        for (const run of runs) {
-            if (run.blank) continue;
-            context.direction = run.rtl ? 'rtl' : 'ltr';
-            draw(run.text, pad + offsets[run.start]!);
-        }
-    } else if (spacing === 0) {
+
+    if (spacing === 0) {
         draw(text, pad);
     } else {
         graphemes.forEach((char, index) => draw(char, pad + offsets[index]!));
     }
 
-    // 交给 Pixi 的纹理 GC：一分钟没画过的行（整首歌一个单元时，早已唱过的行）卸掉显存副本，画布还在，
-    // 再出现时重新上传。按段落切单元时行不会闲置这么久，没有影响。
-    // 以 resolution 1 构造、之后再设真实倍率（与 latticeLyricRaster 同一个坑）：直接传 resolution 时，CanvasSource
-    // 先算 width = canvas.width / resolution，TextureSource 再乘回去，resizeCanvas() 用 !== 拿这个浮点数和整数画布
-    // 尺寸比，往返不精确（上面的边长上限把特别长的行压成非整数倍率，或 1.75 这类 DPR）就回写 canvas.width——
-    // 给画布赋宽高会清空刚画好的字，整行成了空白纹理。resolution 的 setter 只按像素尺寸重算宽高，不碰画布。
     const source = new pixi.CanvasSource({ resource: canvas, resolution: 1, autoGarbageCollect: true });
     source.resolution = resolution;
     const base = new pixi.Texture({ source });
 
-    const runByIndex = new Array<DirectionalRun | null>(graphemes.length).fill(null);
-    for (const run of runs) {
-        for (let index = run.start; index < run.end; index += 1) {
-            runByIndex[index] = run;
-        }
-    }
-
     const glyphs: GlyphSlice[] = graphemes.map((char, index) => {
-        const run = runByIndex[index];
-        const rawX = offsets[index]!;
-        const w = Math.max(0.5, offsets[index + 1]! - rawX);
-        let x = rawX;
-        if (run && run.rtl) {
-            const runStartX = offsets[run.start]!;
-            const runEndX = offsets[run.end]!;
-            const runWidth = Math.max(0, runEndX - runStartX);
-            const localEnd = offsets[index + 1]! - runStartX;
-            x = runStartX + Math.max(0, runWidth - localEnd);
-        }
+        const x = offsets[index]!;
+        const w = Math.max(0.5, offsets[index + 1]! - x);
         // 第一个与最后一个字把留白也带上，免得字形出头的部分（斜体、标点）被切掉。
-        const isVisualLeftmost = hasRtl ? x <= 1e-3 : index === 0;
-        const isVisualRightmost = hasRtl ? x + w >= width - 1e-3 : index === graphemes.length - 1;
-        const left = isVisualLeftmost ? 0 : pad + x;
-        const right = isVisualRightmost ? width + pad * 2 : pad + x + w;
+        const left = index === 0 ? 0 : pad + x;
+        const right = index === graphemes.length - 1 ? width + pad * 2 : pad + x + w;
         const frame = new pixi.Rectangle(left, 0, right - left, height + pad * 2);
         return {
             char,
@@ -201,6 +415,8 @@ export const buildGlyphLine = (
             texture: new pixi.Texture({ source, frame }),
             blank: char.trim().length === 0,
             upright: isUprightGlyph(char),
+            cursiveWordLead: false,
+            cursiveWordContinuation: false,
         };
     });
 

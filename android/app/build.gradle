@@ -1,5 +1,37 @@
 apply plugin: 'com.android.application'
 
+def resolveSigningValue = { String propName, String envName, String fallbackEnvName = null ->
+    if (project.hasProperty(propName)) {
+        def val = project.property(propName)?.toString()?.trim()
+        if (val) return val
+    }
+    def envVal = System.getenv(envName)?.trim()
+    if (envVal) return envVal
+    if (fallbackEnvName) {
+        def fbVal = System.getenv(fallbackEnvName)?.trim()
+        if (fbVal) return fbVal
+    }
+    return null
+}
+
+def releaseStoreFilePath = resolveSigningValue('FOLIA_UPLOAD_STORE_FILE', 'FOLIA_UPLOAD_STORE_FILE', 'ANDROID_KEYSTORE_PATH')
+def releaseStorePassword = resolveSigningValue('FOLIA_UPLOAD_STORE_PASSWORD', 'FOLIA_UPLOAD_STORE_PASSWORD', 'ANDROID_KEYSTORE_PASSWORD')
+def releaseKeyAlias = resolveSigningValue('FOLIA_UPLOAD_KEY_ALIAS', 'FOLIA_UPLOAD_KEY_ALIAS', 'ANDROID_KEY_ALIAS')
+def releaseKeyPassword = resolveSigningValue('FOLIA_UPLOAD_KEY_PASSWORD', 'FOLIA_UPLOAD_KEY_PASSWORD', 'ANDROID_KEY_PASSWORD')
+
+def hasReleaseKeystore = (
+    releaseStoreFilePath != null &&
+    file(releaseStoreFilePath).exists() &&
+    releaseStorePassword != null &&
+    releaseKeyAlias != null &&
+    releaseKeyPassword != null
+)
+
+def requireReleaseSigning = (
+    (project.hasProperty('requireReleaseSigning') && project.property('requireReleaseSigning').toString().toBoolean()) ||
+    System.getenv('FOLIA_REQUIRE_RELEASE_SIGNING') == 'true'
+)
+
 android {
     namespace = "top.izuna.foliamajor"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -16,15 +48,58 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            release {
+                storeFile file(releaseStoreFilePath)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+                enableV1Signing true
+                enableV2Signing true
+                enableV3Signing true
+                enableV4Signing true
+            }
+        }
+    }
     buildTypes {
-        release {
+        debug {
+            debuggable true
             minifyEnabled false
+            shrinkResources false
+        }
+        release {
+            debuggable false
+            jniDebuggable false
+            minifyEnabled true
+            shrinkResources true
+            zipAlignEnabled true
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (hasReleaseKeystore) {
+                signingConfig signingConfigs.release
+            }
         }
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_21
         targetCompatibility JavaVersion.VERSION_21
+    }
+}
+
+gradle.taskGraph.whenReady { taskGraph ->
+    def runningReleaseTask = taskGraph.allTasks.any { task ->
+        task.name.toLowerCase().contains('release')
+    }
+    if (runningReleaseTask && requireReleaseSigning && !hasReleaseKeystore) {
+        throw new GradleException(
+            "Folia Android release signing credentials are required when requireReleaseSigning=true, " +
+            "but were not found or keystore file does not exist.\n" +
+            "Never substitute an ephemeral or debug key for a production release.\n" +
+            "Provide FOLIA_UPLOAD_STORE_FILE (or ANDROID_KEYSTORE_PATH), FOLIA_UPLOAD_STORE_PASSWORD " +
+            "(or ANDROID_KEYSTORE_PASSWORD), FOLIA_UPLOAD_KEY_ALIAS (or ANDROID_KEY_ALIAS), and " +
+            "FOLIA_UPLOAD_KEY_PASSWORD (or ANDROID_KEY_PASSWORD), or configure the GitHub Actions secrets: " +
+            "ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD."
+        )
     }
 }
 

@@ -7,13 +7,14 @@ import { buildLocalHomeGroups } from '../../library/core/home/localHomeModel';
 // Pure state, collection grouping, filtering/sorting, visualizer visibility, and hardware-Back
 // navigation model for the Phase 4 mobile-first Android music player shell.
 
-export type MobilePrimaryTab = 'songs' | 'albums' | 'folders' | 'settings';
+export type MobilePrimaryTab = 'songs' | 'albums' | 'folders' | 'online' | 'settings';
 export type MobileAlbumsSubTab = 'albums' | 'artists';
 export type MobileFoldersSubTab = 'folders' | 'playlists';
+export type MobileOnlineSubTab = 'discover' | 'search' | 'navidrome' | 'backends';
 export type MobileSongSortOrder = 'title' | 'artist' | 'album' | 'recent';
 export type MobilePlayerSheetState = 'collapsed' | 'expanded';
 export type MobilePlayerDisplayMode = 'cover' | 'lyrics' | 'stage';
-export type MobileSubDrawer = 'none' | 'lyrics-tools' | 'queue';
+export type MobileSubDrawer = 'none' | 'lyrics-tools' | 'equalizer' | 'queue';
 
 export interface MobileCollectionDetail {
     kind: 'album' | 'artist' | 'folder' | 'playlist';
@@ -28,6 +29,7 @@ export interface MobileNavigationState {
     activeTab: MobilePrimaryTab;
     albumsSubTab: MobileAlbumsSubTab;
     foldersSubTab: MobileFoldersSubTab;
+    onlineSubTab?: MobileOnlineSubTab;
     collectionDetail: MobileCollectionDetail | null;
     playerSheet: MobilePlayerSheetState;
     playerDisplayMode: MobilePlayerDisplayMode;
@@ -38,15 +40,22 @@ export interface ExternalModalState {
     isLyricMatchOpen?: boolean;
     isSettingsModalOpen?: boolean;
     isCommandPaletteOpen?: boolean;
+    isEqualizerOpen?: boolean;
+    isSearchOpen?: boolean;
+    isLoginWindowOpen?: boolean;
     closeLyricMatch?: () => void;
     closeSettingsModal?: () => void;
     closeCommandPalette?: () => void;
+    closeEqualizer?: () => void;
+    closeSearch?: () => void;
+    closeLoginWindow?: () => void;
 }
 
 export const INITIAL_MOBILE_NAVIGATION_STATE: MobileNavigationState = {
     activeTab: 'songs',
     albumsSubTab: 'albums',
     foldersSubTab: 'folders',
+    onlineSubTab: 'discover',
     collectionDetail: null,
     playerSheet: 'collapsed',
     playerDisplayMode: 'cover',
@@ -68,6 +77,30 @@ export const stepMobileBackNavigation = (
             handled: true,
             nextState: state,
             sideEffect: modals.closeCommandPalette,
+        };
+    }
+
+    if (modals.isEqualizerOpen && modals.closeEqualizer) {
+        return {
+            handled: true,
+            nextState: state,
+            sideEffect: modals.closeEqualizer,
+        };
+    }
+
+    if (modals.isLoginWindowOpen && modals.closeLoginWindow) {
+        return {
+            handled: true,
+            nextState: state,
+            sideEffect: modals.closeLoginWindow,
+        };
+    }
+
+    if (modals.isSearchOpen && modals.closeSearch) {
+        return {
+            handled: true,
+            nextState: state,
+            sideEffect: modals.closeSearch,
         };
     }
 

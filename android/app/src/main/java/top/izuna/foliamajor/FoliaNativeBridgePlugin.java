@@ -15,8 +15,13 @@ import android.os.Build;
 import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
 import android.util.Base64;
+import android.view.View;
+import android.view.Window;
 import androidx.activity.result.ActivityResult;
 import androidx.annotation.Nullable;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 import androidx.documentfile.provider.DocumentFile;
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
@@ -43,7 +48,7 @@ import org.json.JSONObject;
  * Capacitor plugin providing Storage Access Framework (SAF) folder/file import with persisted URI
  * permissions, fast DocumentsContract tree scanning, native off-thread metadata/artwork extraction,
  * bounded byte-slice reading, sidecar lyric discovery (.ttml, .lrc, .vtt, .qrc, .yrc, .krc, .fia),
- * and AndroidX Media3 playback service control.
+ * AndroidX Media3 playback service control, and AndroidX WindowInsetsControllerCompat system bar visibility.
  */
 @CapacitorPlugin(name = "FoliaNativeBridge")
 public class FoliaNativeBridgePlugin extends Plugin {
@@ -82,6 +87,84 @@ public class FoliaNativeBridgePlugin extends Plugin {
             activity.runOnUiThread(() -> activity.moveTaskToBack(true));
         }
         call.resolve();
+    }
+
+    /**
+     * Controls native Android status bar and navigation bar visibility using AndroidX
+     * WindowInsetsControllerCompat with BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE.
+     */
+    @PluginMethod
+    public void setSystemBarsVisibility(PluginCall call) {
+        final boolean hideStatusBar = Boolean.TRUE.equals(call.getBoolean("hideStatusBar", false));
+        final boolean hideNavigationBar = Boolean.TRUE.equals(call.getBoolean("hideNavigationBar", false));
+        Activity activity = getActivity();
+        if (activity instanceof MainActivity) {
+            ((MainActivity) activity).applySystemBarsConfig(hideStatusBar, hideNavigationBar);
+            JSObject res = new JSObject();
+            res.put("supported", true);
+            res.put("hideStatusBar", hideStatusBar);
+            res.put("hideNavigationBar", hideNavigationBar);
+            res.put("behavior", "SHOW_TRANSIENT_BARS_BY_SWIPE");
+            call.resolve(res);
+            return;
+        }
+        if (activity != null) {
+            activity.runOnUiThread(() -> {
+                Window window = activity.getWindow();
+                if (window != null && window.getDecorView() != null) {
+                    View decorView = window.getDecorView();
+                    WindowCompat.setDecorFitsSystemWindows(window, false);
+                    WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(window, decorView);
+                    if (controller != null) {
+                        controller.setSystemBarsBehavior(
+                            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                        );
+                        if (hideStatusBar) {
+                            controller.hide(WindowInsetsCompat.Type.statusBars());
+                        } else {
+                            controller.show(WindowInsetsCompat.Type.statusBars());
+                        }
+                        if (hideNavigationBar) {
+                            controller.hide(WindowInsetsCompat.Type.navigationBars());
+                        } else {
+                            controller.show(WindowInsetsCompat.Type.navigationBars());
+                        }
+                    }
+                }
+            });
+            JSObject res = new JSObject();
+            res.put("supported", true);
+            res.put("hideStatusBar", hideStatusBar);
+            res.put("hideNavigationBar", hideNavigationBar);
+            res.put("behavior", "SHOW_TRANSIENT_BARS_BY_SWIPE");
+            call.resolve(res);
+            return;
+        }
+        JSObject res = new JSObject();
+        res.put("supported", false);
+        res.put("hideStatusBar", hideStatusBar);
+        res.put("hideNavigationBar", hideNavigationBar);
+        call.resolve(res);
+    }
+
+    @PluginMethod
+    public void getSystemBarsVisibility(PluginCall call) {
+        Activity activity = getActivity();
+        JSObject res = new JSObject();
+        if (activity instanceof MainActivity) {
+            MainActivity main = (MainActivity) activity;
+            res.put("supported", true);
+            res.put("hideStatusBar", main.isStatusBarHiddenRequested());
+            res.put("hideNavigationBar", main.isNavigationBarHiddenRequested());
+            res.put("behavior", "SHOW_TRANSIENT_BARS_BY_SWIPE");
+            call.resolve(res);
+            return;
+        }
+        res.put("supported", activity != null);
+        res.put("hideStatusBar", false);
+        res.put("hideNavigationBar", false);
+        res.put("behavior", "SHOW_TRANSIENT_BARS_BY_SWIPE");
+        call.resolve(res);
     }
 
     @PluginMethod
@@ -495,10 +578,6 @@ public class FoliaNativeBridgePlugin extends Plugin {
         });
     }
 
-    /**
-     * Extracts audio metadata and downscaled embedded cover artwork off the UI thread using Android's
-     * native MediaMetadataRetriever so scanning a large library never reads entire audio files into JS RAM.
-     */
     @PluginMethod
     public void extractAudioMetadata(PluginCall call) {
         final String rawContentUri = call.getString("contentUri", "");

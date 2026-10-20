@@ -1,16 +1,28 @@
-import { describe, expect, it, vi } from 'vitest';
-import { applyAudioEqualizerSettings, connectAudioEqualizerGraph } from '@/services/audioEqualizerGraph';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+    applyAudioEqualizerSettings,
+    computeEqualizerFrequencyResponseDb,
+    connectAudioEqualizerGraph,
+    getAudioEqualizerRuntimeStatus,
+    subscribeAudioEqualizerRuntime,
+} from '@/services/audioEqualizerGraph';
 import {
     AUDIO_EQUALIZER_BANDS,
     AUDIO_EQUALIZER_PRESETS,
+    AUDIO_EQUALIZER_STORAGE_KEY,
     DEFAULT_AUDIO_EQUALIZER_SETTINGS,
+    isAudioEqualizerFlat,
+    readStoredAudioEqualizerSettings,
+    resetAudioEqualizerToFlat,
     resolveAudioEqualizerSettings,
+    writeStoredAudioEqualizerSettings,
 } from '@/utils/audioEqualizer';
 import { createNeutralAudioEffects, normalizeAudioEffects } from '@/utils/audioEffects';
-import { AUDIO_SOUND_PRESETS } from '@/utils/audioPresets';
+import { AUDIO_SOUND_PRESET_IDS, AUDIO_SOUND_PRESETS } from '@/utils/audioPresets';
 
 // test/unit/utils/audioEqualizer.test.ts
-// Verifies persisted equalizer normalization and the ten-node Web Audio chain.
+// Verifies persisted equalizer normalization, presets (Flat, Rock, Pop, Classical, Jazz, Bass Boost, etc.),
+// Reset-to-Flat, ten-node Web Audio BiquadFilterNode chain, runtime lifecycle, and transfer-function frequency response.
 
 const createAudioParam = () => ({
     value: 0,
@@ -27,6 +39,16 @@ const createFilter = () => ({
 });
 
 describe('audio equalizer model', () => {
+    const originalWindow = (globalThis as { window?: unknown }).window;
+
+    afterEach(() => {
+        if (originalWindow === undefined) {
+            delete (globalThis as { window?: unknown }).window;
+        } else {
+            (globalThis as { window?: unknown }).window = originalWindow;
+        }
+    });
+
     it('normalizes malformed persisted values into ten safe bands', () => {
         const settings = resolveAudioEqualizerSettings({
             enabled: true,
@@ -50,6 +72,76 @@ describe('audio equalizer model', () => {
         expect(second.customSlots[0].gains).not.toBe(DEFAULT_AUDIO_EQUALIZER_SETTINGS.customSlots[0].gains);
     });
 
+    it('includes Flat, Rock, Pop, Classical, Jazz, and Bass Boost presets with 10 valid bands each', () => {
+        const requiredPresets = ['flat', 'rock', 'pop', 'classical', 'jazz', 'bass', 'vocal', 'lofi', 'radio', 'hall'] as const;
+        for (const presetId of requiredPresets) {
+            expect(AUDIO_SOUND_PRESET_IDS).toContain(presetId);
+            const preset = AUDIO_SOUND_PRESETS[presetId];
+            expect(preset.gains).toHaveLength(10);
+            preset.gains.forEach(gain => {
+                expect(gain).toBeGreaterThanOrEqual(-12);
+                expect(gain).toBeLessThanOrEqual(12);
+            });
+        }
+
+        const rockSettings = resolveAudioEqualizerSettings({
+            enabled: true,
+            preset: 'rock',
+            gains: AUDIO_SOUND_PRESETS.rock.gains,
+            effects: AUDIO_SOUND_PRESETS.rock.effects,
+        });
+        expect(rockSettings.preset).toBe('rock');
+        expect(isAudioEqualizerFlat(rockSettings)).toBe(false);
+    });
+
+    it('resets any preset or custom curve to Flat while preserving custom slots and enabled state', () => {
+        const customSlotGains = [4, 3, 2, 1, 0, -1, -2, -3, 2, 5];
+        const activeRock = resolveAudioEqualizerSettings({
+            enabled: true,
+            preset: 'rock',
+            gains: AUDIO_SOUND_PRESETS.rock.gains,
+            effects: AUDIO_SOUND_PRESETS.rock.effects,
+            customSlots: [{ gains: customSlotGains, effects: createNeutralAudioEffects() }, {}],
+        });
+
+        expect(isAudioEqualizerFlat(activeRock)).toBe(false);
+        const reset = resetAudioEqualizerToFlat(activeRock);
+        expect(reset.enabled).toBe(true);
+        expect(reset.preset).toBe('flat');
+        expect(reset.gains).toEqual(Array(10).fill(0));
+        expect(reset.effects).toEqual(createNeutralAudioEffects());
+        expect(isAudioEqualizerFlat(reset)).toBe(true);
+        expect(reset.customSlots[0].gains).toEqual(customSlotGains);
+    });
+
+    it('persists and restores equalizer settings via localStorage', () => {
+        const store = new Map<string, string>();
+        (globalThis as { window?: unknown }).window = {
+            localStorage: {
+                getItem: (key: string) => store.get(key) ?? null,
+                setItem: (key: string, value: string) => {
+                    store.set(key, value);
+                },
+            },
+        };
+
+        const toSave = resolveAudioEqualizerSettings({
+            enabled: true,
+            preset: 'jazz',
+            gains: AUDIO_SOUND_PRESETS.jazz.gains,
+            effects: AUDIO_SOUND_PRESETS.jazz.effects,
+        });
+
+        writeStoredAudioEqualizerSettings(toSave);
+        expect(store.has(AUDIO_EQUALIZER_STORAGE_KEY)).toBe(true);
+
+        const loaded = readStoredAudioEqualizerSettings();
+        expect(loaded.enabled).toBe(true);
+        expect(loaded.preset).toBe('jazz');
+        expect(loaded.gains).toEqual(AUDIO_SOUND_PRESETS.jazz.gains);
+        expect(loaded.effects).toEqual(AUDIO_SOUND_PRESETS.jazz.effects);
+    });
+
     it('preserves the custom slots while a built-in preset is active', () => {
         const settings = resolveAudioEqualizerSettings({
             enabled: true,
@@ -67,10 +159,6 @@ describe('audio equalizer model', () => {
 });
 
 describe('audio effect model', () => {
-    // Deliberately the opposite of upstream, which restores the preset's effects here. Someone who
-    // picked "Lo-Fi" in a build where it was a tone curve gets vinyl crackle and bit crush pushed
-    // into their music by an update they did not read - reported on this branch as severe noise.
-    // The preset id survives (see below), so the modern character is one deliberate click away.
     it('leaves the chain neutral for settings persisted before the effect chain existed', () => {
         const settings = resolveAudioEqualizerSettings({
             enabled: true,
@@ -80,7 +168,6 @@ describe('audio effect model', () => {
         });
 
         expect(settings.effects).toEqual(createNeutralAudioEffects());
-        // The tone curve they chose is still theirs, and the panel still shows which one it is.
         expect(settings.gains).toEqual(AUDIO_EQUALIZER_PRESETS.lofi);
         expect(settings.preset).toBe('lofi');
         expect(settings.customSlots[0].effects).toEqual(createNeutralAudioEffects());
@@ -157,16 +244,20 @@ describe('audio effect model', () => {
     });
 });
 
-describe('audio equalizer graph', () => {
-    it('connects ten filters between the existing gain and analyser nodes', () => {
+describe('audio equalizer graph & measurable frequency response', () => {
+    it('connects ten filters between the existing gain and analyser nodes and reports runtime status across session changes', () => {
         const filters = AUDIO_EQUALIZER_BANDS.map(() => createFilter());
         const context = {
             sampleRate: 48_000,
+            currentTime: 1.5,
+            state: 'running',
             createBiquadFilter: vi.fn(() => filters.shift()),
         } as unknown as AudioContext;
         const input = { connect: vi.fn() } as unknown as AudioNode;
         const output = {} as AudioNode;
         const nodesRef = { current: [] as BiquadFilterNode[] };
+        const listener = vi.fn();
+        const unsubscribe = subscribeAudioEqualizerRuntime(listener);
 
         connectAudioEqualizerGraph({
             context,
@@ -189,11 +280,25 @@ describe('audio equalizer graph', () => {
         expect(nodesRef.current[9].connect).toHaveBeenCalledWith(output);
         expect(nodesRef.current[0].gain.value).toBe(-5);
         expect(nodesRef.current[9].gain.value).toBe(4);
+
+        const activeStatus = getAudioEqualizerRuntimeStatus();
+        expect(activeStatus.connected).toBe(true);
+        expect(activeStatus.contextState).toBe('running');
+        expect(activeStatus.bandCount).toBe(10);
+        expect(activeStatus.activeBandGainsDb[0]).toBe(-5);
+        expect(listener).toHaveBeenCalled();
+
+        // Simulate session close / graph teardown
+        applyAudioEqualizerSettings(null as unknown as AudioContext, [], DEFAULT_AUDIO_EQUALIZER_SETTINGS);
+        const closedStatus = getAudioEqualizerRuntimeStatus();
+        expect(closedStatus.connected).toBe(false);
+        expect(closedStatus.contextState).toBe('uninitialized');
+        unsubscribe();
     });
 
     it('smoothly bypasses every band when disabled', () => {
         const nodes = AUDIO_EQUALIZER_BANDS.map(() => createFilter()) as unknown as BiquadFilterNode[];
-        const context = { currentTime: 2 } as AudioContext;
+        const context = { currentTime: 2, sampleRate: 48_000, state: 'running' } as AudioContext;
 
         applyAudioEqualizerSettings(context, nodes, {
             enabled: false,
@@ -207,5 +312,60 @@ describe('audio equalizer graph', () => {
             expect(node.gain.cancelScheduledValues).toHaveBeenCalledWith(2);
             expect(node.gain.setTargetAtTime).toHaveBeenCalledWith(0, 2, 0.015);
         });
+    });
+
+    it('measurably alters the audio biquad frequency response curve across 31 Hz – 16 kHz when enabled', () => {
+        const probeFrequencies = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
+
+        // Disabled or Flat -> 0 dB across all frequencies
+        const flatResponse = computeEqualizerFrequencyResponseDb(
+            { ...DEFAULT_AUDIO_EQUALIZER_SETTINGS, enabled: true },
+            probeFrequencies,
+        );
+        flatResponse.forEach(gainDb => {
+            expect(gainDb).toBeCloseTo(0, 3);
+        });
+
+        const disabledRockResponse = computeEqualizerFrequencyResponseDb(
+            {
+                ...DEFAULT_AUDIO_EQUALIZER_SETTINGS,
+                enabled: false,
+                preset: 'rock',
+                gains: AUDIO_SOUND_PRESETS.rock.gains,
+            },
+            probeFrequencies,
+        );
+        disabledRockResponse.forEach(gainDb => {
+            expect(gainDb).toBe(0);
+        });
+
+        // Bass Boost enabled -> boosts low frequencies (31 Hz, 62 Hz, 125 Hz) significantly
+        const bassResponse = computeEqualizerFrequencyResponseDb(
+            {
+                ...DEFAULT_AUDIO_EQUALIZER_SETTINGS,
+                enabled: true,
+                preset: 'bass',
+                gains: AUDIO_SOUND_PRESETS.bass.gains,
+            },
+            probeFrequencies,
+        );
+        expect(bassResponse[0]).toBeGreaterThan(3.5); // 31 Hz lowshelf corner + 62 Hz skirt (~+4.06 dB)
+        expect(bassResponse[1]).toBeGreaterThan(5);   // 62 Hz peak + 31 Hz lowshelf (~+6.98 dB)
+        expect(bassResponse[5]).toBeLessThan(0);      // 1 kHz dipped
+
+        // Rock preset enabled -> V-curve boosts lows (31/62 Hz) and highs (8/16 kHz) while dipping 500 Hz
+        const rockResponse = computeEqualizerFrequencyResponseDb(
+            {
+                ...DEFAULT_AUDIO_EQUALIZER_SETTINGS,
+                enabled: true,
+                preset: 'rock',
+                gains: AUDIO_SOUND_PRESETS.rock.gains,
+            },
+            probeFrequencies,
+        );
+        expect(rockResponse[0]).toBeGreaterThan(2.5); // 31 Hz
+        expect(rockResponse[1]).toBeGreaterThan(4);   // 62 Hz
+        expect(rockResponse[4]).toBeLessThan(-1);     // 500 Hz
+        expect(rockResponse[8]).toBeGreaterThan(3);   // 8 kHz
     });
 });

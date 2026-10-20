@@ -2,6 +2,9 @@
 import type { Line, Theme } from '../../../types';
 import { createRng } from './lumiereRandom';
 import { resolveThemeFontStack, resolveThemeFontWeight } from '../../../utils/fontStacks';
+import { hasCursiveJoiningScript } from '../../../utils/lyrics/arabicText';
+import { splitLyricGraphemes } from '../../../utils/lyrics/graphemeTiming';
+import { segmentTextWords } from '../../../utils/lyrics/wordSegmentation';
 import type { CreditsFrame, SongMetadata } from './lumiereKernel';
 import { hexOf, type Rgb } from './color';
 import { createBloomFilter } from './light/bloomFilter';
@@ -61,15 +64,18 @@ const clean = (value: string | null | undefined) => value?.trim() ?? '';
 
 export const hasLumiereCredits = (metadata: SongMetadata) => Boolean(clean(metadata.title) || clean(metadata.artist) || clean(metadata.album));
 
-/** 把曲名做成一行「歌词」：每个字依次点亮。 */
+/** 把曲名做成一行「歌词」：含阿拉伯语等连写文字时按整词切分，非连写文字按字素切分依次点亮。 */
 const titleLine = (title: string): Line => {
-    const chars = Array.from(title);
-    const step = Math.min(TITLE_STEP, TITLE_SPAN / Math.max(chars.length, 1));
+    const units = hasCursiveJoiningScript(title)
+        ? segmentTextWords(title).map(part => part.segment).filter(s => s.length > 0)
+        : splitLyricGraphemes(title);
+    const tokens = units.length > 0 ? units : [title];
+    const step = Math.min(TITLE_STEP, TITLE_SPAN / Math.max(tokens.length, 1));
     return {
         fullText: title,
         startTime: TITLE_START,
-        endTime: TITLE_START + step * chars.length + 0.6,
-        words: chars.map((text, i) => ({ text, startTime: TITLE_START + i * step, endTime: TITLE_START + (i + 1) * step })),
+        endTime: TITLE_START + step * tokens.length + 0.6,
+        words: tokens.map((text, i) => ({ text, startTime: TITLE_START + i * step, endTime: TITLE_START + (i + 1) * step })),
     };
 };
 
@@ -148,27 +154,30 @@ export const createLumiereCredits = (pixi: PixiModule, options: {
             drift: 0,
             seed: 'lumiere:credits:title',
             sprites,
-            letterSpacing: 0.06,
+            letterSpacing: hasCursiveJoiningScript(title) ? 0 : 0.06,
         })
         : null;
     if (window) text.addChild(window.view);
 
-    const detailStyle = (size: number, color: Rgb, spacing: number) => new pixi.TextStyle({
+    const detailStyle = (size: number, color: Rgb, spacing: number, content: string) => new pixi.TextStyle({
         fontFamily: font,
         fontWeight: String(resolveThemeFontWeight(theme, 500)) as import('pixi.js').TextStyleFontWeight,
         fontSize: size,
         fill: hexOf(color),
-        letterSpacing: size * spacing,
+        letterSpacing: hasCursiveJoiningScript(content) ? 0 : size * spacing,
         align: 'center',
         wordWrap: true,
         wordWrapWidth: width * 0.6,
     });
     const detailSize = Math.max(13, height * 0.028);
+    const artistDisplay = artist
+        ? (hasCursiveJoiningScript(artist) ? artist : artist.toLocaleUpperCase())
+        : '';
     const details = [
-        artist ? { text: artist.toLocaleUpperCase(), y: 0.35, size: detailSize, spacing: 0.32, color: palette.lit, delay: 0.9 } : null,
+        artistDisplay ? { text: artistDisplay, y: 0.35, size: detailSize, spacing: 0.32, color: palette.lit, delay: 0.9 } : null,
         album ? { text: album, y: 0.65, size: detailSize * 0.85, spacing: 0.16, color: palette.unlit, delay: 1.2 } : null,
     ].filter(item => item !== null).map(item => {
-        const label = new pixi.Text({ text: item.text, style: detailStyle(item.size, item.color, item.spacing), resolution: options.resolution });
+        const label = new pixi.Text({ text: item.text, style: detailStyle(item.size, item.color, item.spacing, item.text), resolution: options.resolution });
         label.anchor.set(0.5);
         label.position.set(width / 2, item.y * height);
         label.alpha = 0;
@@ -179,16 +188,13 @@ export const createLumiereCredits = (pixi: PixiModule, options: {
     view.addChild(graphics, text);
     const graphicsBloom = createBloomFilter(pixi, { ...LUMIERE_BLOOM.graphics, strength: LUMIERE_BLOOM.graphics.strength * tuning.bloom, padding: 0, tint: [1, 1, 1] });
     const textBloom = createBloomFilter(pixi, { ...LUMIERE_BLOOM.text, strength: LUMIERE_BLOOM.text.strength * tuning.textBloom, padding: 0, tint: [1, 1, 1] });
-    // 与场景的文字组相同：固定的 bloom 区域（被视口裁剪成整个画面），光晕才不会随字的运动抖动。
     text.filterArea = new pixi.Rectangle(-width, -height, width * 3, height * 3);
     graphics.filters = tuning.bloom > 0 ? [graphicsBloom] : [];
     text.filters = tuning.textBloom > 0 ? [textBloom] : [];
-    // 仅显示歌词文字：片尾卡只留曲名与艺人 / 专辑，光、烟、线稿、浮尘不画。
     graphics.renderable = !tuning.textOnly;
 
     const update = (elapsed: number) => {
         const time = Math.max(0, elapsed);
-        // 光从 0.6 秒起 1.6 秒升满，点亮的一瞬光源处闪一下。
         const rise = smooth((time - 0.6) / 1.6);
         const ignite = time >= 0.9 ? 1.2 * Math.exp(-(time - 0.9) / 0.4) : 0;
         const beams = resolveBeams(rig, time, aspect, { intensity: rise * tuning.lightIntensity, bass: 0, color: palette.light, local: time });

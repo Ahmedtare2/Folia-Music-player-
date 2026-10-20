@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { LocalPlaylist, LocalSong, LyricLine, Word } from '@/types';
+import { motionValue } from 'framer-motion';
+import { PlayerState, type LocalPlaylist, type LocalSong, type LyricLine, type Word } from '@/types';
 import {
     INITIAL_MOBILE_NAVIGATION_STATE,
     type MobileNavigationState,
@@ -12,7 +13,7 @@ import {
     resolveLocalSongCoverThumb,
     stepMobileBackNavigation,
 } from '@/components/mobile/mobileNavigationModel';
-import {
+import MobileNowPlayingSheet, {
     computeActiveLyricLineIndices,
     computeTimedWordProgressPercent,
 } from '@/components/mobile/MobileNowPlayingSheet';
@@ -35,13 +36,75 @@ import {
     isMobilePhoneViewport,
     shouldUseAndroidMobileShell,
 } from '@/utils/platform';
-import { minimizeAndroidApp } from '@/services/android/foliaAndroidBridge';
+import {
+    applyAndroidSystemBarsVisibility,
+    getAndroidSystemBarsVisibility,
+    minimizeAndroidApp,
+} from '@/services/android/foliaAndroidBridge';
+import {
+    getIsDeviceOnline,
+    getOnlineProviderDiagnostic,
+    getStoredRuntimeApiBase,
+    resolveProviderWebApiBase,
+    setStoredRuntimeApiBase,
+    subscribeDeviceOnlineStatus,
+} from '@/services/onlineMusic/runtimeApiConfig';
+import {
+    DEFAULT_SYSTEM_BAR_SETTINGS,
+    SYSTEM_BAR_SETTINGS_STORAGE_KEY,
+    readStoredSystemBarSettings,
+    resolveEffectiveSystemBars,
+    syncSystemBarsWithPlatform,
+    writeStoredSystemBarSettings,
+} from '@/utils/systemBarSettings';
+import { useSystemBarSettingsStore } from '@/stores/useSystemBarSettingsStore';
+import { VISUALIZER_REGISTRY } from '@/components/visualizer/registry';
+import { useVisualizerSettingsStore } from '@/stores/useVisualizerSettingsStore';
+import {
+    DEFAULT_DYNAMIC_ALBUM_ARTWORK_SETTINGS,
+    DYNAMIC_ALBUM_ARTWORK_STORAGE_KEY,
+    readStoredDynamicAlbumArtworkSettings,
+    resolveDynamicAlbumArtworkMotion,
+    writeStoredDynamicAlbumArtworkSettings,
+} from '@/utils/dynamicAlbumArtwork';
+import { useDynamicAlbumArtworkStore } from '@/stores/useDynamicAlbumArtworkStore';
 
 // test/unit/mobile/mobileAndroidPlayerPhase4.test.ts
 // Verifies Phase 4 mobile-first Android music player navigation, hardware Back stack,
+// restored Online tab & Equalizer sheet navigation, online runtime API config & diagnostics,
+// Display and Immersive Mode system-bar visibility settings & screen transitions,
+// landscape visualizer type selection & persistence while music is playing,
 // local song search/sort/grouping (including Arabic & English), GPU/DPR/Pixi budgets,
 // synchronized TTML syllable & overlapping vocal lyrics, artwork resolution, and
 // non-overlapping player/visualizer/Lattice presentation.
+
+type VNode = {
+    type?: unknown;
+    props?: Record<string, any>;
+};
+
+const expandVNodeTree = (node: unknown): VNode[] => {
+    if (!node || typeof node !== 'object') return [];
+    if (Array.isArray(node)) {
+        return node.flatMap(expandVNodeTree);
+    }
+    const vnode = node as VNode;
+    const fnType = typeof vnode.type === 'function'
+        ? (vnode.type as (props: Record<string, any>) => unknown)
+        : (typeof vnode.type === 'object' && vnode.type !== null && typeof (vnode.type as { type?: unknown }).type === 'function')
+            ? ((vnode.type as { type: (props: Record<string, any>) => unknown }).type)
+            : null;
+    if (fnType) {
+        try {
+            const rendered = fnType(vnode.props || {});
+            return expandVNodeTree(rendered);
+        } catch {
+            return [vnode];
+        }
+    }
+    const children = vnode.props?.children;
+    return [vnode, ...expandVNodeTree(children)];
+};
 
 type MakeLocalSongInput = Omit<Partial<LocalSong>, 'importedMetadata'> & {
     id: string;
@@ -80,6 +143,9 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
     const originalCapacitor = (globalThis as { Capacitor?: unknown }).Capacitor;
     const originalNavigator = (globalThis as { navigator?: unknown }).navigator;
     const originalBridge = (globalThis as { __FOLIA_ANDROID_BRIDGE__?: unknown }).__FOLIA_ANDROID_BRIDGE__;
+    const originalWindow = (globalThis as { window?: unknown }).window;
+    const originalLocalStorage = (globalThis as { localStorage?: unknown }).localStorage;
+    const originalDocument = (globalThis as { document?: unknown }).document;
 
     afterEach(() => {
         if (originalCapacitor === undefined) {
@@ -97,6 +163,21 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
             delete (globalThis as { __FOLIA_ANDROID_BRIDGE__?: unknown }).__FOLIA_ANDROID_BRIDGE__;
         } else {
             (globalThis as { __FOLIA_ANDROID_BRIDGE__?: unknown }).__FOLIA_ANDROID_BRIDGE__ = originalBridge;
+        }
+        if (originalWindow === undefined) {
+            delete (globalThis as { window?: unknown }).window;
+        } else {
+            (globalThis as { window?: unknown }).window = originalWindow;
+        }
+        if (originalLocalStorage === undefined) {
+            delete (globalThis as { localStorage?: unknown }).localStorage;
+        } else {
+            (globalThis as { localStorage?: unknown }).localStorage = originalLocalStorage;
+        }
+        if (originalDocument === undefined) {
+            delete (globalThis as { document?: unknown }).document;
+        } else {
+            (globalThis as { document?: unknown }).document = originalDocument;
         }
     });
 
@@ -127,9 +208,319 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
         });
     });
 
+    describe('Display and Immersive Mode: Native Android System Bar Visibility Settings', () => {
+        it('persists hideStatusBar, hideNavigationBar, and fullScreenLyricsMode in localStorage and restores on startup', () => {
+            const storage = new Map<string, string>();
+            const mockLocalStorage = {
+                getItem: (key: string) => storage.get(key) ?? null,
+                setItem: (key: string, val: string) => storage.set(key, val),
+                removeItem: (key: string) => storage.delete(key),
+            };
+            (globalThis as { localStorage?: unknown }).localStorage = mockLocalStorage;
+            (globalThis as { window?: unknown }).window = { localStorage: mockLocalStorage };
+
+            expect(readStoredSystemBarSettings()).toEqual(DEFAULT_SYSTEM_BAR_SETTINGS);
+
+            writeStoredSystemBarSettings({
+                hideStatusBar: true,
+                hideNavigationBar: false,
+                fullScreenLyricsMode: true,
+            });
+            expect(storage.has(SYSTEM_BAR_SETTINGS_STORAGE_KEY)).toBe(true);
+            expect(readStoredSystemBarSettings()).toEqual({
+                hideStatusBar: true,
+                hideNavigationBar: false,
+                fullScreenLyricsMode: true,
+            });
+        });
+
+        it('applies full-screen lyrics mode (hiding both bars) when entering lyrics/visualizer screen and restores previous system-bar state when leaving', async () => {
+            const storage = new Map<string, string>();
+            const mockLocalStorage = {
+                getItem: (key: string) => storage.get(key) ?? null,
+                setItem: (key: string, val: string) => storage.set(key, val),
+                removeItem: (key: string) => storage.delete(key),
+            };
+            (globalThis as { localStorage?: unknown }).localStorage = mockLocalStorage;
+            (globalThis as { window?: unknown }).window = { localStorage: mockLocalStorage };
+
+            const dataset: Record<string, string> = {};
+            (globalThis as { document?: unknown }).document = {
+                documentElement: { dataset },
+            };
+
+            const setBarsSpy = vi.fn().mockImplementation(async ({ hideStatusBar, hideNavigationBar }) => ({
+                supported: true,
+                hideStatusBar,
+                hideNavigationBar,
+                behavior: 'SHOW_TRANSIENT_BARS_BY_SWIPE',
+            }));
+            const getBarsSpy = vi.fn().mockResolvedValue({
+                supported: true,
+                hideStatusBar: true,
+                hideNavigationBar: false,
+                behavior: 'SHOW_TRANSIENT_BARS_BY_SWIPE',
+            });
+            (globalThis as { __FOLIA_ANDROID_BRIDGE__?: unknown }).__FOLIA_ANDROID_BRIDGE__ = {
+                setSystemBarsVisibility: setBarsSpy,
+                getSystemBarsVisibility: getBarsSpy,
+            };
+
+            // 1. User configures: Hide status bar = ON, Hide navigation bar = OFF, Full-screen lyrics mode = ON
+            const store = useSystemBarSettingsStore.getState();
+            store.setLyricsOrVisualizerScreenActive(false);
+            store.updateSystemBarSettings({
+                hideStatusBar: true,
+                hideNavigationBar: false,
+                fullScreenLyricsMode: true,
+            });
+
+            expect(useSystemBarSettingsStore.getState().effectiveState).toEqual({
+                hideStatusBar: true,
+                hideNavigationBar: false,
+                isImmersiveLyricsActive: false,
+            });
+            expect(setBarsSpy).toHaveBeenLastCalledWith({
+                hideStatusBar: true,
+                hideNavigationBar: false,
+            });
+            expect(dataset.hideStatusBar).toBe('true');
+            expect(dataset.hideNavigationBar).toBe('false');
+            expect(dataset.immersiveLyrics).toBe('false');
+
+            // 2. User enters synchronized lyrics or visualizer screen -> both bars hide together
+            useSystemBarSettingsStore.getState().setLyricsOrVisualizerScreenActive(true);
+            expect(useSystemBarSettingsStore.getState().effectiveState).toEqual({
+                hideStatusBar: true,
+                hideNavigationBar: true,
+                isImmersiveLyricsActive: true,
+            });
+            expect(setBarsSpy).toHaveBeenLastCalledWith({
+                hideStatusBar: true,
+                hideNavigationBar: true,
+            });
+            expect(dataset.hideStatusBar).toBe('true');
+            expect(dataset.hideNavigationBar).toBe('true');
+            expect(dataset.immersiveLyrics).toBe('true');
+
+            // 3. User leaves lyrics/visualizer screen (returns to Cover or Library) -> restores previous state (status hidden, nav visible)
+            useSystemBarSettingsStore.getState().setLyricsOrVisualizerScreenActive(false);
+            expect(useSystemBarSettingsStore.getState().effectiveState).toEqual({
+                hideStatusBar: true,
+                hideNavigationBar: false,
+                isImmersiveLyricsActive: false,
+            });
+            expect(setBarsSpy).toHaveBeenLastCalledWith({
+                hideStatusBar: true,
+                hideNavigationBar: false,
+            });
+            expect(dataset.hideStatusBar).toBe('true');
+            expect(dataset.hideNavigationBar).toBe('false');
+            expect(dataset.immersiveLyrics).toBe('false');
+
+            // 4. Verify native bridge query returns SHOW_TRANSIENT_BARS_BY_SWIPE gesture behavior
+            const queried = await getAndroidSystemBarsVisibility();
+            expect(queried.supported).toBe(true);
+            expect(queried.behavior).toBe('SHOW_TRANSIENT_BARS_BY_SWIPE');
+        });
+
+        it('keeps web and desktop unaffected when native Android bridge is unavailable', async () => {
+            delete (globalThis as { __FOLIA_ANDROID_BRIDGE__?: unknown }).__FOLIA_ANDROID_BRIDGE__;
+            delete (globalThis as { Capacitor?: unknown }).Capacitor;
+
+            const dataset: Record<string, string> = {};
+            (globalThis as { document?: unknown }).document = {
+                documentElement: { dataset },
+            };
+
+            const res = await applyAndroidSystemBarsVisibility({
+                hideStatusBar: true,
+                hideNavigationBar: true,
+            });
+            expect(res.supported).toBe(false);
+            expect(res.hideStatusBar).toBe(true);
+            expect(res.hideNavigationBar).toBe(true);
+
+            const effective = resolveEffectiveSystemBars(
+                { hideStatusBar: false, hideNavigationBar: false, fullScreenLyricsMode: true },
+                { isLyricsOrVisualizerScreen: true },
+            );
+            const syncRes = await syncSystemBarsWithPlatform(effective);
+            expect(syncRes.supported).toBe(false);
+            expect(dataset.immersiveLyrics).toBe('true');
+        });
+    });
+
+    describe('Visualizer Type Selection in Portrait & Landscape Mode While Music is Playing', () => {
+        it('switches among all registered visualizers in landscape and portrait modes, persists selection, and preserves playback/lyrics state across orientation & immersive changes', () => {
+            const storage = new Map<string, string>();
+            const mockLocalStorage = {
+                getItem: (key: string) => storage.get(key) ?? null,
+                setItem: (key: string, val: string) => storage.set(key, val),
+                removeItem: (key: string) => storage.delete(key),
+            };
+            (globalThis as { localStorage?: unknown }).localStorage = mockLocalStorage;
+            (globalThis as { window?: unknown }).window = {
+                localStorage: mockLocalStorage,
+                innerWidth: 844,
+                innerHeight: 390,
+            };
+
+            // Verify landscape phone viewport detection (844x390 and 667x375)
+            expect(isMobilePhoneViewport(844, 390)).toBe(true);
+            expect(isMobilePhoneViewport(667, 375)).toBe(true);
+            expect(isMobilePhoneViewport(390, 844)).toBe(true);
+
+            // Verify all visualizers in VISUALIZER_REGISTRY are selectable and persist to localStorage
+            expect(VISUALIZER_REGISTRY.length).toBeGreaterThanOrEqual(10);
+            const playbackPositionSec = 94.6;
+            const lyricLineIndex = 12;
+
+            for (const entry of VISUALIZER_REGISTRY) {
+                useVisualizerSettingsStore.getState().handleSetVisualizerMode(entry.mode, { notify: false });
+                expect(useVisualizerSettingsStore.getState().visualizerMode).toBe(entry.mode);
+                expect(storage.get('visualizer_mode')).toBe(entry.mode);
+            }
+
+            // Simulate orientation change (Portrait 390x844 -> Landscape 844x390) + Immersive Mode toggle while playing
+            useSystemBarSettingsStore.getState().updateSystemBarSettings({
+                hideStatusBar: false,
+                hideNavigationBar: false,
+                fullScreenLyricsMode: true,
+            });
+            useSystemBarSettingsStore.getState().setLyricsOrVisualizerScreenActive(true);
+
+            // Switch visualizer in landscape while immersive full-screen lyrics mode is active
+            useVisualizerSettingsStore.getState().handleSetVisualizerMode('lumiere', { notify: false });
+            expect(useVisualizerSettingsStore.getState().visualizerMode).toBe('lumiere');
+            expect(storage.get('visualizer_mode')).toBe('lumiere');
+            expect(useSystemBarSettingsStore.getState().effectiveState.isImmersiveLyricsActive).toBe(true);
+
+            // Switch to another visualizer ('sonnet') and verify playback position & active lyric line computation remain intact
+            useVisualizerSettingsStore.getState().handleSetVisualizerMode('sonnet', { notify: false });
+            expect(useVisualizerSettingsStore.getState().visualizerMode).toBe('sonnet');
+            expect(playbackPositionSec).toBe(94.6);
+            expect(lyricLineIndex).toBe(12);
+        });
+
+        it('renders accessible, non-clipped visualizer selector bar and landscape grid in MobileNowPlayingSheet without affecting playback or lyrics seek on swipe', () => {
+            const onVisualizerModeChange = vi.fn();
+            const onSeek = vi.fn();
+            const onLyricLineSeek = vi.fn();
+            const onTogglePlay = vi.fn();
+            const onChangeSubDrawer = vi.fn();
+
+            const baseProps = {
+                isOpen: true,
+                displayMode: 'lyrics' as const,
+                subDrawer: 'lyrics-tools' as const,
+                onChangeDisplayMode: vi.fn(),
+                onChangeSubDrawer,
+                onClose: vi.fn(),
+                currentSong: {
+                    id: -1,
+                    name: 'تملي معاك',
+                    artists: [{ id: 1, name: 'عمرو دياب' }],
+                    album: { id: 1, name: 'تملي معاك' },
+                },
+                artistName: 'عمرو دياب',
+                albumName: 'تملي معاك',
+                coverUrl: null,
+                playerState: PlayerState.PLAYING,
+                currentTime: motionValue(85.4),
+                lyricCurrentTime: motionValue(85.4),
+                duration: 240,
+                lyrics: {
+                    lines: [
+                        {
+                            startTime: 80,
+                            endTime: 90,
+                            fullText: 'تملي معاك ولو حتى بعيد عني',
+                            words: [{ text: 'تملي', startTime: 80, endTime: 84 }, { text: 'معاك', startTime: 84, endTime: 90 }],
+                        },
+                    ],
+                },
+                currentLineIndex: 0,
+                isLyricsLoading: false,
+                isLiked: true,
+                loopMode: 'all' as const,
+                theme: {
+                    primaryColor: '#ffffff',
+                    secondaryColor: '#a1a1aa',
+                    backgroundColor: '#09090b',
+                    accentColor: '#38bdf8',
+                },
+                visualizerMode: 'monet' as const,
+                onVisualizerModeChange,
+                lyricsFontScale: 1,
+                onLyricsFontScaleChange: vi.fn(),
+                showSubtitleTranslation: true,
+                onToggleSubtitleTranslation: vi.fn(),
+                lyricTimelineOffsetMs: 0,
+                onLyricTimelineOffsetChange: vi.fn(),
+                activeLocalLyricsSource: 'local' as const,
+                onChangeLyricsSource: vi.fn(),
+                onImportLocalLyricsFile: vi.fn(),
+                onOpenLyricMatch: vi.fn(),
+                onSeek,
+                onLyricLineSeek,
+                onTogglePlay,
+                onPrevTrack: vi.fn(),
+                onNextTrack: vi.fn(),
+                onToggleLoop: vi.fn(),
+                onToggleLike: vi.fn(),
+                onShuffleQueue: vi.fn(),
+                playQueue: [],
+                onPlayQueueSong: vi.fn(),
+                onRemoveQueueSong: vi.fn(),
+                onSaveQueueAsPlaylist: vi.fn().mockResolvedValue(undefined),
+                onOpenVisualizerSettings: vi.fn(),
+            };
+
+            const nodes = expandVNodeTree((MobileNowPlayingSheet as unknown as (p: typeof baseProps) => unknown)(baseProps));
+
+            // 1. Verify inline visualizer selector bar is present in Lyrics mode and has touch-pan-x + min-w-0
+            const selectorBar = nodes.find(n => n.props?.['data-testid'] === 'mobile-visualizer-selector-bar');
+            expect(selectorBar).toBeTruthy();
+            expect(String(selectorBar?.props?.className)).toContain('min-w-0');
+
+            // Verify touch/pointer propagation is stopped on selector bar so swiping doesn't seek lyrics or toggle chrome
+            const stopPropSpy = vi.fn();
+            selectorBar?.props?.onTouchStart?.({ stopPropagation: stopPropSpy });
+            selectorBar?.props?.onTouchMove?.({ stopPropagation: stopPropSpy });
+            selectorBar?.props?.onPointerDown?.({ stopPropagation: stopPropSpy });
+            expect(stopPropSpy).toHaveBeenCalledTimes(3);
+            expect(onSeek).not.toHaveBeenCalled();
+            expect(onLyricLineSeek).not.toHaveBeenCalled();
+            expect(onTogglePlay).not.toHaveBeenCalled();
+
+            // 2. Verify all registered visualizers are present in the inline strip and clicking one updates the visualizer immediately
+            const stripButtons = nodes.filter(n => Boolean(n.props?.['data-visualizer-mode']));
+            expect(stripButtons).toHaveLength(VISUALIZER_REGISTRY.length);
+            const fumeBtn = stripButtons.find(n => n.props?.['data-visualizer-mode'] === 'fume');
+            expect(fumeBtn).toBeTruthy();
+            fumeBtn?.props?.onClick?.({ stopPropagation: vi.fn() });
+            expect(onVisualizerModeChange).toHaveBeenCalledWith('fume');
+
+            // 3. Verify the landscape-friendly drawer grid is also rendered with landscape:grid-cols-5 and all visualizer options
+            const drawerGrid = nodes.find(n => n.props?.['data-testid'] === 'mobile-drawer-visualizer-grid');
+            expect(drawerGrid).toBeTruthy();
+            expect(String(drawerGrid?.props?.className)).toContain('landscape:grid-cols-5');
+
+            const claddaghDrawerBtn = nodes.find(n => n.props?.['data-testid'] === 'drawer-visualizer-option-claddagh');
+            expect(claddaghDrawerBtn).toBeTruthy();
+            claddaghDrawerBtn?.props?.onClick?.();
+            expect(onVisualizerModeChange).toHaveBeenCalledWith('claddagh');
+            expect(baseProps.currentTime.get()).toBe(85.4);
+        });
+    });
+
     describe('Android hardware Back navigation stack (stepMobileBackNavigation)', () => {
-        it('closes open app modals (Command Palette, Lyric Match, Settings) first', () => {
+        it('closes open app modals (Command Palette, Search, Equalizer, Login, Lyric Match, Settings) first', () => {
             const closePalette = vi.fn();
+            const closeSearch = vi.fn();
+            const closeEqualizer = vi.fn();
+            const closeLogin = vi.fn();
             const closeLyricMatch = vi.fn();
             const closeSettings = vi.fn();
 
@@ -140,6 +531,30 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
             expect(res1.handled).toBe(true);
             res1.sideEffect?.();
             expect(closePalette).toHaveBeenCalledTimes(1);
+
+            const resSearch = stepMobileBackNavigation(INITIAL_MOBILE_NAVIGATION_STATE, {
+                isSearchOpen: true,
+                closeSearch,
+            });
+            expect(resSearch.handled).toBe(true);
+            resSearch.sideEffect?.();
+            expect(closeSearch).toHaveBeenCalledTimes(1);
+
+            const resEq = stepMobileBackNavigation(INITIAL_MOBILE_NAVIGATION_STATE, {
+                isEqualizerOpen: true,
+                closeEqualizer,
+            });
+            expect(resEq.handled).toBe(true);
+            resEq.sideEffect?.();
+            expect(closeEqualizer).toHaveBeenCalledTimes(1);
+
+            const resLogin = stepMobileBackNavigation(INITIAL_MOBILE_NAVIGATION_STATE, {
+                isLoginWindowOpen: true,
+                closeLoginWindow: closeLogin,
+            });
+            expect(resLogin.handled).toBe(true);
+            resLogin.sideEffect?.();
+            expect(closeLogin).toHaveBeenCalledTimes(1);
 
             const res2 = stepMobileBackNavigation(INITIAL_MOBILE_NAVIGATION_STATE, {
                 isLyricMatchOpen: true,
@@ -158,59 +573,42 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
             expect(closeSettings).toHaveBeenCalledTimes(1);
         });
 
-        it('steps down from sub-drawer -> full-screen lyrics/visualizer -> cover -> mini-player -> collection detail -> root Songs tab -> native minimize', async () => {
+        it('steps down from equalizer sub-drawer -> full-screen lyrics/visualizer -> cover -> mini-player -> Online tab -> root Songs tab -> native minimize', async () => {
             let state: MobileNavigationState = {
-                activeTab: 'albums',
+                activeTab: 'online',
                 albumsSubTab: 'albums',
                 foldersSubTab: 'folders',
-                collectionDetail: {
-                    kind: 'album',
-                    id: 'album-1',
-                    title: 'تملي معاك',
-                    songs: [],
-                },
+                collectionDetail: null,
                 playerSheet: 'expanded',
                 playerDisplayMode: 'lyrics',
-                subDrawer: 'lyrics-tools',
+                subDrawer: 'equalizer',
             };
 
-            // Step 1: Close lyrics-tools subDrawer
             const step1 = stepMobileBackNavigation(state);
             expect(step1.handled).toBe(true);
             expect(step1.nextState.subDrawer).toBe('none');
             expect(step1.nextState.playerDisplayMode).toBe('lyrics');
             state = step1.nextState;
 
-            // Step 2: Return from full-screen synchronized lyrics to cover view
             const step2 = stepMobileBackNavigation(state);
             expect(step2.handled).toBe(true);
             expect(step2.nextState.playerDisplayMode).toBe('cover');
             expect(step2.nextState.playerSheet).toBe('expanded');
             state = step2.nextState;
 
-            // Step 3: Collapse expanded Now Playing sheet to persistent mini-player
             const step3 = stepMobileBackNavigation(state);
             expect(step3.handled).toBe(true);
             expect(step3.nextState.playerSheet).toBe('collapsed');
-            expect(step3.nextState.collectionDetail?.id).toBe('album-1');
+            expect(step3.nextState.activeTab).toBe('online');
             state = step3.nextState;
 
-            // Step 4: Exit Album collection detail back to Albums grid
             const step4 = stepMobileBackNavigation(state);
             expect(step4.handled).toBe(true);
-            expect(step4.nextState.collectionDetail).toBeNull();
-            expect(step4.nextState.activeTab).toBe('albums');
+            expect(step4.nextState.activeTab).toBe('songs');
             state = step4.nextState;
 
-            // Step 5: Return from Albums tab to primary Songs (Library) tab
             const step5 = stepMobileBackNavigation(state);
-            expect(step5.handled).toBe(true);
-            expect(step5.nextState.activeTab).toBe('songs');
-            state = step5.nextState;
-
-            // Step 6: At root Songs tab, returns handled=false so native bridge minimizes app
-            const step6 = stepMobileBackNavigation(state);
-            expect(step6.handled).toBe(false);
+            expect(step5.handled).toBe(false);
 
             const minimizeSpy = vi.fn().mockReturnValue(Promise.resolve());
             (globalThis as { __FOLIA_ANDROID_BRIDGE__?: unknown }).__FOLIA_ANDROID_BRIDGE__ = {
@@ -218,6 +616,82 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
             };
             expect(await minimizeAndroidApp()).toBe(true);
             expect(minimizeSpy).toHaveBeenCalledTimes(1);
+        });
+    });
+
+    describe('Restored Online Services Runtime Configuration, Diagnostics & Offline-to-Online Transitions', () => {
+        it('stores and normalizes runtime API gateway URLs for NetEase, QQ Music, and KuGou without fabricating endpoints', () => {
+            const storage = new Map<string, string>();
+            const mockLocalStorage = {
+                getItem: (key: string) => storage.get(key) ?? null,
+                setItem: (key: string, val: string) => storage.set(key, val),
+                removeItem: (key: string) => storage.delete(key),
+            };
+            (globalThis as { localStorage?: unknown }).localStorage = mockLocalStorage;
+            (globalThis as { window?: unknown }).window = {
+                localStorage: mockLocalStorage,
+                dispatchEvent: () => true,
+            };
+            Object.defineProperty(globalThis, 'navigator', {
+                configurable: true,
+                value: { onLine: true },
+            });
+
+            expect(resolveProviderWebApiBase('netease')).toBe('');
+            const unconfiguredDiag = getOnlineProviderDiagnostic('netease');
+            expect(unconfiguredDiag.availability).toBe('needs_api_base');
+
+            setStoredRuntimeApiBase('netease', 'https://netease.example.com/api///');
+            expect(getStoredRuntimeApiBase('netease')).toBe('https://netease.example.com/api');
+            expect(resolveProviderWebApiBase('netease')).toBe('https://netease.example.com/api');
+            expect(getOnlineProviderDiagnostic('netease').availability).toBe('ready');
+
+            expect(getOnlineProviderDiagnostic('amll-db').availability).toBe('ready');
+            expect(getOnlineProviderDiagnostic('bodian').availability).toBe('needs_desktop_bridge');
+            expect(getOnlineProviderDiagnostic('ytm').availability).toBe('needs_desktop_bridge');
+            expect(getOnlineProviderDiagnostic('spotify').availability).toBe('needs_desktop_bridge');
+        });
+
+        it('tracks offline-to-online transitions and notifies subscribers immediately', () => {
+            let onlineState = false;
+            const windowEvents = new Map<string, Set<() => void>>();
+
+            Object.defineProperty(globalThis, 'navigator', {
+                configurable: true,
+                value: {
+                    get onLine() {
+                        return onlineState;
+                    },
+                },
+            });
+            (globalThis as { window?: unknown }).window = {
+                addEventListener: (evt: string, cb: () => void) => {
+                    if (!windowEvents.has(evt)) windowEvents.set(evt, new Set());
+                    windowEvents.get(evt)!.add(cb);
+                },
+                removeEventListener: (evt: string, cb: () => void) => {
+                    windowEvents.get(evt)?.delete(cb);
+                },
+            };
+
+            expect(getIsDeviceOnline()).toBe(false);
+
+            const statusChanges: boolean[] = [];
+            const unsubscribe = subscribeDeviceOnlineStatus(isOnline => {
+                statusChanges.push(isOnline);
+            });
+
+            onlineState = true;
+            windowEvents.get('online')?.forEach(cb => cb());
+            expect(getIsDeviceOnline()).toBe(true);
+            expect(statusChanges).toContain(true);
+
+            onlineState = false;
+            windowEvents.get('offline')?.forEach(cb => cb());
+            expect(getIsDeviceOnline()).toBe(false);
+            expect(statusChanges[statusChanges.length - 1]).toBe(false);
+
+            unsubscribe();
         });
     });
 
@@ -280,7 +754,6 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
 
             expect(collections.albums).toHaveLength(3);
             expect(collections.artists).toHaveLength(3);
-            // Folders includes virtual "All Songs" + "Arabic Classics" + "Synthwave"
             expect(collections.folders).toHaveLength(3);
             expect(collections.playlists).toHaveLength(1);
             expect(collections.playlists[0]?.songs.map(s => s.id)).toEqual(['s1', 's2']);
@@ -332,8 +805,8 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
                 startTime: 10,
                 endTime: 14,
                 syllables: [
-                    { text: 'حبي', startTime: 10, endTime: 11 }, // 3 chars out of 5 -> 0% to 60%
-                    { text: 'بي', startTime: 11, endTime: 14 },  // 2 chars out of 5 -> 60% to 100%
+                    { text: 'حبي', startTime: 10, endTime: 11 },
+                    { text: 'بي', startTime: 11, endTime: 14 },
                 ],
             };
 
@@ -362,12 +835,10 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
                 },
             ];
 
-            // At t = 10.5s, primaryLineIndex has advanced to 1, but line 0 is still singing until 12s
             const activeAtOverlap = computeActiveLyricLineIndices(lines, 1, 10.5);
             expect(activeAtOverlap.has(0)).toBe(true);
             expect(activeAtOverlap.has(1)).toBe(true);
 
-            // At t = 13.0s, line 0 has finished and only line 1 remains active
             const activeAfterOverlap = computeActiveLyricLineIndices(lines, 1, 13.0);
             expect(activeAfterOverlap.has(0)).toBe(false);
             expect(activeAfterOverlap.has(1)).toBe(true);
@@ -416,10 +887,8 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
         });
 
         it('caps Pixi renderer resolution on mobile so tall phone viewports stay within texture budget', () => {
-            // Desktop passes through unchanged
             expect(resolveMobilePixiResolution(1920, 1080, 1.5, false)).toBe(1.5);
 
-            // Mobile caps at MOBILE_MAX_PIXI_RESOLUTION (1.25) and MOBILE_MAX_TEXTURE_AXIS_PX / maxAxis
             const mobileRes = resolveMobilePixiResolution(412, 915, 1.5, true);
             expect(mobileRes).toBeLessThanOrEqual(MOBILE_MAX_PIXI_RESOLUTION);
             expect(mobileRes * 915).toBeLessThanOrEqual(MOBILE_MAX_TEXTURE_AXIS_PX + 1);
@@ -446,7 +915,6 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
                 isMobileVisualizerVisible({ playerSheet: 'expanded', playerDisplayMode: 'stage' }),
             ).toBe(true);
 
-            // Screen locked on Android (isActivityVisible = false) -> suspend immediately
             expect(
                 shouldSuspendVisualizerForVisibility({
                     isActivityVisible: false,
@@ -456,7 +924,6 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
                 }),
             ).toBe(true);
 
-            // Mobile browsing library (isMobileVisualizerVisible = false) -> suspend GPU loop
             expect(
                 shouldSuspendVisualizerForVisibility({
                     isActivityVisible: true,
@@ -466,7 +933,6 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
                 }),
             ).toBe(true);
 
-            // Mobile viewing full-screen Lyrics or Stage in foreground -> active
             expect(
                 shouldSuspendVisualizerForVisibility({
                     isActivityVisible: true,
@@ -475,6 +941,239 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
                     isMobileVisualizerVisible: true,
                 }),
             ).toBe(false);
+        });
+    });
+
+    describe('Dynamic Album Artwork on the Normal Player Screen', () => {
+        it('persists Dynamic Album Artwork On/Off and Low/Normal motion intensity in localStorage and store', () => {
+            const storage = new Map<string, string>();
+            const mockLocalStorage = {
+                getItem: (key: string) => storage.get(key) ?? null,
+                setItem: (key: string, val: string) => storage.set(key, val),
+                removeItem: (key: string) => storage.delete(key),
+            };
+            (globalThis as { localStorage?: unknown }).localStorage = mockLocalStorage;
+            (globalThis as { window?: unknown }).window = { localStorage: mockLocalStorage };
+
+            expect(readStoredDynamicAlbumArtworkSettings()).toEqual(DEFAULT_DYNAMIC_ALBUM_ARTWORK_SETTINGS);
+
+            writeStoredDynamicAlbumArtworkSettings({
+                enabled: false,
+                intensity: 'low',
+            });
+            expect(storage.has(DYNAMIC_ALBUM_ARTWORK_STORAGE_KEY)).toBe(true);
+            expect(readStoredDynamicAlbumArtworkSettings()).toEqual({
+                enabled: false,
+                intensity: 'low',
+            });
+
+            useDynamicAlbumArtworkStore.getState().setDynamicAlbumArtworkEnabled(true);
+            useDynamicAlbumArtworkStore.getState().setDynamicAlbumArtworkIntensity('normal');
+            expect(useDynamicAlbumArtworkStore.getState().enabled).toBe(true);
+            expect(useDynamicAlbumArtworkStore.getState().intensity).toBe('normal');
+            expect(readStoredDynamicAlbumArtworkSettings()).toEqual({
+                enabled: true,
+                intensity: 'normal',
+            });
+        });
+
+        it('computes composition-preserving motion profile and suspends animation when paused, hidden, or disabled', () => {
+            const playingNormal = resolveDynamicAlbumArtworkMotion({
+                enabled: true,
+                intensity: 'normal',
+                isPlaying: true,
+                isCoverScreenActive: true,
+                isPageVisible: true,
+                prefersReducedMotion: false,
+            });
+            expect(playingNormal.shouldAnimate).toBe(true);
+            expect(playingNormal.effectiveIntensity).toBe('normal');
+            expect(playingNormal.zoomScaleMax).toBeLessThanOrEqual(1.045);
+            expect(playingNormal.cameraDriftPx).toBeLessThanOrEqual(9);
+            expect(playingNormal.lowerEdgeFeatherPercent).toBe(26);
+
+            // Reduced motion preference steps intensity down to low
+            const reducedMotion = resolveDynamicAlbumArtworkMotion({
+                enabled: true,
+                intensity: 'normal',
+                isPlaying: true,
+                isCoverScreenActive: true,
+                isPageVisible: true,
+                prefersReducedMotion: true,
+            });
+            expect(reducedMotion.shouldAnimate).toBe(true);
+            expect(reducedMotion.effectiveIntensity).toBe('low');
+            expect(reducedMotion.cameraDriftPx).toBeLessThan(playingNormal.cameraDriftPx);
+
+            // Paused playback settles motion
+            const pausedMotion = resolveDynamicAlbumArtworkMotion({
+                enabled: true,
+                intensity: 'normal',
+                isPlaying: false,
+                isCoverScreenActive: true,
+                isPageVisible: true,
+                prefersReducedMotion: false,
+            });
+            expect(pausedMotion.shouldAnimate).toBe(false);
+            expect(pausedMotion.zoomScaleMax).toBe(1);
+            expect(pausedMotion.cameraDriftPx).toBe(0);
+
+            // Inactive cover screen or hidden document suspends animation
+            const hiddenScreenMotion = resolveDynamicAlbumArtworkMotion({
+                enabled: true,
+                intensity: 'normal',
+                isPlaying: true,
+                isCoverScreenActive: false,
+                isPageVisible: true,
+                prefersReducedMotion: false,
+            });
+            expect(hiddenScreenMotion.shouldAnimate).toBe(false);
+
+            // Disabled setting renders static cover with zero motion
+            const disabledMotion = resolveDynamicAlbumArtworkMotion({
+                enabled: false,
+                intensity: 'normal',
+                isPlaying: true,
+                isCoverScreenActive: true,
+                isPageVisible: true,
+                prefersReducedMotion: false,
+            });
+            expect(disabledMotion.shouldAnimate).toBe(false);
+            expect(disabledMotion.effectiveIntensity).toBe('off');
+            expect(disabledMotion.lowerEdgeFeatherPercent).toBe(0);
+        });
+
+        it('renders DynamicAlbumCoverStage on the normal Cover screen, updates with selected song, supports fallback artwork, and can be disabled to static cover', () => {
+            const storage = new Map<string, string>();
+            const mockLocalStorage = {
+                getItem: (key: string) => storage.get(key) ?? null,
+                setItem: (key: string, val: string) => storage.set(key, val),
+                removeItem: (key: string) => storage.delete(key),
+            };
+            (globalThis as { localStorage?: unknown }).localStorage = mockLocalStorage;
+            (globalThis as { window?: unknown }).window = { localStorage: mockLocalStorage };
+
+            useDynamicAlbumArtworkStore.getState().updateDynamicAlbumArtworkSettings({
+                enabled: true,
+                intensity: 'normal',
+            });
+
+            const makeCoverSheetProps = (overrides: Record<string, unknown> = {}) => ({
+                isOpen: true,
+                displayMode: 'cover' as const,
+                subDrawer: 'none' as const,
+                onChangeDisplayMode: vi.fn(),
+                onChangeSubDrawer: vi.fn(),
+                onClose: vi.fn(),
+                currentSong: {
+                    id: -10,
+                    name: 'Nour El Ain',
+                    artists: [{ id: 1, name: 'Amr Diab' }],
+                    album: { id: 1, name: 'Nour El Ain' },
+                },
+                artistName: 'Amr Diab',
+                albumName: 'Nour El Ain',
+                coverUrl: 'https://example.com/nour-el-ain.jpg',
+                playerState: PlayerState.PLAYING,
+                currentTime: motionValue(42.0),
+                lyricCurrentTime: motionValue(42.0),
+                duration: 210,
+                lyrics: null,
+                currentLineIndex: -1,
+                isLyricsLoading: false,
+                isLiked: false,
+                loopMode: 'all' as const,
+                theme: {
+                    primaryColor: '#ffffff',
+                    secondaryColor: '#a1a1aa',
+                    backgroundColor: '#09090b',
+                    accentColor: '#38bdf8',
+                },
+                visualizerMode: 'monet' as const,
+                onVisualizerModeChange: vi.fn(),
+                lyricsFontScale: 1,
+                onLyricsFontScaleChange: vi.fn(),
+                showSubtitleTranslation: true,
+                onToggleSubtitleTranslation: vi.fn(),
+                lyricTimelineOffsetMs: 0,
+                onLyricTimelineOffsetChange: vi.fn(),
+                activeLocalLyricsSource: 'local' as const,
+                onChangeLyricsSource: vi.fn(),
+                onImportLocalLyricsFile: vi.fn(),
+                onOpenLyricMatch: vi.fn(),
+                onSeek: vi.fn(),
+                onLyricLineSeek: vi.fn(),
+                onTogglePlay: vi.fn(),
+                onPrevTrack: vi.fn(),
+                onNextTrack: vi.fn(),
+                onToggleLoop: vi.fn(),
+                onToggleLike: vi.fn(),
+                onShuffleQueue: vi.fn(),
+                playQueue: [],
+                onPlayQueueSong: vi.fn(),
+                onRemoveQueueSong: vi.fn(),
+                onSaveQueueAsPlaylist: vi.fn().mockResolvedValue(undefined),
+                onOpenVisualizerSettings: vi.fn(),
+                ...overrides,
+            });
+
+            // 1. Dynamic Album Artwork ON with coverUrl
+            const dynamicNodes = expandVNodeTree(
+                (MobileNowPlayingSheet as unknown as (p: any) => unknown)(makeCoverSheetProps()),
+            );
+            const stage = dynamicNodes.find(n => n.props?.['data-testid'] === 'dynamic-album-cover-stage');
+            expect(stage).toBeTruthy();
+            expect(stage?.props?.['data-dynamic-enabled']).toBe('true');
+            expect(stage?.props?.['data-dynamic-animating']).toBe('true');
+            expect(dynamicNodes.find(n => n.props?.['data-testid'] === 'dynamic-cover-focal-layer')?.props?.src).toBe(
+                'https://example.com/nour-el-ain.jpg',
+            );
+            expect(dynamicNodes.find(n => n.props?.['data-testid'] === 'dynamic-cover-lower-edge-blend')).toBeTruthy();
+            expect(dynamicNodes.find(n => n.props?.['data-testid'] === 'mobile-cohesive-controls-dock')).toBeTruthy();
+
+            // 2. Switch song -> focal artwork layer updates to the new song's cover
+            const nextSongNodes = expandVNodeTree(
+                (MobileNowPlayingSheet as unknown as (p: any) => unknown)(
+                    makeCoverSheetProps({
+                        currentSong: {
+                            id: -11,
+                            name: 'Tamally Maak',
+                            artists: [{ id: 1, name: 'Amr Diab' }],
+                            album: { id: 2, name: 'Tamally Maak' },
+                        },
+                        coverUrl: 'https://example.com/tamally-maak.jpg',
+                    }),
+                ),
+            );
+            expect(nextSongNodes.find(n => n.props?.['data-testid'] === 'dynamic-cover-focal-layer')?.props?.src).toBe(
+                'https://example.com/tamally-maak.jpg',
+            );
+
+            // 3. Disable Dynamic Album Artwork -> renders unmodified static cover image
+            const togglePill = dynamicNodes.find(n => n.props?.['data-testid'] === 'dynamic-cover-toggle-pill');
+            expect(togglePill).toBeTruthy();
+            togglePill?.props?.onClick?.({ stopPropagation: vi.fn() });
+            expect(useDynamicAlbumArtworkStore.getState().enabled).toBe(false);
+
+            const staticNodes = expandVNodeTree(
+                (MobileNowPlayingSheet as unknown as (p: any) => unknown)(makeCoverSheetProps()),
+            );
+            const staticStage = staticNodes.find(n => n.props?.['data-testid'] === 'dynamic-album-cover-stage');
+            expect(staticStage?.props?.['data-dynamic-enabled']).toBe('false');
+            expect(staticStage?.props?.['data-dynamic-animating']).toBe('false');
+            expect(staticNodes.find(n => n.props?.['data-testid'] === 'static-album-cover-image')?.props?.src).toBe(
+                'https://example.com/nour-el-ain.jpg',
+            );
+            expect(staticNodes.find(n => n.props?.['data-testid'] === 'dynamic-cover-parallax-layer')).toBeUndefined();
+
+            // 4. Fallback artwork when track has no coverUrl
+            useDynamicAlbumArtworkStore.getState().setDynamicAlbumArtworkEnabled(true);
+            const fallbackNodes = expandVNodeTree(
+                (MobileNowPlayingSheet as unknown as (p: any) => unknown)(
+                    makeCoverSheetProps({ coverUrl: null }),
+                ),
+            );
+            expect(fallbackNodes.find(n => n.props?.['data-testid'] === 'dynamic-cover-fallback')).toBeTruthy();
         });
     });
 });

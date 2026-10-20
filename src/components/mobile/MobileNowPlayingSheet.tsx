@@ -9,6 +9,7 @@ import {
     Grid,
     Heart,
     ListMusic,
+    Maximize2,
     Music2,
     Pause,
     Play,
@@ -18,6 +19,7 @@ import {
     Shuffle,
     SkipBack,
     SkipForward,
+    Sliders,
     SlidersHorizontal,
     Sparkles,
     Trash2,
@@ -37,13 +39,19 @@ import type { Word as WordType } from '../../types';
 import { getCachedLocalCoverObjectUrl, resolveLocalCoverObjectUrl } from '../../services/localCoverRuntime';
 import { isLocalCoverAssetUrl } from '../../services/localCoverAssetUrl';
 import { VISUALIZER_REGISTRY, getVisualizerModeLabel } from '../visualizer/registry';
+import { useAudioSettingsStore } from '../../stores/useAudioSettingsStore';
+import { useDynamicAlbumArtworkStore } from '../../stores/useDynamicAlbumArtworkStore';
+import { useSystemBarSettingsStore } from '../../stores/useSystemBarSettingsStore';
+import { useShallow } from 'zustand/react/shallow';
+import DynamicAlbumCoverStage from './DynamicAlbumCoverStage';
+import MobileEqualizerSheet from './MobileEqualizerSheet';
 import type { MobilePlayerDisplayMode, MobileSubDrawer } from './mobileNavigationModel';
 
 // src/components/mobile/MobileNowPlayingSheet.tsx
 // Full-screen Now Playing sheet for the Phase 4 mobile-first Android player.
 // Supports 3 seamless modes:
-//   - 'cover': Album-art hero + artwork-tinted OLED lighting + 2-line live synchronized lyric preview
-//   - 'lyrics': Synchronized scrolling lyrics reader with full Arabic RTL shaping + word/syllable glow sweep
+//   - 'cover': Apple Music-inspired Dynamic Album Cover stage + artwork-tinted OLED lighting + cohesive progress bar & 2-line live lyric preview
+//   - 'lyrics': Synchronized scrolling lyrics reader with live background visualizer, full Arabic RTL shaping + word/syllable glow sweep
 //   - 'stage': Full-screen Folia visualizer canvas with tap-to-hide chrome & quick style switcher
 
 export const computeTimedWordProgressPercent = (word: WordType, timeSec: number): number => {
@@ -133,6 +141,7 @@ interface MobileNowPlayingSheetProps {
     onChangeLyricsSource: (source: 'local' | 'embedded' | 'online') => void;
     onImportLocalLyricsFile: (content: string, fileName: string) => void;
     onOpenLyricMatch: () => void;
+    onAutoMatchLyrics?: () => void;
     onTogglePureMusic?: () => void;
     onSeek: (timeSec: number) => void;
     onLyricLineSeek: (timeSec: number) => void;
@@ -156,6 +165,118 @@ const formatSeconds = (sec: number): string => {
     const s = Math.floor(sec % 60);
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 };
+
+interface VisualizerStyleSelectorStripProps {
+    visualizerMode: VisualizerMode;
+    accentColor: string;
+    onSelectMode: (mode: VisualizerMode) => void;
+    onOpenAllStyles: () => void;
+    compact?: boolean;
+}
+
+/**
+ * Touch-safe, horizontally scrollable visualizer style selector bar that fits both portrait and
+ * narrow/short landscape layouts (`min-w-0 max-w-full overflow-x-auto touch-pan-x`).
+ * Stops touch/pointer propagation so swiping or tapping the strip never seeks lyrics or hides chrome.
+ */
+const VisualizerStyleSelectorStrip: React.FC<VisualizerStyleSelectorStripProps> = React.memo(({
+    visualizerMode,
+    accentColor,
+    onSelectMode,
+    onOpenAllStyles,
+    compact = false,
+}) => {
+    const { t } = useTranslation();
+    const stripRef = useRef<HTMLDivElement>(null);
+
+    const scrollActiveIntoView = useCallback(() => {
+        const container = stripRef.current;
+        if (!container) return;
+        const activeBtn = container.querySelector<HTMLElement>(`[data-visualizer-mode="${visualizerMode}"]`);
+        if (activeBtn && typeof activeBtn.scrollIntoView === 'function') {
+            try {
+                activeBtn.scrollIntoView({ block: 'nearest', inline: 'center', behavior: 'smooth' });
+            } catch {
+                // Ignore in non-DOM test environments
+            }
+        }
+    }, [visualizerMode]);
+
+    useEffect(() => {
+        scrollActiveIntoView();
+    }, [scrollActiveIntoView]);
+
+    useEffect(() => {
+        if (typeof window === 'undefined') return undefined;
+        const handleResize = () => scrollActiveIntoView();
+        window.addEventListener('resize', handleResize);
+        window.addEventListener('orientationchange', handleResize);
+        return () => {
+            window.removeEventListener('resize', handleResize);
+            window.removeEventListener('orientationchange', handleResize);
+        };
+    }, [scrollActiveIntoView]);
+
+    return (
+        <div
+            data-testid="mobile-visualizer-selector-bar"
+            role="radiogroup"
+            aria-label="Visualizer style selector"
+            onClick={(e) => e.stopPropagation()}
+            onPointerDown={(e) => e.stopPropagation()}
+            onTouchStart={(e) => e.stopPropagation()}
+            onTouchMove={(e) => e.stopPropagation()}
+            className={`flex min-w-0 w-full max-w-full items-center gap-1.5 rounded-2xl border border-white/12 bg-black/65 p-1.5 backdrop-blur-xl ${
+                compact ? 'mt-1.5' : 'mt-2'
+            }`}
+        >
+            <button
+                type="button"
+                data-testid="mobile-visualizer-open-grid-btn"
+                onClick={(e) => {
+                    e.stopPropagation();
+                    onOpenAllStyles();
+                }}
+                className="flex min-h-[34px] shrink-0 items-center gap-1 rounded-xl border border-white/15 bg-white/[0.08] px-2.5 py-1.5 text-[11px] font-semibold text-zinc-100 active:scale-95 transition-transform"
+                aria-label="Open all visualizer styles and lyrics tools"
+                title="All Visualizer Styles"
+            >
+                <Sparkles size={12} style={{ color: accentColor }} />
+                <span className="hidden xs:inline">Styles</span>
+            </button>
+
+            <div
+                ref={stripRef}
+                className="flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto overscroll-x-contain touch-pan-x hide-scrollbar pr-1"
+            >
+                {VISUALIZER_REGISTRY.map(entry => {
+                    const active = visualizerMode === entry.mode;
+                    const label = getVisualizerModeLabel(entry.mode, t);
+                    return (
+                        <button
+                            key={entry.mode}
+                            type="button"
+                            role="radio"
+                            aria-checked={active}
+                            data-visualizer-mode={entry.mode}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                onSelectMode(entry.mode);
+                            }}
+                            className={`min-h-[34px] shrink-0 rounded-xl px-3 py-1.5 text-xs font-medium transition-all active:scale-95 ${
+                                active
+                                    ? 'bg-white text-zinc-950 font-semibold shadow-sm'
+                                    : 'text-zinc-200 hover:bg-white/10'
+                            }`}
+                        >
+                            {label}
+                        </button>
+                    );
+                })}
+            </div>
+        </div>
+    );
+});
 
 interface MobileTimedWordProps {
     word: WordType;
@@ -262,6 +383,7 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
     onChangeLyricsSource,
     onImportLocalLyricsFile,
     onOpenLyricMatch,
+    onAutoMatchLyrics,
     onTogglePureMusic,
     onSeek,
     onLyricLineSeek,
@@ -279,6 +401,32 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
     onOpenLattice,
 }) => {
     const { t } = useTranslation();
+    const isEqualizerEnabled = useAudioSettingsStore(state => state.audioEqualizerSettings.enabled);
+    const openDesktopEqualizer = useAudioSettingsStore(state => state.openAudioEqualizer);
+    const {
+        dynamicArtworkEnabled,
+        dynamicArtworkIntensity,
+        setDynamicArtworkEnabled,
+        setDynamicArtworkIntensity,
+    } = useDynamicAlbumArtworkStore(
+        useShallow(state => ({
+            dynamicArtworkEnabled: state.enabled,
+            dynamicArtworkIntensity: state.intensity,
+            setDynamicArtworkEnabled: state.setDynamicAlbumArtworkEnabled,
+            setDynamicArtworkIntensity: state.setDynamicAlbumArtworkIntensity,
+        })),
+    );
+    const {
+        effectiveSystemBars,
+        fullScreenLyricsMode,
+        setFullScreenLyricsMode,
+    } = useSystemBarSettingsStore(
+        useShallow(state => ({
+            effectiveSystemBars: state.effectiveState,
+            fullScreenLyricsMode: state.fullScreenLyricsMode,
+            setFullScreenLyricsMode: state.setFullScreenLyricsMode,
+        })),
+    );
     const progressFillRef = useRef<HTMLDivElement>(null);
     const progressThumbRef = useRef<HTMLDivElement>(null);
     const currentTimeTextRef = useRef<HTMLSpanElement>(null);
@@ -430,6 +578,17 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
     const activeLine = currentLineIndex >= 0 && currentLineIndex < lyricLines.length ? lyricLines[currentLineIndex] : null;
     const nextLine = currentLineIndex + 1 >= 0 && currentLineIndex + 1 < lyricLines.length ? lyricLines[currentLineIndex + 1] : null;
     const effectiveCover = !coverLoadError ? resolvedCoverUrl : null;
+    const activeVisualizerLabel = getVisualizerModeLabel(visualizerMode, t);
+
+    // Safe-area padding adapts cleanly whether status/navigation bars are visible or hidden in edge-to-edge mode
+    const topSafePadding = effectiveSystemBars.hideStatusBar
+        ? 'max(var(--folia-native-cutout-top, env(safe-area-inset-top, 0px)), 8px)'
+        : 'max(var(--folia-native-inset-top, env(safe-area-inset-top, 0px)), 10px)';
+    const bottomSafePadding = effectiveSystemBars.hideNavigationBar
+        ? '8px'
+        : 'max(var(--folia-native-inset-bottom, env(safe-area-inset-bottom, 0px)), 10px)';
+    const leftSafePadding = 'max(var(--folia-native-inset-left, env(safe-area-inset-left, 0px)), 0px)';
+    const rightSafePadding = 'max(var(--folia-native-inset-right, env(safe-area-inset-right, 0px)), 0px)';
 
     const handleLyricFileChosen = async (event: React.ChangeEvent<HTMLInputElement>) => {
         const file = event.target.files?.[0];
@@ -446,13 +605,15 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
     return (
         <div
             data-testid="mobile-now-playing-sheet"
+            data-display-mode={displayMode}
+            data-immersive-lyrics={effectiveSystemBars.isImmersiveLyricsActive ? 'true' : 'false'}
             className="fixed inset-0 z-[200] flex flex-col overflow-hidden select-none text-zinc-100"
             style={{
-                backgroundColor: displayMode === 'stage' ? 'transparent' : '#060609',
-                paddingTop: 'max(env(safe-area-inset-top, 0px), 12px)',
-                paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 12px)',
-                paddingLeft: 'env(safe-area-inset-left, 0px)',
-                paddingRight: 'env(safe-area-inset-right, 0px)',
+                backgroundColor: displayMode === 'cover' ? '#060609' : 'transparent',
+                paddingTop: topSafePadding,
+                paddingBottom: bottomSafePadding,
+                paddingLeft: leftSafePadding,
+                paddingRight: rightSafePadding,
             }}
         >
             {/* Hidden file input for local lyric import (.lrc, .ttml, .vtt, .qrc, .yrc, .krc) */}
@@ -464,42 +625,46 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                 onChange={handleLyricFileChosen}
             />
 
-            {/* OLED Artwork-Derived Ambient Background Layer (semi-translucent in Lyrics mode, hidden in Stage mode so Visualizer shines at 100%) */}
+            {/* OLED Artwork-Derived Ambient Background Layer:
+                - Rich multi-stop atmospheric blend in 'cover' mode that transitions seamlessly into the lower controls
+                - Semi-translucent scrim in 'lyrics' mode so the live VisualizerRenderer shines through while keeping lyrics readable
+                - Hidden in 'stage' mode so the full-screen Visualizer shines at 100% */}
             {displayMode !== 'stage' && (
                 <div
                     aria-hidden="true"
                     className="pointer-events-none absolute inset-0 -z-10 transition-opacity duration-500"
                     style={{
-                        opacity: displayMode === 'lyrics' ? 0.78 : 1,
+                        opacity: displayMode === 'lyrics' ? 0.62 : 1,
                         background: `
-                            radial-gradient(circle at 50% 22%, color-mix(in srgb, ${accentColor} 28%, transparent) 0%, transparent 62%),
-                            radial-gradient(circle at 18% 78%, color-mix(in srgb, ${primaryColor} 18%, transparent) 0%, transparent 55%),
-                            linear-gradient(180deg, color-mix(in srgb, ${bgTint} 65%, #060609) 0%, #050507 100%)
+                            radial-gradient(circle at 50% 24%, color-mix(in srgb, ${accentColor} 34%, transparent) 0%, transparent 64%),
+                            radial-gradient(circle at 22% 72%, color-mix(in srgb, ${primaryColor} 22%, transparent) 0%, transparent 58%),
+                            radial-gradient(circle at 78% 84%, color-mix(in srgb, ${accentColor} 18%, transparent) 0%, transparent 56%),
+                            linear-gradient(180deg, color-mix(in srgb, ${bgTint} 72%, #060609) 0%, color-mix(in srgb, ${bgTint} 42%, #050508) 64%, #050507 100%)
                         `,
                     }}
                 />
             )}
 
-            {/* Top Header Bar: Collapse + Mode Switcher (Cover / Lyrics / Stage) + Lyric Tools + Queue */}
+            {/* Top Header Bar: Collapse + Mode Switcher (Cover / Lyrics / Visualizer) + Active Visualizer Quick Button + EQ + Lyric Tools + Queue */}
             <div
-                className={`relative z-20 flex items-center justify-between px-4 py-2 transition-opacity duration-300 ${
+                className={`relative z-20 flex shrink-0 items-center justify-between gap-2 px-3 sm:px-4 py-1.5 transition-opacity duration-300 ${
                     displayMode === 'stage' && stageChromeHidden ? 'opacity-0 pointer-events-none' : 'opacity-100'
                 }`}
             >
                 <button
                     type="button"
                     onClick={onClose}
-                    className="flex h-11 w-11 items-center justify-center rounded-full bg-white/[0.07] text-zinc-200 backdrop-blur-md active:scale-95 transition-transform"
+                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/[0.07] text-zinc-200 backdrop-blur-md active:scale-95 transition-transform"
                     aria-label="Collapse player"
                 >
-                    <ChevronDown size={22} />
+                    <ChevronDown size={21} />
                 </button>
 
                 {/* Mode Switcher Pill */}
                 <div
                     role="tablist"
                     aria-label="Player display mode"
-                    className="flex items-center rounded-full border border-white/10 bg-black/50 p-1 backdrop-blur-xl"
+                    className="flex items-center rounded-full border border-white/10 bg-black/55 p-1 backdrop-blur-xl"
                 >
                     {([
                         { id: 'cover' as const, label: t('panel.cover', 'Cover') },
@@ -517,7 +682,7 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                     setStageChromeHidden(false);
                                     onChangeDisplayMode(tab.id);
                                 }}
-                                className={`h-8 rounded-full px-3.5 text-xs font-semibold transition-all ${
+                                className={`h-8 rounded-full px-3 text-xs font-semibold transition-all ${
                                     active
                                         ? 'bg-white text-zinc-950 shadow-sm'
                                         : 'text-zinc-300 hover:text-white'
@@ -530,82 +695,108 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                 </div>
 
                 <div className="flex items-center gap-1.5">
+                    {/* Quick Visualizer Style Pill (always accessible in both portrait & landscape) */}
+                    <button
+                        type="button"
+                        data-testid="mobile-header-visualizer-pill"
+                        onClick={() => onChangeSubDrawer(subDrawer === 'lyrics-tools' ? 'none' : 'lyrics-tools')}
+                        className="hidden sm:flex landscape:flex h-9 items-center gap-1.5 rounded-full border border-white/12 bg-white/[0.08] px-3 text-xs font-medium text-zinc-100 backdrop-blur-md active:scale-95 transition-all"
+                        aria-label={`Current visualizer: ${activeVisualizerLabel}. Tap to change visualizer`}
+                        title="Change Visualizer Style"
+                    >
+                        <Sparkles size={13} style={{ color: accentColor }} />
+                        <span className="max-w-[84px] truncate">{activeVisualizerLabel}</span>
+                    </button>
+
                     {onOpenLattice && (
                         <button
                             type="button"
                             onClick={onOpenLattice}
-                            className="flex h-11 w-11 items-center justify-center rounded-full bg-white/[0.07] text-zinc-200 backdrop-blur-md active:scale-95 transition-all"
+                            className="flex h-10 w-10 items-center justify-center rounded-full bg-white/[0.07] text-zinc-200 backdrop-blur-md active:scale-95 transition-all"
                             aria-label="Open Lattice queue collage"
                             title="Lattice Queue Collage"
                         >
-                            <Grid size={18} />
+                            <Grid size={17} />
                         </button>
                     )}
                     <button
                         type="button"
+                        data-testid="mobile-now-playing-eq-btn"
+                        onClick={() => onChangeSubDrawer(subDrawer === 'equalizer' ? 'none' : 'equalizer')}
+                        className={`relative flex h-10 w-10 items-center justify-center rounded-full backdrop-blur-md active:scale-95 transition-all ${
+                            subDrawer === 'equalizer'
+                                ? 'bg-white text-zinc-950'
+                                : 'bg-white/[0.07] text-zinc-200'
+                        }`}
+                        aria-label="Audio Equalizer"
+                        title="Audio Equalizer & Effects"
+                    >
+                        <Sliders size={17} />
+                        {isEqualizerEnabled && (
+                            <span
+                                className="absolute right-2 top-2 h-2 w-2 rounded-full"
+                                style={{ backgroundColor: accentColor }}
+                            />
+                        )}
+                    </button>
+                    <button
+                        type="button"
+                        data-testid="mobile-now-playing-lyrics-tools-btn"
                         onClick={() => onChangeSubDrawer(subDrawer === 'lyrics-tools' ? 'none' : 'lyrics-tools')}
-                        className={`flex h-11 w-11 items-center justify-center rounded-full backdrop-blur-md active:scale-95 transition-all ${
+                        className={`flex h-10 w-10 items-center justify-center rounded-full backdrop-blur-md active:scale-95 transition-all ${
                             subDrawer === 'lyrics-tools'
                                 ? 'bg-white text-zinc-950'
                                 : 'bg-white/[0.07] text-zinc-200'
                         }`}
                         aria-label="Lyrics and visualizer settings"
                     >
-                        <SlidersHorizontal size={19} />
+                        <SlidersHorizontal size={18} />
                     </button>
                     <button
                         type="button"
                         onClick={() => onChangeSubDrawer(subDrawer === 'queue' ? 'none' : 'queue')}
-                        className={`flex h-11 w-11 items-center justify-center rounded-full backdrop-blur-md active:scale-95 transition-all ${
+                        className={`flex h-10 w-10 items-center justify-center rounded-full backdrop-blur-md active:scale-95 transition-all ${
                             subDrawer === 'queue'
                                 ? 'bg-white text-zinc-950'
                                 : 'bg-white/[0.07] text-zinc-200'
                         }`}
                         aria-label="Play queue"
                     >
-                        <ListMusic size={19} />
+                        <ListMusic size={18} />
                     </button>
                 </div>
             </div>
 
-            {/* Main Content Area (Responsive: vertical in portrait, side-by-side in landscape) */}
-            <div className="relative z-10 flex min-h-0 flex-1 flex-col landscape:flex-row landscape:items-center landscape:gap-6 px-5 pt-2 pb-1">
+            {/* Main Content Area:
+                Uses `min-w-0 min-h-0 flex-1 flex-col landscape:flex-row landscape:items-stretch` so that
+                in landscape mode the left pane (cover / lyrics / visualizer) and the horizontal visualizer
+                selector strip are properly bounded to their flex column width and never overflow behind the controls dock. */}
+            <div className="relative z-10 flex min-h-0 min-w-0 flex-1 flex-col landscape:flex-row landscape:items-stretch landscape:gap-4 px-4 landscape:px-3 pt-1 pb-1">
                 {displayMode === 'cover' && (
-                    <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-4 landscape:flex-row landscape:justify-around">
-                        {/* Prominent Album Artwork Card */}
-                        <button
-                            type="button"
-                            onClick={() => onChangeDisplayMode('lyrics')}
-                            className="group relative aspect-square w-full max-w-[min(76vw,340px)] landscape:max-w-[min(42vh,220px)] shrink-0 overflow-hidden rounded-3xl border border-white/15 bg-zinc-900 shadow-[0_24px_64px_rgba(0,0,0,0.75)] transition-transform duration-500 focus:outline-none"
-                            style={{
-                                transform: isPlaying ? 'scale(1)' : 'scale(0.94)',
-                            }}
-                            aria-label="Switch to synchronized lyrics view"
-                        >
-                            {effectiveCover ? (
-                                <img
-                                    src={effectiveCover}
-                                    alt={currentSong.name}
-                                    className="h-full w-full object-cover"
-                                    onError={() => setCoverLoadError(true)}
-                                />
-                            ) : (
-                                <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-gradient-to-br from-zinc-800/80 to-zinc-950 text-zinc-500">
-                                    <Disc3 size={72} strokeWidth={1.25} />
-                                    <span className="text-xs font-medium tracking-wider uppercase text-zinc-400">Folia Audio</span>
-                                </div>
-                            )}
-                            <div className="absolute bottom-3 right-3 flex items-center gap-1.5 rounded-full bg-black/65 px-3 py-1.5 text-[11px] font-medium text-white/90 backdrop-blur-md">
-                                <Sparkles size={12} style={{ color: accentColor }} />
-                                <span>Tap for Lyrics</span>
-                            </div>
-                        </button>
+                    <div className="flex min-h-0 min-w-0 flex-1 flex-col items-center justify-center gap-3 landscape:flex-row landscape:justify-around">
+                        {/* Apple Music-Inspired Dynamic Album Cover Stage (or Unmodified Static Cover when toggled Off) */}
+                        <DynamicAlbumCoverStage
+                            songId={currentSong.id}
+                            songTitle={currentSong.name}
+                            coverUrl={effectiveCover}
+                            isPlaying={isPlaying}
+                            isActive={isOpen && displayMode === 'cover'}
+                            enabled={dynamicArtworkEnabled}
+                            intensity={dynamicArtworkIntensity}
+                            theme={theme}
+                            onOpenLyrics={() => onChangeDisplayMode('lyrics')}
+                            onToggleEnabled={() => setDynamicArtworkEnabled(!dynamicArtworkEnabled)}
+                            onImageError={() => setCoverLoadError(true)}
+                        />
 
-                        {/* Live 2-Line Synchronized Lyric Preview Pill */}
+                        {/* Live 2-Line Synchronized Lyric Preview Pill blended with Artwork Gradient & Frosted Blur */}
                         <button
                             type="button"
                             onClick={() => onChangeDisplayMode('lyrics')}
-                            className="w-full max-w-md rounded-2xl border border-white/[0.08] bg-white/[0.04] px-4 py-2.5 text-center backdrop-blur-md active:scale-[0.99] transition-transform"
+                            className="w-full max-w-md rounded-2xl border border-white/[0.10] px-4 py-2.5 text-center backdrop-blur-xl active:scale-[0.99] transition-transform"
+                            style={{
+                                background: `linear-gradient(135deg, color-mix(in srgb, ${accentColor} 14%, rgba(255,255,255,0.05)) 0%, color-mix(in srgb, ${bgTint} 78%, rgba(10,10,16,0.72)) 100%)`,
+                            }}
                         >
                             {activeLine ? (
                                 <div className="space-y-1">
@@ -619,7 +810,7 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                     {(activeLine.translation || nextLine?.fullText) && (
                                         <p
                                             dir={detectTextDirection(activeLine.translation || nextLine?.fullText || '')}
-                                            className="truncate text-xs text-zinc-400"
+                                            className="truncate text-xs text-zinc-300/90"
                                             style={{ unicodeBidi: 'isolate' }}
                                         >
                                             {showSubtitleTranslation && activeLine.translation
@@ -629,7 +820,7 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                     )}
                                 </div>
                             ) : (
-                                <p className="text-xs text-zinc-400">
+                                <p className="text-xs text-zinc-300/90">
                                     {isLyricsLoading
                                         ? 'Loading synchronized lyrics...'
                                         : hasRenderableLines
@@ -642,16 +833,16 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                 )}
 
                 {displayMode === 'lyrics' && (
-                    <div className="flex min-h-0 flex-1 flex-col w-full">
+                    <div className="flex min-h-0 min-w-0 flex-1 flex-col w-full">
                         {isLyricsLoading ? (
                             <div className="flex flex-1 flex-col items-center justify-center gap-3 text-center">
                                 <div className="h-10 w-10 animate-spin rounded-full border-2 border-white/15 border-t-white" />
                                 <p className="text-sm text-zinc-300">Loading synchronized lyrics...</p>
                             </div>
                         ) : currentSong.isPureMusic && !hasRenderableLines ? (
-                            <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center">
-                                <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-white/[0.06] text-zinc-300">
-                                    <Music2 size={32} />
+                            <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
+                                <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-white/[0.06] text-zinc-300">
+                                    <Music2 size={28} />
                                 </div>
                                 <div>
                                     <h3 className="text-base font-semibold text-zinc-100">
@@ -684,10 +875,10 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                         ) : !hasRenderableLines ? (
                             <div
                                 data-testid="mobile-missing-lyrics-state"
-                                className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center"
+                                className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center"
                             >
-                                <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.05] text-zinc-300">
-                                    <FileText size={30} />
+                                <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.05] text-zinc-300">
+                                    <FileText size={26} />
                                 </div>
                                 <div className="max-w-xs space-y-1">
                                     <h3 className="text-base font-semibold text-zinc-100">
@@ -701,7 +892,7 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                     <button
                                         type="button"
                                         onClick={() => lyricFileInputRef.current?.click()}
-                                        className="flex h-11 items-center gap-2 rounded-full bg-white px-5 text-xs font-semibold text-zinc-950 shadow-md active:scale-95 transition-transform"
+                                        className="flex h-10 items-center gap-2 rounded-full bg-white px-4 text-xs font-semibold text-zinc-950 shadow-md active:scale-95 transition-transform"
                                     >
                                         <FileUp size={15} />
                                         Import Lyric File
@@ -709,7 +900,7 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                     <button
                                         type="button"
                                         onClick={onOpenLyricMatch}
-                                        className="flex h-11 items-center gap-2 rounded-full border border-white/15 bg-white/[0.08] px-5 text-xs font-semibold text-white active:scale-95 transition-transform"
+                                        className="flex h-10 items-center gap-2 rounded-full border border-white/15 bg-white/[0.08] px-4 text-xs font-semibold text-white active:scale-95 transition-transform"
                                     >
                                         <Search size={15} />
                                         Match Lyrics
@@ -726,7 +917,7 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                 onWheel={() => {
                                     userScrollingLyricsUntilRef.current = Date.now() + 3500;
                                 }}
-                                className="hide-scrollbar flex-1 overflow-y-auto overscroll-contain py-10 px-1 space-y-5"
+                                className="hide-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain py-6 landscape:py-3 px-1 space-y-4 landscape:space-y-3"
                             >
                                 {lyricLines.map((line, index) => {
                                     const isActive = activeLineIndices.has(index);
@@ -762,7 +953,6 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                             }`}
                                             style={{ unicodeBidi: 'isolate' }}
                                         >
-                                            {/* Main Timed Lyric Words with Arabic RTL shaping & directional highlight sweep */}
                                             <div
                                                 className={`flex flex-wrap items-baseline gap-x-1.5 gap-y-1 font-bold leading-snug ${
                                                     isDuetSecondAgent ? 'justify-end' : 'justify-start'
@@ -797,7 +987,6 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                                 )}
                                             </div>
 
-                                            {/* Overlapping Background / Harmony Vocals */}
                                             {bgVocals.length > 0 && (
                                                 <div className="mt-1 space-y-0.5">
                                                     {bgVocals.map((bg, bgIdx) => {
@@ -833,7 +1022,6 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                                 </div>
                                             )}
 
-                                            {/* Subtitle Translation / Romanization */}
                                             {showSubtitleTranslation && line.translation && (
                                                 <p
                                                     dir={detectTextDirection(line.translation)}
@@ -857,62 +1045,69 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                 })}
                             </div>
                         )}
+
+                        {/* Inline Visualizer Style Selector Strip in Lyrics Mode (works in both portrait and landscape) */}
+                        <VisualizerStyleSelectorStrip
+                            visualizerMode={visualizerMode}
+                            accentColor={accentColor}
+                            onSelectMode={onVisualizerModeChange}
+                            onOpenAllStyles={() => onChangeSubDrawer(subDrawer === 'lyrics-tools' ? 'none' : 'lyrics-tools')}
+                            compact
+                        />
                     </div>
                 )}
 
                 {displayMode === 'stage' && (
-                    /* Full-Screen Folia Visualizer Canvas Tap Zone + Quick Visualizer Picker Pill */
+                    /* Full-Screen Folia Visualizer Canvas Tap Zone + Always-Reachable Visualizer Picker Bar */
                     <div
                         onClick={() => setStageChromeHidden(prev => !prev)}
-                        className="flex flex-1 flex-col justify-end w-full cursor-pointer"
+                        className="flex min-h-0 min-w-0 flex-1 flex-col justify-end w-full cursor-pointer"
                     >
                         {!stageChromeHidden && (
-                            <div
-                                onClick={(e) => e.stopPropagation()}
-                                className="mb-2 flex items-center gap-1.5 overflow-x-auto hide-scrollbar rounded-2xl border border-white/10 bg-black/55 p-1.5 backdrop-blur-xl"
-                            >
-                                {VISUALIZER_REGISTRY.map(entry => {
-                                    const active = visualizerMode === entry.mode;
-                                    const label = getVisualizerModeLabel(entry.mode, t);
-                                    return (
-                                        <button
-                                            key={entry.mode}
-                                            type="button"
-                                            onClick={() => onVisualizerModeChange(entry.mode)}
-                                            className={`shrink-0 rounded-xl px-3 py-1.5 text-xs font-medium transition-all ${
-                                                active
-                                                    ? 'bg-white text-zinc-950 shadow-sm'
-                                                    : 'text-zinc-300 hover:bg-white/10'
-                                            }`}
-                                        >
-                                            {label}
-                                        </button>
-                                    );
-                                })}
+                            <div className="mb-1 min-w-0 w-full">
+                                <VisualizerStyleSelectorStrip
+                                    visualizerMode={visualizerMode}
+                                    accentColor={accentColor}
+                                    onSelectMode={onVisualizerModeChange}
+                                    onOpenAllStyles={() => onChangeSubDrawer(subDrawer === 'lyrics-tools' ? 'none' : 'lyrics-tools')}
+                                />
                             </div>
                         )}
                     </div>
                 )}
 
-                {/* Bottom Player Controls Dock (Track Metadata + Touch-Safe Scrubber + Transport Buttons) */}
+                {/* Bottom / Right-Side Cohesive Player Controls Dock:
+                    Uses restrained artwork-derived gradient + frosted blur in Cover mode so the progress bar and
+                    transport controls blend organically with the Dynamic Album Cover while keeping text & controls crisp. */}
                 <div
-                    className={`w-full shrink-0 landscape:w-[44%] space-y-3 pt-2 pb-1 transition-opacity duration-300 ${
+                    data-testid="mobile-cohesive-controls-dock"
+                    className={`w-full shrink-0 landscape:w-[42%] landscape:max-w-[360px] min-w-0 flex flex-col justify-center space-y-2.5 landscape:space-y-1.5 rounded-3xl px-3.5 py-2.5 transition-opacity duration-300 ${
                         displayMode === 'stage' && stageChromeHidden ? 'opacity-0 pointer-events-none' : 'opacity-100'
                     }`}
+                    style={
+                        displayMode === 'cover'
+                            ? {
+                                  background: `linear-gradient(180deg, color-mix(in srgb, ${accentColor} 11%, rgba(255,255,255,0.03)) 0%, color-mix(in srgb, ${bgTint} 74%, rgba(8,8,12,0.78)) 100%)`,
+                                  boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08)',
+                                  backdropFilter: 'blur(20px)',
+                                  WebkitBackdropFilter: 'blur(20px)',
+                              }
+                            : undefined
+                    }
                 >
                     {/* Track Title, Artist/Album, and Like Button */}
-                    <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center justify-between gap-2.5">
                         <div className="min-w-0 flex-1">
                             <h2
                                 dir={titleDir}
-                                className="truncate text-lg font-bold tracking-tight text-white"
+                                className="truncate text-base landscape:text-sm font-bold tracking-tight text-white"
                                 style={{ unicodeBidi: 'plaintext' }}
                             >
                                 {currentSong.name}
                             </h2>
                             <p
                                 dir={artistDir}
-                                className="truncate text-xs font-medium text-zinc-400 mt-0.5"
+                                className="truncate text-xs font-medium text-zinc-300/90 mt-0.5"
                                 style={{ unicodeBidi: 'plaintext' }}
                             >
                                 {artistName}{albumName ? ` · ${albumName}` : ''}
@@ -922,25 +1117,32 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                         <button
                             type="button"
                             onClick={onToggleLike}
-                            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-white/[0.06] text-zinc-200 active:scale-90 transition-transform"
+                            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/[0.07] text-zinc-200 active:scale-90 transition-transform"
                             aria-label={isLiked ? 'Remove from favorites' : 'Add to favorites'}
                         >
                             <Heart
-                                size={20}
-                                className={isLiked ? 'text-rose-500 fill-rose-500' : 'text-zinc-300'}
+                                size={19}
+                                className={isLiked ? 'text-rose-500 fill-rose-500' : 'text-zinc-200'}
                             />
                         </button>
                     </div>
 
-                    {/* Touch-Safe Progress Scrubber (`touch-action: none` prevents accidental page scroll) */}
-                    <div className="space-y-1.5 touch-none">
-                        <div className="relative flex h-8 items-center touch-none">
-                            <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-white/15">
+                    {/* Touch-Safe Progress Scrubber with Artwork-Derived Gradient & Readable Time Labels */}
+                    <div className="space-y-1 touch-none">
+                        <div className="relative flex h-7 landscape:h-6 items-center touch-none">
+                            <div
+                                className="relative h-1.5 w-full overflow-hidden rounded-full"
+                                style={{
+                                    backgroundColor: 'rgba(255, 255, 255, 0.16)',
+                                    boxShadow: 'inset 0 1px 2px rgba(0, 0, 0, 0.35)',
+                                }}
+                            >
                                 <div
                                     ref={progressFillRef}
                                     className="h-full w-full origin-left rounded-full"
                                     style={{
-                                        backgroundColor: accentColor,
+                                        backgroundImage: `linear-gradient(90deg, ${accentColor} 0%, ${primaryColor} 100%)`,
+                                        boxShadow: `0 0 12px color-mix(in srgb, ${accentColor} 45%, transparent)`,
                                         transform: 'scaleX(0)',
                                     }}
                                 />
@@ -951,8 +1153,11 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                 style={{ transform: 'translateX(0%)' }}
                             >
                                 <div
-                                    className="h-3.5 w-3.5 -translate-x-1/2 rounded-full shadow-md"
-                                    style={{ backgroundColor: '#ffffff' }}
+                                    className="h-3.5 w-3.5 -translate-x-1/2 rounded-full"
+                                    style={{
+                                        backgroundColor: '#ffffff',
+                                        boxShadow: `0 0 10px color-mix(in srgb, ${accentColor} 65%, rgba(0,0,0,0.5))`,
+                                    }}
                                 />
                             </div>
                             <input
@@ -985,80 +1190,82 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                 className="absolute inset-0 h-full w-full cursor-pointer opacity-0 touch-none"
                             />
                         </div>
-                        <div className="flex items-center justify-between text-[11px] font-mono text-zinc-400">
+                        <div className="flex items-center justify-between text-[11px] font-mono font-medium text-zinc-200/90">
                             <span ref={currentTimeTextRef}>00:00</span>
                             <span>{formatSeconds(duration)}</span>
                         </div>
                     </div>
 
                     {/* Primary Thumb-Friendly Transport Row */}
-                    <div className="flex items-center justify-between px-2">
+                    <div className="flex items-center justify-between px-1">
                         <button
                             type="button"
                             onClick={onToggleLoop}
-                            className="flex h-11 w-11 items-center justify-center rounded-full text-zinc-300 hover:bg-white/10 active:scale-95 transition-all"
+                            className="flex h-10 w-10 items-center justify-center rounded-full text-zinc-200 hover:bg-white/10 active:scale-95 transition-all"
                             aria-label={`Loop mode: ${loopMode}`}
                         >
                             {loopMode === 'one' ? (
-                                <Repeat1 size={20} style={{ color: accentColor }} />
+                                <Repeat1 size={19} style={{ color: accentColor }} />
                             ) : (
-                                <Repeat size={20} className={loopMode === 'all' ? 'text-white' : 'opacity-50'} />
+                                <Repeat size={19} className={loopMode === 'all' ? 'text-white' : 'opacity-55'} />
                             )}
                         </button>
 
                         <button
                             type="button"
                             onClick={onPrevTrack}
-                            className="flex h-12 w-12 items-center justify-center rounded-full text-white hover:bg-white/10 active:scale-90 transition-all"
+                            className="flex h-11 w-11 landscape:h-10 landscape:w-10 items-center justify-center rounded-full text-white hover:bg-white/10 active:scale-90 transition-all"
                             aria-label="Previous track"
                         >
-                            <SkipBack size={26} fill="currentColor" />
+                            <SkipBack size={24} fill="currentColor" />
                         </button>
 
                         <button
                             type="button"
                             onClick={onTogglePlay}
-                            className="flex h-16 w-16 items-center justify-center rounded-full text-zinc-950 shadow-[0_8px_28px_rgba(255,255,255,0.22)] active:scale-95 transition-transform"
+                            className="flex h-14 w-14 landscape:h-12 landscape:w-12 items-center justify-center rounded-full text-zinc-950 shadow-[0_8px_28px_rgba(255,255,255,0.22)] active:scale-95 transition-transform"
                             style={{ backgroundColor: accentColor }}
                             aria-label={isPlaying ? 'Pause' : 'Play'}
                         >
                             {isPlaying ? (
-                                <Pause size={28} fill="currentColor" />
+                                <Pause size={25} fill="currentColor" />
                             ) : (
-                                <Play size={28} fill="currentColor" className="ml-1" />
+                                <Play size={25} fill="currentColor" className="ml-0.5" />
                             )}
                         </button>
 
                         <button
                             type="button"
                             onClick={onNextTrack}
-                            className="flex h-12 w-12 items-center justify-center rounded-full text-white hover:bg-white/10 active:scale-90 transition-all"
+                            className="flex h-11 w-11 landscape:h-10 landscape:w-10 items-center justify-center rounded-full text-white hover:bg-white/10 active:scale-90 transition-all"
                             aria-label="Next track"
                         >
-                            <SkipForward size={26} fill="currentColor" />
+                            <SkipForward size={24} fill="currentColor" />
                         </button>
 
                         <button
                             type="button"
                             onClick={onShuffleQueue}
-                            className="flex h-11 w-11 items-center justify-center rounded-full text-zinc-300 hover:bg-white/10 active:scale-95 transition-all"
+                            className="flex h-10 w-10 items-center justify-center rounded-full text-zinc-200 hover:bg-white/10 active:scale-95 transition-all"
                             aria-label="Shuffle queue"
                         >
-                            <Shuffle size={19} />
+                            <Shuffle size={18} />
                         </button>
                     </div>
                 </div>
             </div>
 
-            {/* Sub-Drawer 1: Lyric File Selection, Offset Correction & Display Settings */}
+            {/* Sub-Drawer 1: Visualizer Style Selection, Dynamic Album Artwork, Lyric File Selection, Offset Correction & Immersive Toggle */}
             {subDrawer === 'lyrics-tools' && (
                 <div
                     data-testid="mobile-lyrics-tools-drawer"
-                    className="absolute inset-x-0 bottom-0 z-30 max-h-[78dvh] overflow-y-auto rounded-t-3xl border-t border-white/15 bg-[#0c0c12]/98 p-5 shadow-2xl backdrop-blur-2xl space-y-5"
-                    style={{ paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 20px)' }}
+                    onClick={(e) => e.stopPropagation()}
+                    onTouchStart={(e) => e.stopPropagation()}
+                    className="absolute inset-x-0 bottom-0 z-30 max-h-[86dvh] landscape:max-h-[90dvh] overflow-y-auto overscroll-contain rounded-t-3xl border-t border-white/15 bg-[#0c0c12]/98 p-4 sm:p-5 shadow-2xl backdrop-blur-2xl space-y-4"
+                    style={{ paddingBottom: 'max(var(--folia-native-inset-bottom, env(safe-area-inset-bottom, 0px)), 16px)' }}
                 >
                     <div className="flex items-center justify-between">
-                        <h3 className="text-base font-bold text-white">Lyrics & Visualizer Tools</h3>
+                        <h3 className="text-sm sm:text-base font-bold text-white">Visualizer & Lyrics Tools</h3>
                         <button
                             type="button"
                             onClick={() => onChangeSubDrawer('none')}
@@ -1069,91 +1276,11 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                         </button>
                     </div>
 
-                    {/* Lyric File & Online Match Actions */}
-                    <div className="space-y-2">
-                        <div className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
-                            Lyric Source & File
-                        </div>
-                        <div className="grid grid-cols-2 gap-2.5">
-                            <button
-                                type="button"
-                                onClick={() => lyricFileInputRef.current?.click()}
-                                className="flex h-11 items-center justify-center gap-2 rounded-xl bg-white text-xs font-semibold text-zinc-950"
-                            >
-                                <FileUp size={15} />
-                                Import .LRC / .TTML
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => {
-                                    onChangeSubDrawer('none');
-                                    onOpenLyricMatch();
-                                }}
-                                className="flex h-11 items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/[0.06] text-xs font-semibold text-white"
-                            >
-                                <Search size={15} />
-                                Match Online Lyrics
-                            </button>
-                        </div>
-
-                        {/* Source selector pills */}
-                        <div className="flex items-center gap-2 pt-1">
-                            {(['local', 'embedded', 'online'] as const).map(src => (
-                                <button
-                                    key={src}
-                                    type="button"
-                                    onClick={() => onChangeLyricsSource(src)}
-                                    className={`flex-1 rounded-lg py-2 text-xs font-medium capitalize border transition-colors ${
-                                        activeLocalLyricsSource === src
-                                            ? 'border-white bg-white/15 text-white'
-                                            : 'border-white/10 bg-white/[0.03] text-zinc-400'
-                                    }`}
-                                >
-                                    {src}
-                                </button>
-                            ))}
-                        </div>
-                    </div>
-
-                    {/* Lyric Timeline Offset Correction */}
-                    <div className="space-y-2">
-                        <div className="flex items-center justify-between text-xs">
-                            <span className="font-semibold uppercase tracking-wider text-zinc-400">
-                                Timeline Offset
-                            </span>
-                            <span className="font-mono font-semibold text-zinc-200">
-                                {lyricTimelineOffsetMs > 0 ? `+${lyricTimelineOffsetMs}` : lyricTimelineOffsetMs} ms
-                            </span>
-                        </div>
-                        <div className="grid grid-cols-5 gap-1.5">
-                            {[
-                                { label: '-500ms', delta: -500 },
-                                { label: '-100ms', delta: -100 },
-                                { label: 'Reset', reset: true },
-                                { label: '+100ms', delta: 100 },
-                                { label: '+500ms', delta: 500 },
-                            ].map((btn, idx) => (
-                                <button
-                                    key={idx}
-                                    type="button"
-                                    onClick={() =>
-                                        onLyricTimelineOffsetChange(
-                                            btn.reset ? 0 : lyricTimelineOffsetMs + (btn.delta ?? 0),
-                                        )
-                                    }
-                                    className="h-10 rounded-xl border border-white/10 bg-white/[0.05] text-xs font-medium text-zinc-200 active:bg-white/20"
-                                >
-                                    {btn.label}
-                                </button>
-                            ))}
-                        </div>
-                    </div>
-
-                    {/* Visualizer Style Selector */}
+                    {/* 1. Visualizer Style Selector (First section so it is immediately accessible in landscape) */}
                     <div className="space-y-2">
                         <div className="flex items-center justify-between">
                             <span className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
-                                Folia Visualizer Style
+                                Folia Visualizer Style ({activeVisualizerLabel})
                             </span>
                             <button
                                 type="button"
@@ -1167,18 +1294,23 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                 Style Parameters
                             </button>
                         </div>
-                        <div className="grid grid-cols-3 gap-2 max-h-40 overflow-y-auto pr-1">
+                        <div
+                            data-testid="mobile-drawer-visualizer-grid"
+                            className="grid grid-cols-3 sm:grid-cols-4 landscape:grid-cols-5 gap-2"
+                        >
                             {VISUALIZER_REGISTRY.map(entry => {
                                 const active = visualizerMode === entry.mode;
                                 return (
                                     <button
                                         key={entry.mode}
                                         type="button"
+                                        data-testid={`drawer-visualizer-option-${entry.mode}`}
+                                        aria-pressed={active}
                                         onClick={() => onVisualizerModeChange(entry.mode)}
-                                        className={`rounded-xl border px-2.5 py-2 text-xs font-medium truncate transition-all ${
+                                        className={`min-h-[38px] rounded-xl border px-2.5 py-2 text-xs font-medium truncate transition-all active:scale-95 ${
                                             active
-                                                ? 'border-white bg-white text-zinc-950 font-semibold'
-                                                : 'border-white/10 bg-white/[0.04] text-zinc-300'
+                                                ? 'border-white bg-white text-zinc-950 font-semibold shadow-sm'
+                                                : 'border-white/10 bg-white/[0.04] text-zinc-200 hover:bg-white/10'
                                         }`}
                                     >
                                         {getVisualizerModeLabel(entry.mode, t)}
@@ -1188,11 +1320,87 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                         </div>
                     </div>
 
-                    {/* Font Size & Translation Toggle */}
-                    <div className="flex items-center justify-between gap-4 pt-1">
+                    {/* 2. Dynamic Album Artwork & Full-Screen Lyrics Mode Switches */}
+                    <div className="grid grid-cols-1 landscape:grid-cols-2 gap-3 pt-1">
+                        <div
+                            data-testid="drawer-dynamic-artwork-card"
+                            className="flex items-center justify-between gap-2 rounded-2xl border border-white/10 bg-white/[0.04] px-3.5 py-2.5"
+                        >
+                            <div className="min-w-0 pr-1">
+                                <div className="flex items-center gap-1.5 text-xs font-semibold text-white">
+                                    <Disc3 size={13} style={{ color: accentColor }} />
+                                    <span>{t('options.dynamicAlbumArtwork', 'Dynamic Album Artwork')}</span>
+                                </div>
+                                <p className="text-[11px] text-zinc-400 truncate">
+                                    {dynamicArtworkEnabled ? `Animated (${dynamicArtworkIntensity})` : 'Original static cover'}
+                                </p>
+                            </div>
+                            <div className="flex shrink-0 items-center gap-1.5">
+                                {dynamicArtworkEnabled && (
+                                    <button
+                                        type="button"
+                                        data-testid="drawer-dynamic-artwork-intensity-btn"
+                                        onClick={() =>
+                                            setDynamicArtworkIntensity(
+                                                dynamicArtworkIntensity === 'normal' ? 'low' : 'normal',
+                                            )
+                                        }
+                                        className="h-8 rounded-xl border border-white/12 bg-white/[0.06] px-2.5 text-[11px] font-medium capitalize text-zinc-200"
+                                        title="Switch Dynamic Artwork motion intensity"
+                                    >
+                                        {dynamicArtworkIntensity}
+                                    </button>
+                                )}
+                                <button
+                                    type="button"
+                                    role="switch"
+                                    data-testid="drawer-switch-dynamic-artwork"
+                                    aria-checked={dynamicArtworkEnabled}
+                                    aria-label="Dynamic Album Artwork"
+                                    onClick={() => setDynamicArtworkEnabled(!dynamicArtworkEnabled)}
+                                    className={`h-8 shrink-0 rounded-full border px-3 text-xs font-semibold transition-all ${
+                                        dynamicArtworkEnabled
+                                            ? 'border-white bg-white text-zinc-950'
+                                            : 'border-white/15 bg-white/[0.06] text-zinc-300'
+                                    }`}
+                                >
+                                    {dynamicArtworkEnabled ? 'On' : 'Off'}
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="flex items-center justify-between rounded-2xl border border-white/10 bg-white/[0.04] px-3.5 py-2.5">
+                            <div className="min-w-0 pr-2">
+                                <div className="flex items-center gap-1.5 text-xs font-semibold text-white">
+                                    <Maximize2 size={13} style={{ color: accentColor }} />
+                                    <span>Full-screen lyrics mode</span>
+                                </div>
+                                <p className="text-[11px] text-zinc-400 truncate">
+                                    Hide status & navigation bars in lyrics/visualizer
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                role="switch"
+                                aria-checked={fullScreenLyricsMode}
+                                aria-label="Full-screen lyrics mode"
+                                onClick={() => setFullScreenLyricsMode(!fullScreenLyricsMode)}
+                                className={`h-8 shrink-0 rounded-full border px-3 text-xs font-semibold transition-all ${
+                                    fullScreenLyricsMode
+                                        ? 'border-white bg-white text-zinc-950'
+                                        : 'border-white/15 bg-white/[0.06] text-zinc-300'
+                                }`}
+                            >
+                                {fullScreenLyricsMode ? 'On' : 'Off'}
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* 3. Font Size & Translation Toggle */}
+                    <div className="flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/[0.04] px-3.5 py-2.5">
                         <div className="flex-1 space-y-1">
-                            <div className="flex justify-between text-xs text-zinc-400">
-                                <span>Lyrics Text Size</span>
+                            <div className="flex justify-between text-xs text-zinc-300">
+                                <span>Lyrics Size</span>
                                 <span>{Math.round(lyricsFontScale * 100)}%</span>
                             </div>
                             <input
@@ -1208,7 +1416,7 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                         <button
                             type="button"
                             onClick={() => onToggleSubtitleTranslation(!showSubtitleTranslation)}
-                            className={`h-10 rounded-xl border px-3.5 text-xs font-medium ${
+                            className={`h-9 shrink-0 rounded-xl border px-3 text-xs font-medium ${
                                 showSubtitleTranslation
                                     ? 'border-white bg-white/15 text-white'
                                     : 'border-white/10 bg-white/[0.04] text-zinc-400'
@@ -1217,6 +1425,108 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                             Translation: {showSubtitleTranslation ? 'On' : 'Off'}
                         </button>
                     </div>
+
+                    {/* 4. Lyric Source & File + Timeline Offset */}
+                    <div className="grid grid-cols-1 landscape:grid-cols-2 gap-4">
+                        <div className="space-y-2">
+                            <div className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                                Lyric Source & File
+                            </div>
+                            <div className="grid grid-cols-2 gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => lyricFileInputRef.current?.click()}
+                                    className="flex h-10 items-center justify-center gap-1.5 rounded-xl bg-white text-xs font-semibold text-zinc-950"
+                                >
+                                    <FileUp size={14} />
+                                    Import .LRC / .TTML
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        onChangeSubDrawer('none');
+                                        onOpenLyricMatch();
+                                    }}
+                                    className="flex h-10 items-center justify-center gap-1.5 rounded-xl border border-white/15 bg-white/[0.06] text-xs font-semibold text-white"
+                                >
+                                    <Search size={14} />
+                                    Match Online Lyrics
+                                </button>
+                            </div>
+                            <div className="grid grid-cols-2 gap-2">
+                                {onAutoMatchLyrics && (
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            onChangeSubDrawer('none');
+                                            onAutoMatchLyrics();
+                                        }}
+                                        className="flex h-9 items-center justify-center gap-1.5 rounded-xl border border-white/12 bg-white/[0.05] text-xs font-medium text-zinc-200"
+                                    >
+                                        <Sparkles size={13} style={{ color: accentColor }} />
+                                        Auto-Match Online
+                                    </button>
+                                )}
+                                <button
+                                    type="button"
+                                    onClick={() => onChangeSubDrawer('equalizer')}
+                                    className="flex h-9 items-center justify-center gap-1.5 rounded-xl border border-white/12 bg-white/[0.05] text-xs font-medium text-zinc-200"
+                                >
+                                    <Sliders size={13} style={{ color: accentColor }} />
+                                    Audio Equalizer {isEqualizerEnabled ? '(On)' : ''}
+                                </button>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                {(['local', 'embedded', 'online'] as const).map(src => (
+                                    <button
+                                        key={src}
+                                        type="button"
+                                        onClick={() => onChangeLyricsSource(src)}
+                                        className={`flex-1 rounded-lg py-1.5 text-xs font-medium capitalize border transition-colors ${
+                                            activeLocalLyricsSource === src
+                                                ? 'border-white bg-white/15 text-white'
+                                                : 'border-white/10 bg-white/[0.03] text-zinc-400'
+                                        }`}
+                                    >
+                                        {src}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+
+                        <div className="space-y-2">
+                            <div className="flex items-center justify-between text-xs">
+                                <span className="font-semibold uppercase tracking-wider text-zinc-400">
+                                    Timeline Offset
+                                </span>
+                                <span className="font-mono font-semibold text-zinc-200">
+                                    {lyricTimelineOffsetMs > 0 ? `+${lyricTimelineOffsetMs}` : lyricTimelineOffsetMs} ms
+                                </span>
+                            </div>
+                            <div className="grid grid-cols-5 gap-1.5">
+                                {[
+                                    { label: '-500ms', delta: -500 },
+                                    { label: '-100ms', delta: -100 },
+                                    { label: 'Reset', reset: true },
+                                    { label: '+100ms', delta: 100 },
+                                    { label: '+500ms', delta: 500 },
+                                ].map((btn, idx) => (
+                                    <button
+                                        key={idx}
+                                        type="button"
+                                        onClick={() =>
+                                            onLyricTimelineOffsetChange(
+                                                btn.reset ? 0 : lyricTimelineOffsetMs + (btn.delta ?? 0),
+                                            )
+                                        }
+                                        className="h-10 rounded-xl border border-white/10 bg-white/[0.05] text-xs font-medium text-zinc-200 active:bg-white/20"
+                                    >
+                                        {btn.label}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
                 </div>
             )}
 
@@ -1224,8 +1534,8 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
             {subDrawer === 'queue' && (
                 <div
                     data-testid="mobile-queue-drawer"
-                    className="absolute inset-x-0 bottom-0 z-30 flex max-h-[78dvh] flex-col rounded-t-3xl border-t border-white/15 bg-[#0c0c12]/98 p-5 shadow-2xl backdrop-blur-2xl"
-                    style={{ paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 20px)' }}
+                    className="absolute inset-x-0 bottom-0 z-30 flex max-h-[82dvh] landscape:max-h-[88dvh] flex-col rounded-t-3xl border-t border-white/15 bg-[#0c0c12]/98 p-4 sm:p-5 shadow-2xl backdrop-blur-2xl"
+                    style={{ paddingBottom: 'max(var(--folia-native-inset-bottom, env(safe-area-inset-bottom, 0px)), 16px)' }}
                 >
                     <div className="flex items-center justify-between pb-3 border-b border-white/10">
                         <div>
@@ -1331,6 +1641,20 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                             );
                         })}
                     </div>
+                </div>
+            )}
+
+            {/* Sub-Drawer 3: 10-Band Audio Equalizer & Effects */}
+            {subDrawer === 'equalizer' && (
+                <div className="absolute inset-x-0 bottom-0 z-30">
+                    <MobileEqualizerSheet
+                        accentColor={accentColor}
+                        onClose={() => onChangeSubDrawer('none')}
+                        onOpenFullDesktopEqualizer={() => {
+                            onChangeSubDrawer('none');
+                            openDesktopEqualizer();
+                        }}
+                    />
                 </div>
             )}
         </div>

@@ -471,6 +471,12 @@ describe('Phase 3: Arabic lyric rendering, shaping, bidi layout, and synchronize
             expect(singleRow.points[0]!.x).toBeGreaterThan(singleRow.points[1]!.x);
             expect(singleRow.points[1]!.x).toBeGreaterThan(singleRow.points[3]!.x);
             expect(singleRow.points[3]!.x).toBeGreaterThan(singleRow.points[7]!.x);
+
+            // And wordPoints keeps each cursive Arabic word centered as a single whole-word unit:
+            expect(singleRow.wordPoints).toBeDefined();
+            expect(singleRow.wordPoints![0]!.x).toBeCloseTo(singleRow.wordPoints![1]!.x, 5);
+            expect(singleRow.wordPoints![3]!.x).toBeCloseTo(singleRow.wordPoints![7]!.x, 5);
+            expect(singleRow.wordPoints![0]!.x).toBeGreaterThan(singleRow.wordPoints![3]!.x);
         });
 
         it('Sonnet: keeps cursive Arabic words intact as whole-word glyph units and preserves overlapping line endTime', () => {

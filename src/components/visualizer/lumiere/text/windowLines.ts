@@ -48,6 +48,12 @@ export interface GlyphView {
     halo: Sprite;
     star: Sprite;
     timing: GlyphTiming;
+    /** 连写词（如阿拉伯语）整词的点亮时间范围 [wordStart, wordEnd]；非连写字与 timing 相同。 */
+    wordTiming: GlyphTiming;
+    /** 连写词首字（持整词成形纹理，代表整词渲染）。 */
+    cursiveWordLead: boolean;
+    /** 连写词后续字素（不单独渲染字形精灵，仅驱动光斑、光晕与星芒按从右向左推进）。 */
+    cursiveWordContinuation: boolean;
     blank: boolean;
     /** 在行里的序号：字心位置查 LineView.flow（横竖 × 单行 / 折行）。竖排时的转角。 */
     index: number;
@@ -251,8 +257,10 @@ export const buildLineView = (context: LineBuildContext, lineIndex: number, meta
         const star = new pixi.Sprite(sprites.star);
         star.anchor.set(0.5);
         starLayer.addChild(star);
-        if (slice.blank) {
+        if (slice.blank || slice.cursiveWordContinuation) {
             glyph.visible = false;
+        }
+        if (slice.blank) {
             halo.visible = false;
             star.visible = false;
         }
@@ -260,11 +268,15 @@ export const buildLineView = (context: LineBuildContext, lineIndex: number, meta
         const angle = -Math.PI / 2 + (rng() - 0.5) * 2.2;
         const scatterAngle = rng() * Math.PI * 2;
         const scatterDistance = 0.6 + rng() * 1.4;
+        const baseTiming = timings[index] ?? { start: line.startTime, end: line.endTime };
         return {
             glyph,
             halo,
             star,
-            timing: timings[index] ?? { start: line.startTime, end: line.endTime },
+            timing: baseTiming,
+            wordTiming: baseTiming,
+            cursiveWordLead: Boolean(slice.cursiveWordLead),
+            cursiveWordContinuation: Boolean(slice.cursiveWordContinuation),
             blank: slice.blank,
             index,
             vRotation: (slice.upright || hasCursiveLine) ? 0 : Math.PI / 2,
@@ -285,13 +297,30 @@ export const buildLineView = (context: LineBuildContext, lineIndex: number, meta
         };
     });
 
-    // 连写文字（如阿拉伯语）同一词内的字形同步飞行、漂移与聚散，不把词内的连笔拆散成孤立字片。
+    // 连写文字（如阿拉伯语）整词由词首精灵（cursiveWordLead）持完整成形纹理渲染，
+    // 词内所有字素共享整词的飞行、漂移、聚散、呼吸相位与整词点亮/崩解时间区间（wordTiming），
+    // 确保阿拉伯语单词在飞行、点亮、长音持续与崩解全过程中始终自然连写，绝不分裂成孤立字片。
     for (const word of words) {
-        if (word.blank || word.end - word.start < 2 || !hasCursiveJoiningScript(word.text)) {
+        if (word.blank || !hasCursiveJoiningScript(word.text)) {
             continue;
         }
         const lead = glyphs[word.start];
         if (!lead) continue;
+        let wordStart = Number.POSITIVE_INFINITY;
+        let wordEnd = Number.NEGATIVE_INFINITY;
+        let wordKeyword: Rgb | null = null;
+        for (let index = word.start; index < word.end && index < glyphs.length; index += 1) {
+            const t = glyphs[index]!.timing;
+            wordStart = Math.min(wordStart, t.start);
+            wordEnd = Math.max(wordEnd, t.end);
+            if (!wordKeyword && glyphs[index]!.keyword) {
+                wordKeyword = glyphs[index]!.keyword;
+            }
+        }
+        const unifiedWordTiming: GlyphTiming = {
+            start: Number.isFinite(wordStart) ? wordStart : line.startTime,
+            end: Number.isFinite(wordEnd) ? Math.max(wordStart, wordEnd) : line.endTime,
+        };
         const syncedFlight: GlyphFlight = {
             ...lead.flight,
             spin: 0,
@@ -302,10 +331,19 @@ export const buildLineView = (context: LineBuildContext, lineIndex: number, meta
         };
         for (let index = word.start; index < word.end && index < glyphs.length; index += 1) {
             const target = glyphs[index]!;
+            target.cursiveWordLead = index === word.start;
+            target.cursiveWordContinuation = index > word.start;
+            target.wordTiming = unifiedWordTiming;
             target.flight = syncedFlight;
             target.drift = syncedDrift;
             target.scatter = lead.scatter;
             target.phase = lead.phase;
+            if (wordKeyword && !target.keyword) {
+                target.keyword = wordKeyword;
+            }
+            if (target.cursiveWordContinuation) {
+                target.glyph.visible = false;
+            }
         }
     }
 

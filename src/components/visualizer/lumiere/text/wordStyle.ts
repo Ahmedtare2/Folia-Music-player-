@@ -1,6 +1,7 @@
 // Copyright (c) 2026 chthollyphile
 import type { Line } from '../../../../types';
 import { createRng } from '../lumiereRandom';
+import { hasCursiveJoiningScript } from '../../../../utils/lyrics/arabicText';
 import { splitLyricGraphemes } from '../../../../utils/lyrics/graphemeTiming';
 import { segmentLyricWords } from '../../../../utils/lyrics/wordSegmentation';
 
@@ -25,7 +26,7 @@ export interface WordSpan {
 /** 字号倍率的上限：字形纹理按这个倍率画，放大的词只缩小不放大，不会糊。 */
 export const MAX_WORD_SCALE = 1.5 + LUMIERE_NEUTRAL_OFFSET;
 
-/** 把一行切成词：走 folia 唯一的分词入口（用户保存的精细分词优先，其次 icu-folia 的默认分词，否则 Intl.Segmenter，没有就逐字）。 */
+/** 把一行切成词：走 folia 唯一的分词入口；对于阿拉伯语等连写文字，紧邻无空白的连写片段合并为同一个词跨度，绝不把同一个阿拉伯词拆成两个字号/错落不同的片段。 */
 export const segmentWords = (line: Pick<Line, 'fullText' | 'wordSegments' | 'autoWordSegments'>): WordSpan[] => {
     const pieces = segmentLyricWords(line);
     const words: WordSpan[] = [];
@@ -33,7 +34,20 @@ export const segmentWords = (line: Pick<Line, 'fullText' | 'wordSegments' | 'aut
     for (const { segment, isWordLike } of pieces) {
         const length = splitLyricGraphemes(segment).length;
         if (length === 0) continue;
-        words.push({ text: segment, start: cursor, end: cursor + length, blank: !isWordLike });
+        const blank = !isWordLike;
+        const previous = words[words.length - 1];
+        if (
+            previous
+            && !previous.blank
+            && !blank
+            && hasCursiveJoiningScript(previous.text)
+            && hasCursiveJoiningScript(segment)
+        ) {
+            previous.text += segment;
+            previous.end += length;
+        } else {
+            words.push({ text: segment, start: cursor, end: cursor + length, blank });
+        }
         cursor += length;
     }
     return words;

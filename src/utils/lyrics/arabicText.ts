@@ -32,7 +32,8 @@ const ARABIC_DIACRITICS_REGEX = /[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06DC\
 
 const COMBINING_MARK_ONLY_REGEX = /^[\p{M}\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED\u08D3-\u08FF\uFE70-\uFE7F]+$/u;
 
-const NUMERIC_RUN_REGEX = /^[\s\p{N}.,:%+-]+$/u;
+const NUMERIC_RUN_REGEX = /^[\s\p{N}\p{P}.,:%+-]+$/u;
+const NEUTRAL_OR_DIGIT_CHAR_REGEX = /^[\p{P}\p{S}\p{N}\s]+$/u;
 const HAS_DIGIT_REGEX = /\p{N}/u;
 const WHITESPACE_ONLY_REGEX = /^\s+$/u;
 
@@ -140,6 +141,9 @@ export const detectTextDirection = (
     }
 
     for (const char of text) {
+        if (NEUTRAL_OR_DIGIT_CHAR_REGEX.test(char)) {
+            continue;
+        }
         if (RTL_STRONG_REGEX.test(char)) {
             return 'rtl';
         }
@@ -167,6 +171,9 @@ export const resolveTokenDirection = (
     }
 
     for (const char of tokenText) {
+        if (NEUTRAL_OR_DIGIT_CHAR_REGEX.test(char)) {
+            continue;
+        }
         if (RTL_STRONG_REGEX.test(char)) {
             return 'rtl';
         }
