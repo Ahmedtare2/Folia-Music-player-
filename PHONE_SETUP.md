@@ -63,7 +63,7 @@ base64 -w 0 folia-release-key.jks > folia-release-key.base64.txt
 
 1. Return to the root of your GitHub repository.
 2. Tap **Add file → Upload files** (enable **Desktop site** in Chrome's `⋮` menu if hidden on mobile).
-3. Select **`folia-android-source.zip`** (`20.45 MiB`, well under GitHub's `25 MiB` mobile browser upload limit).
+3. Select **`folia-android-source.zip`** (`19.79 MiB`, well under GitHub's `25 MiB` mobile browser upload limit).
 4. Wait for the upload progress bar to complete and tap **Commit changes** directly to `main`.
 
 ## Step 4: Run the Workflow and Download `Folia-Android-Release-APK`

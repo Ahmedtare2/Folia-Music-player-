@@ -710,7 +710,7 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
                 title: 'Nour El Ain',
                 folderName: 'Arabic Classics',
                 addedAt: 3000,
-                onlineMetadata: { source: 'netease', coverUrl: 'https://example.com/nour.jpg', artists: ['Amr Diab'], matchMode: 'auto', matchedAt: 1000 },
+                onlineMetadata: { source: 'netease', coverUrl: 'https://example.com/nour.jpg', artists: [{ name: 'Amr Diab' }], matchMode: 'auto', matchedAt: 1000 },
                 importedMetadata: { artistNames: ['Amr Diab'], albumName: 'Nour El Ain' },
             }),
             makeLocalSong({
@@ -763,7 +763,7 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
             expect(resolveLocalSongArtistText(songs[0]!)).toBe('عمرو دياب');
             expect(resolveLocalSongAlbumText(songs[0]!)).toBe('تملي معاك');
             (globalThis as { window?: unknown }).window = {
-                ...((globalThis as { window?: Record<string, unknown> }).window || {}),
+                ...((globalThis as unknown as { window?: Record<string, unknown> }).window || {}),
                 isSecureContext: true,
                 location: { protocol: 'https:', hostname: 'localhost' },
             };

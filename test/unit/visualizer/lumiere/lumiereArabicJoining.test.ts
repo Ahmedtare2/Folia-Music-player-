@@ -11,7 +11,6 @@ import { createLyricEcho } from '@/components/visualizer/lumiere/text/lyricEcho'
 import { createLyricWindow } from '@/components/visualizer/lumiere/text/lyricWindow';
 import { buildLineMetas, buildLineView } from '@/components/visualizer/lumiere/text/windowLines';
 import { segmentWords } from '@/components/visualizer/lumiere/text/wordStyle';
-import { DEFAULT_LUMIERE_TUNING } from '@/components/visualizer/lumiere/types';
 import { createRngAt } from '@/components/visualizer/lumiere/lumiereRandom';
 import { splitLyricGraphemes } from '@/utils/lyrics/graphemeTiming';
 import { parseEnhancedLRC } from '@/utils/lyrics/parserCore';

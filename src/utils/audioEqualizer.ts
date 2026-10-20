@@ -98,7 +98,7 @@ export const resetAudioEqualizerToFlat = (current: AudioEqualizerSettings): Audi
     const flatGains = [...AUDIO_SOUND_PRESETS.flat.gains];
     const neutralEffects = createNeutralAudioEffects();
     const isCustom = isAudioEqualizerCustomSlotId(current.preset);
-    const activeSlotIdx = isCustom ? getAudioEqualizerCustomSlotIndex(current.preset) : -1;
+    const activeSlotIdx = isCustom ? getAudioEqualizerCustomSlotIndex(current.preset as AudioEqualizerCustomSlotId) : -1;
     return resolveAudioEqualizerSettings({
         ...current,
         preset: isCustom ? current.preset : 'flat',

@@ -3058,7 +3058,7 @@ export default function App() {
                     onAddOnlineSongToQueue={addOnlineSongToQueue}
                     onPlayNavidromeSong={(song, queue) => { void onPlayNavidromeSong(song, queue); }}
                     onAddNavidromeSongsToQueue={addNavidromeSongsToQueue}
-                    onOpenFullSearchWorkspace={navigateToSearch}
+                    onOpenFullSearchWorkspace={() => navigateToSearch({ query: '', sourceTab: 'online' })}
                     onCloseSearch={closeSearchView}
                     isSearchOpen={isSearchOpen}
                     onAutoMatchLyrics={() => { void handleAutoMatchBestLyricForCurrentSong(); }}

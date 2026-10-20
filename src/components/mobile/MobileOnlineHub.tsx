@@ -63,8 +63,9 @@ import type { MobileOnlineSubTab } from './mobileNavigationModel';
 
 export interface MobileOnlineHubProps {
     accentColor: string;
-    currentSong: SongResult | null;
-    subTab: MobileOnlineSubTab;
+    currentSong?: SongResult | null;
+    subTab?: MobileOnlineSubTab;
+    activeSubTab?: MobileOnlineSubTab;
     onChangeSubTab: (subTab: MobileOnlineSubTab) => void;
     onPlayOnlineSong: (song: SongResult, queue?: SongResult[]) => void;
     onAddOnlineSongToQueue: (song: SongResult) => void;
@@ -89,8 +90,9 @@ const formatArtistText = (song: SongResult): string => (
 
 export const MobileOnlineHub: React.FC<MobileOnlineHubProps> = ({
     accentColor,
-    currentSong,
-    subTab,
+    currentSong = null,
+    subTab: subTabProp,
+    activeSubTab,
     onChangeSubTab,
     onPlayOnlineSong,
     onAddOnlineSongToQueue,
@@ -99,6 +101,7 @@ export const MobileOnlineHub: React.FC<MobileOnlineHubProps> = ({
     onOpenFullSearchWorkspace,
     onOpenLyricMatch,
 }) => {
+    const subTab: MobileOnlineSubTab = activeSubTab ?? subTabProp ?? 'discover';
     const activeProviderId = useOnlineProviderAccountStore(state => state.activeProviderId);
     const setActiveProviderId = useOnlineProviderAccountStore(state => state.setActiveProviderId);
     const accounts = useOnlineProviderAccountStore(state => state.accounts);
@@ -229,7 +232,7 @@ export const MobileOnlineHub: React.FC<MobileOnlineHubProps> = ({
         setCollectionError(null);
         setInlineEndpointDraft(
             activeProviderId === 'netease' || activeProviderId === 'qq' || activeProviderId === 'kugou'
-                ? getStoredRuntimeApiBase(activeProviderId)
+                ? getStoredRuntimeApiBase(activeProviderId as ConfigurableOnlineProviderId)
                 : '',
         );
         if (providerDiagnostic.availability === 'ready' && isOnline) {

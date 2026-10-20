@@ -87,7 +87,7 @@ describe('audio equalizer model', () => {
         const rockSettings = resolveAudioEqualizerSettings({
             enabled: true,
             preset: 'rock',
-            gains: AUDIO_SOUND_PRESETS.rock.gains,
+            gains: [...AUDIO_SOUND_PRESETS.rock.gains],
             effects: AUDIO_SOUND_PRESETS.rock.effects,
         });
         expect(rockSettings.preset).toBe('rock');
@@ -99,7 +99,7 @@ describe('audio equalizer model', () => {
         const activeRock = resolveAudioEqualizerSettings({
             enabled: true,
             preset: 'rock',
-            gains: AUDIO_SOUND_PRESETS.rock.gains,
+            gains: [...AUDIO_SOUND_PRESETS.rock.gains],
             effects: AUDIO_SOUND_PRESETS.rock.effects,
             customSlots: [{ gains: customSlotGains, effects: createNeutralAudioEffects() }, {}],
         });
@@ -331,7 +331,7 @@ describe('audio equalizer graph & measurable frequency response', () => {
                 ...DEFAULT_AUDIO_EQUALIZER_SETTINGS,
                 enabled: false,
                 preset: 'rock',
-                gains: AUDIO_SOUND_PRESETS.rock.gains,
+                gains: [...AUDIO_SOUND_PRESETS.rock.gains],
             },
             probeFrequencies,
         );
@@ -345,7 +345,7 @@ describe('audio equalizer graph & measurable frequency response', () => {
                 ...DEFAULT_AUDIO_EQUALIZER_SETTINGS,
                 enabled: true,
                 preset: 'bass',
-                gains: AUDIO_SOUND_PRESETS.bass.gains,
+                gains: [...AUDIO_SOUND_PRESETS.bass.gains],
             },
             probeFrequencies,
         );
@@ -359,7 +359,7 @@ describe('audio equalizer graph & measurable frequency response', () => {
                 ...DEFAULT_AUDIO_EQUALIZER_SETTINGS,
                 enabled: true,
                 preset: 'rock',
-                gains: AUDIO_SOUND_PRESETS.rock.gains,
+                gains: [...AUDIO_SOUND_PRESETS.rock.gains],
             },
             probeFrequencies,
         );
