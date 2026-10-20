@@ -319,7 +319,10 @@ describe('audio equalizer graph & measurable frequency response', () => {
 
         // Disabled or Flat -> 0 dB across all frequencies
         const flatResponse = computeEqualizerFrequencyResponseDb(
-            { ...DEFAULT_AUDIO_EQUALIZER_SETTINGS, enabled: true },
+            {
+                enabled: true,
+                gains: [...DEFAULT_AUDIO_EQUALIZER_SETTINGS.gains],
+            },
             probeFrequencies,
         );
         flatResponse.forEach(gainDb => {
@@ -328,9 +331,7 @@ describe('audio equalizer graph & measurable frequency response', () => {
 
         const disabledRockResponse = computeEqualizerFrequencyResponseDb(
             {
-                ...DEFAULT_AUDIO_EQUALIZER_SETTINGS,
                 enabled: false,
-                preset: 'rock',
                 gains: [...AUDIO_SOUND_PRESETS.rock.gains],
             },
             probeFrequencies,
@@ -342,9 +343,7 @@ describe('audio equalizer graph & measurable frequency response', () => {
         // Bass Boost enabled -> boosts low frequencies (31 Hz, 62 Hz, 125 Hz) significantly
         const bassResponse = computeEqualizerFrequencyResponseDb(
             {
-                ...DEFAULT_AUDIO_EQUALIZER_SETTINGS,
                 enabled: true,
-                preset: 'bass',
                 gains: [...AUDIO_SOUND_PRESETS.bass.gains],
             },
             probeFrequencies,
@@ -356,9 +355,7 @@ describe('audio equalizer graph & measurable frequency response', () => {
         // Rock preset enabled -> V-curve boosts lows (31/62 Hz) and highs (8/16 kHz) while dipping 500 Hz
         const rockResponse = computeEqualizerFrequencyResponseDb(
             {
-                ...DEFAULT_AUDIO_EQUALIZER_SETTINGS,
                 enabled: true,
-                preset: 'rock',
                 gains: [...AUDIO_SOUND_PRESETS.rock.gains],
             },
             probeFrequencies,
