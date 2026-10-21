@@ -837,7 +837,7 @@ describe('Android SAF local music adapter & Media3 playback bridge', () => {
             for (let trackIdx = 1; trackIdx <= 20; trackIdx += 1) {
                 const fileName = `Track_${String(trackIdx).padStart(2, '0')}.flac`;
                 const rel = `${folder}/${fileName}`;
-                const fileSize = 26_843_545; // ~25.6 MiB per FLAC -> 800 * 26.84 MB = 21.47 GB (~20 GiB)
+                const fileSize = 27_000_000; // ~25.75 MiB per FLAC -> 800 * 27 MB = 21.60 GB (> 20 GiB)
                 totalLibraryBytes += fileSize;
                 entries.push({
                     name: fileName,
@@ -908,9 +908,13 @@ describe('Android SAF local music adapter & Media3 playback bridge', () => {
         scanProgressEvents = [];
 
         const incrementalResult = await resyncFolder('Music');
+        for (let i = 0; i < 40; i += 1) {
+            if (scanProgressEvents.some(e => e.phase === 'completed' && e.processedSongs === 3)) break;
+            await new Promise(resolve => setTimeout(resolve, 15));
+        }
         expect(incrementalResult).toHaveLength(801);
         expect(persistedSongsStore).toHaveLength(801);
-        const incProgress = scanProgressEvents.find(e => e.phase === 'hydrating' || (e.skippedSongs ?? 0) >= 798)!;
+        const incProgress = scanProgressEvents.find(e => e.phase === 'completed' && e.processedSongs === 3) ?? scanProgressEvents[scanProgressEvents.length - 1]!;
         expect(incProgress.skippedSongs).toBe(798);
         expect(incProgress.processedSongs).toBe(3);
     });

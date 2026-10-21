@@ -546,13 +546,21 @@ async function extractSafHandleEmbeddedMetadata(
         && (nativeMeta.hasEmbeddedCover === false || !nativeMeta.cover)
     );
     const needWorkerCover = includeCover && !preparedNativeCover && !nativeConfirmedNoCover;
+    const nativeMetadataComplete = Boolean(
+        nativeMeta
+        && nativeMeta.durationMs
+        && nativeMeta.durationMs > 0
+        && (!includeCover || preparedNativeCover || nativeMeta.hasEmbeddedCover === false)
+    );
     let workerMeta: EmbeddedMetadata = {};
-    try {
-        const headerFile = await fileHandle.getMetadataFile({ includeCover: needWorkerCover });
-        workerMeta = await extractEmbeddedMetadata(headerFile, needWorkerCover);
-    } catch (workerErr) {
-        if (!nativeMeta) {
-            throw workerErr;
+    if (!nativeMetadataComplete) {
+        try {
+            const headerFile = await fileHandle.getMetadataFile({ includeCover: needWorkerCover });
+            workerMeta = await extractEmbeddedMetadata(headerFile, needWorkerCover);
+        } catch (workerErr) {
+            if (!nativeMeta) {
+                throw workerErr;
+            }
         }
     }
 
