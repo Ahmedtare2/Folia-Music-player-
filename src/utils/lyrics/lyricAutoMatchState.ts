@@ -163,7 +163,7 @@ export const isSongOnAutomaticLyricMatchCooldown = (
 export const hasKnownGoodWordByWordLocalLyric = (song: LocalSong): boolean => {
     if (song.hasLocalLyrics && song.localLyricsContent) {
         const fmt = song.localLyricsFormat;
-        if (fmt === 'ttml' || fmt === 'qrc' || fmt === 'yrc' || fmt === 'krc' || song.localLyricsName?.toLowerCase().endsWith('.fia')) {
+        if (fmt === 'ttml' || fmt === 'qrc' || fmt === 'yrc' || fmt === 'krc') {
             return true;
         }
         if (/<tt(?:\s|>)/i.test(song.localLyricsContent) || /<\d{1,2}:\d{2}/.test(song.localLyricsContent)) {
