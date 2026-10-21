@@ -18,6 +18,10 @@ export const buildImportedMetadataSnapshot = ({
   fallbackArtist,
   embeddedAlbum,
   fallbackAlbum,
+  embeddedAlbumArtist,
+  embeddedYear,
+  embeddedGenre,
+  embeddedCodec,
 }: {
   fileName: string;
   embeddedTitle?: string;
@@ -27,6 +31,10 @@ export const buildImportedMetadataSnapshot = ({
   fallbackArtist?: string;
   embeddedAlbum?: string;
   fallbackAlbum?: string;
+  embeddedAlbumArtist?: string;
+  embeddedYear?: number;
+  embeddedGenre?: string;
+  embeddedCodec?: string;
 }): LocalSongImportedMetadata => {
   const normalizedEmbeddedTitle = cleanLocalLibraryName(embeddedTitle);
   const title = normalizedEmbeddedTitle
@@ -34,6 +42,12 @@ export const buildImportedMetadataSnapshot = ({
     || stripLocalAudioExtension(fileName)
     || fileName;
   const embeddedArtistNames = (embeddedArtists || []).flatMap(splitLocalLibraryArtistNames);
+  const albumArtist = cleanLocalLibraryName(embeddedAlbumArtist);
+  const genre = cleanLocalLibraryName(embeddedGenre);
+  const codec = cleanLocalLibraryName(embeddedCodec);
+  const year = typeof embeddedYear === 'number' && Number.isFinite(embeddedYear) && embeddedYear > 0
+    ? Math.floor(embeddedYear)
+    : undefined;
   return {
     title,
     titleSource: normalizedEmbeddedTitle ? 'embedded' : 'filename',
@@ -41,6 +55,10 @@ export const buildImportedMetadataSnapshot = ({
       ? embeddedArtistNames
       : splitLocalLibraryArtistNames(embeddedArtist || fallbackArtist),
     albumName: cleanLocalLibraryName(embeddedAlbum || fallbackAlbum),
+    ...(albumArtist ? { albumArtist } : {}),
+    ...(year !== undefined ? { year } : {}),
+    ...(genre ? { genre } : {}),
+    ...(codec ? { codec } : {}),
   };
 };
 

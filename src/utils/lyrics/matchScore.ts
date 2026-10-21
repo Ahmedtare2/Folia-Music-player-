@@ -40,6 +40,11 @@ export function normalizeLyricMatchText(value: string): string {
     const simpValue = t2sConverter(romajiValue);
 
     return simpValue
+        .normalize('NFKC')
+        .replace(/[\u064B-\u065F\u0670\u0640]/g, '')
+        .replace(/[أإآ]/g, 'ا')
+        .replace(/ة/g, 'ه')
+        .replace(/ى/g, 'ي')
         .toLowerCase()
         .replace(/[\p{P}\p{S}]/gu, '')
         .replace(/\s+/g, ' ')

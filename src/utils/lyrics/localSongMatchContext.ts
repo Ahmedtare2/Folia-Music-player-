@@ -1,3 +1,4 @@
+import { isSongOnAutomaticLyricMatchCooldown } from './lyricAutoMatchState';
 import type { LocalSong } from '../../types';
 
 // src/utils/lyrics/localSongMatchContext.ts
@@ -59,9 +60,19 @@ export const buildLocalSongLyricMatchContext = (
 };
 
 // Explicit metadata identity may accelerate lookup without bypassing the normal lyric scoring pipeline.
-export const shouldRunLocalSongAutomaticMatch = (song: LocalSong): boolean => (
-    !song.noAutoMatch || Boolean(buildLocalSongLyricMatchContext(song).metadataCandidate)
-);
+export const shouldRunLocalSongAutomaticMatch = (song: LocalSong): boolean => {
+    if (song.markedPureMusic) return false;
+    if (
+        song.hasManualLyricSelection
+        && Boolean(song.hasLocalLyrics || song.hasEmbeddedLyrics || song.matchedLyrics)
+    ) {
+        return false;
+    }
+    if (isSongOnAutomaticLyricMatchCooldown(song)) {
+        return false;
+    }
+    return !song.noAutoMatch || Boolean(buildLocalSongLyricMatchContext(song).metadataCandidate);
+};
 
 // Legacy automatic lyric records have no provider-scoped lyric ID and are refreshed once against the selected metadata.
 // A song the user marked as instrumental is never refreshed.

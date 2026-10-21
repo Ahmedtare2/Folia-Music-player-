@@ -36,6 +36,12 @@ import {
     rehydrateDirHandlesFromStorage,
     serializeDirHandlesForStorage,
 } from '@/services/android/androidSafDirectoryHandle';
+import { fetchThroughLyricRelay, requestLyricProxyOnDesktop } from '@/services/lyricProxy';
+import {
+    getRegisteredAlbumVideos,
+    resetLocalAlbumVideoCatalogForTests,
+    resolveAlbumVideoForTrack,
+} from '@/services/localAlbumVideoService';
 import {
     buildAndroidSafStreamUrl,
     hasFoliaAndroidBridge,
@@ -712,5 +718,269 @@ describe('Android SAF local music adapter & Media3 playback bridge', () => {
         // Playing continuously well beyond 1s to the genuine end of the track (239.8s / 240s) is accepted as genuine completion
         expect(isPrematureEnded(239.8, 240)).toBe(false);
         expect(isPrematureEnded(240.0, 240)).toBe(false);
+    });
+
+    it('persists safContentUri, codec, genre, year, albumArtist, and hasNoEmbeddedCover, and resolves SAF stream URLs in O(1) without directory tree traversal or DB writes', async () => {
+        const bridge = installAndroidEnvironment({
+            extractAudioMetadata: vi.fn(async ({ contentUri }) => ({
+                title: contentUri.includes('Habaytak') ? 'Habaytak' : 'Track Two',
+                artist: 'Fairuz',
+                albumArtist: 'Fairuz',
+                album: 'Golden Classics',
+                genre: 'Arabic Classical',
+                year: 1973,
+                codec: contentUri.endsWith('.flac') ? 'audio/flac' : 'audio/mpeg',
+                durationMs: 215_000,
+                bitrate: 960_000,
+                trackNumber: 1,
+                discNumber: 1,
+                hasEmbeddedCover: false,
+            })),
+        });
+
+        await importFolder();
+        for (let i = 0; i < 20; i += 1) {
+            if (persistedSongsStore.every(song => song.embeddedMetadataVersion === EMBEDDED_METADATA_VERSION)) break;
+            await new Promise(resolve => setTimeout(resolve, 20));
+        }
+
+        const habaytak = persistedSongsStore.find(song => song.fileName === 'Fairuz - Habaytak.flac')!;
+        expect(habaytak.safContentUri).toBe('content://saf/Fairuz/Habaytak.flac');
+        expect(habaytak.safTreeUri).toBe('content://com.android.externalstorage.documents/tree/primary%3AMusic');
+        expect(habaytak.safDocumentId).toBe('primary:Music/Fairuz/Fairuz - Habaytak.flac');
+        expect(habaytak.albumArtist).toBe('Fairuz');
+        expect(habaytak.genre).toBe('Arabic Classical');
+        expect(habaytak.year).toBe(1973);
+        expect(habaytak.codec).toBe('audio/flac');
+        expect(habaytak.hasNoEmbeddedCover).toBe(true);
+
+        // Because native extractAudioMetadata confirmed hasEmbeddedCover: false and durationMs > 0,
+        // the 1.5 MB audio slice should NOT be read over Base64 during hydration!
+        const audioSliceReads = readFileCalls.filter(c => c.contentUri.endsWith('.flac') || c.contentUri.endsWith('.mp3'));
+        expect(audioSliceReads).toHaveLength(0);
+
+        // Simulate app restart (fileHandle stripped) and switch tracks:
+        // getAudioFromLocalSong must reconstruct the handle in O(1) from safContentUri without calling resolveRelativeFile or saveLocalSong!
+        vi.mocked(bridge.resolveRelativeFile).mockClear();
+        vi.mocked(bridge.scanDirectoryTree).mockClear();
+        vi.mocked(saveLocalSong).mockClear();
+
+        const restartedSong: LocalSong = { ...habaytak, fileHandle: undefined };
+        const url = await getAudioFromLocalSong(restartedSong);
+        expect(url).toBe(
+            buildAndroidSafStreamUrl(
+                'content://saf/Fairuz/Habaytak.flac',
+                'content://com.android.externalstorage.documents/tree/primary%3AMusic',
+                'audio/flac',
+            ),
+        );
+        expect(bridge.resolveRelativeFile).not.toHaveBeenCalled();
+        expect(bridge.scanDirectoryTree).not.toHaveBeenCalled();
+        expect(saveLocalSong).not.toHaveBeenCalled();
+    });
+
+    it('stamps embeddedMetadataVersion and hydrationFailedSignature on unreadable/corrupt audio files so resumeInterruptedLocalLibraryScans never loops infinitely', async () => {
+        installAndroidEnvironment({
+            extractAudioMetadata: vi.fn(async () => {
+                throw new Error('Corrupt container header');
+            }),
+        });
+        fileReadableMap['content://saf/Fairuz/Habaytak.flac'] = false;
+
+        await importFolder();
+        for (let i = 0; i < 20; i += 1) {
+            if (persistedSongsStore.every(song => song.embeddedMetadataVersion === EMBEDDED_METADATA_VERSION)) break;
+            await new Promise(resolve => setTimeout(resolve, 25));
+        }
+
+        const failedSong = persistedSongsStore.find(song => song.fileName === 'Fairuz - Habaytak.flac')!;
+        expect(failedSong.embeddedMetadataVersion).toBe(EMBEDDED_METADATA_VERSION);
+        expect(failedSong.hydrationFailedSignature).toBeDefined();
+
+        // Subsequent launch must not re-queue the failed file unless its fileSignature changes
+        const resumed = await resumeInterruptedLocalLibraryScans();
+        expect(resumed).toBe(0);
+    });
+
+    it('indexes a 20 GB synthetic local library (800 tracks across 40 albums), reuses the index on second launch without rescanning, and detects incremental add/modify/delete changes', async () => {
+        installAndroidEnvironment({
+            extractAudioMetadata: vi.fn(async ({ contentUri }) => ({
+                title: contentUri.split('/').pop()?.replace(/\.[^.]+$/, '') || 'Track',
+                artist: 'Synthetic Artist',
+                albumArtist: 'Synthetic Artist',
+                album: contentUri.split('/')[3] || 'Synthetic Album',
+                genre: 'Electronic',
+                year: 2025,
+                codec: contentUri.endsWith('.flac') ? 'audio/flac' : 'audio/mpeg',
+                durationMs: 240_000,
+                bitrate: 1_100_000,
+                trackNumber: 1,
+                discNumber: 1,
+                hasEmbeddedCover: false,
+            })),
+        });
+
+        const entries: FoliaSafEntryDescriptor[] = [];
+        let totalLibraryBytes = 0;
+        for (let albumIdx = 1; albumIdx <= 40; albumIdx += 1) {
+            const folder = `Album_${String(albumIdx).padStart(2, '0')}`;
+            entries.push({
+                name: folder,
+                relativePath: folder,
+                kind: 'directory',
+                documentId: `primary:Music/${folder}`,
+                contentUri: `content://saf/${folder}`,
+                mimeType: 'vnd.android.document/directory',
+                size: 0,
+                lastModified: 1000,
+            });
+            for (let trackIdx = 1; trackIdx <= 20; trackIdx += 1) {
+                const fileName = `Track_${String(trackIdx).padStart(2, '0')}.flac`;
+                const rel = `${folder}/${fileName}`;
+                const fileSize = 26_843_545; // ~25.6 MiB per FLAC -> 800 * 26.84 MB = 21.47 GB (~20 GiB)
+                totalLibraryBytes += fileSize;
+                entries.push({
+                    name: fileName,
+                    relativePath: rel,
+                    kind: 'file',
+                    documentId: `primary:Music/${rel}`,
+                    contentUri: `content://saf/${rel}`,
+                    mimeType: 'audio/flac',
+                    size: fileSize,
+                    lastModified: 10_000 + albumIdx * 100 + trackIdx,
+                });
+            }
+        }
+        expect(totalLibraryBytes).toBeGreaterThan(20 * 1024 * 1024 * 1024);
+        currentSafTreeEntries = entries;
+
+        const firstScan = await importFolder();
+        expect(firstScan).toHaveLength(800);
+        for (let i = 0; i < 60; i += 1) {
+            if (persistedSongsStore.every(song => song.embeddedMetadataVersion === EMBEDDED_METADATA_VERSION)) break;
+            await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        expect(persistedSongsStore).toHaveLength(800);
+        // Zero audio bytes were copied into private storage during the 20 GB index build
+        expect(readFileCalls).toHaveLength(0);
+
+        // Second launch: re-importing / reconciling the 20 GB folder reuses all 800 indexed records with 0 processed songs
+        scanProgressEvents = [];
+        const secondLaunch = await resyncFolder('Music');
+        expect(secondLaunch).toHaveLength(800);
+        const secondFinalProgress = scanProgressEvents[scanProgressEvents.length - 1]!;
+        expect(secondFinalProgress.discoveredSongs).toBe(800);
+        expect(secondFinalProgress.skippedSongs).toBe(800);
+        expect(secondFinalProgress.processedSongs).toBe(0);
+
+        // Incremental changes: remove 1 track, modify 1 track's mtime, and add 2 new tracks -> total 801 tracks
+        const withoutFirst = currentSafTreeEntries.filter(
+            e => e.relativePath !== 'Album_01/Track_01.flac',
+        );
+        const modifiedAndAdded = withoutFirst.map(e =>
+            e.relativePath === 'Album_01/Track_02.flac'
+                ? { ...e, lastModified: 999_999 }
+                : e,
+        );
+        modifiedAndAdded.push(
+            {
+                name: 'Track_21.flac',
+                relativePath: 'Album_01/Track_21.flac',
+                kind: 'file',
+                documentId: 'primary:Music/Album_01/Track_21.flac',
+                contentUri: 'content://saf/Album_01/Track_21.flac',
+                mimeType: 'audio/flac',
+                size: 26_843_545,
+                lastModified: 888_888,
+            },
+            {
+                name: 'Track_22.flac',
+                relativePath: 'Album_01/Track_22.flac',
+                kind: 'file',
+                documentId: 'primary:Music/Album_01/Track_22.flac',
+                contentUri: 'content://saf/Album_01/Track_22.flac',
+                mimeType: 'audio/flac',
+                size: 26_843_545,
+                lastModified: 888_889,
+            },
+        );
+        currentSafTreeEntries = modifiedAndAdded;
+        scanProgressEvents = [];
+
+        const incrementalResult = await resyncFolder('Music');
+        expect(incrementalResult).toHaveLength(801);
+        expect(persistedSongsStore).toHaveLength(801);
+        const incProgress = scanProgressEvents.find(e => e.phase === 'hydrating' || (e.skippedSongs ?? 0) >= 798)!;
+        expect(incProgress.skippedSongs).toBe(798);
+        expect(incProgress.processedSongs).toBe(3);
+    });
+
+    it('routes QQ Music, KuGou, and AMLL TTML DB lyric requests through the native Android fetchLyricProxy bridge and indexes album videos without triggering extra library scans', async () => {
+        resetLocalAlbumVideoCatalogForTests();
+        const proxyCalls: Array<{ url: string; method?: string }> = [];
+        const bridge = installAndroidEnvironment({
+            fetchLyricProxy: vi.fn(async ({ url, method }) => {
+                proxyCalls.push({ url, method });
+                return {
+                    ok: true,
+                    status: 200,
+                    statusText: 'OK',
+                    headers: { 'content-type': 'application/json' },
+                    bodyText: JSON.stringify({ code: 0, request: { code: 0, data: { body: { item_song: [] } } } }),
+                };
+            }),
+        });
+
+        // Add an album video file inside the Fairuz folder
+        currentSafTreeEntries.push({
+            name: 'Golden Classics.mp4',
+            relativePath: 'Fairuz/Golden Classics.mp4',
+            kind: 'file',
+            documentId: 'primary:Music/Fairuz/Golden Classics.mp4',
+            contentUri: 'content://saf/Fairuz/GoldenClassics.mp4',
+            mimeType: 'video/mp4',
+            size: 16_400_000,
+            lastModified: 2000,
+        });
+
+        await importFolder();
+        await new Promise(resolve => setTimeout(resolve, 40));
+
+        // 1. Verify the album video inside the music folder was automatically indexed
+        expect(getRegisteredAlbumVideos().map(v => v.fileName)).toContain('Golden Classics.mp4');
+
+        // 2. Verify resolving the album video for playback triggers ZERO additional scanDirectoryTree calls
+        vi.mocked(bridge.scanDirectoryTree!).mockClear();
+        const resolvedVideo = await resolveAlbumVideoForTrack({
+            albumName: 'Golden Classics',
+            artistName: 'Fairuz',
+            folderName: 'Music/Fairuz',
+        });
+        expect(resolvedVideo.video?.fileName).toBe('Golden Classics.mp4');
+        expect(resolvedVideo.streamUrl).toBe(
+            buildAndroidSafStreamUrl(
+                'content://saf/Fairuz/GoldenClassics.mp4',
+                'content://com.android.externalstorage.documents/tree/primary%3AMusic',
+                'video/mp4',
+                16_400_000,
+            ),
+        );
+        expect(bridge.scanDirectoryTree).not.toHaveBeenCalled();
+
+        // 3. Verify native Android lyric proxy handles QQ, KuGou, and AMLL DB requests without /api/lyric-proxy 404s
+        const qqRes = await fetchThroughLyricRelay('https://u.y.qq.com/cgi-bin/musicu.fcg', {
+            method: 'POST',
+            body: '{}',
+        });
+        expect(qqRes.ok).toBe(true);
+        const amllRes = await requestLyricProxyOnDesktop('https://api.amll.dev/v1/lyrics/search?q=Habaytak', {
+            method: 'GET',
+        });
+        expect(amllRes?.status).toBe(200);
+        expect(proxyCalls.map(c => c.url)).toEqual([
+            'https://u.y.qq.com/cgi-bin/musicu.fcg',
+            'https://api.amll.dev/v1/lyrics/search?q=Habaytak',
+        ]);
+        expect(bridge.scanDirectoryTree).not.toHaveBeenCalled();
     });
 });

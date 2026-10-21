@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import {
     ArrowLeft,
     Disc3,
+    Film,
     FileUp,
     FolderOpen,
     Globe,
@@ -49,6 +50,13 @@ import type { NavidromeSong } from '../../types/navidrome';
 import { AUDIO_EQUALIZER_PRESET_LABELS } from '../../utils/audioEqualizer';
 import { useAudioSettingsStore } from '../../stores/useAudioSettingsStore';
 import { useDynamicAlbumArtworkStore } from '../../stores/useDynamicAlbumArtworkStore';
+import {
+    LOCAL_ALBUM_VIDEOS_UPDATED_EVENT,
+    ensureLocalAlbumVideoCatalogHydrated,
+    getRegisteredAlbumVideos,
+    importAlbumVideoFolder,
+    resyncAlbumVideoFolders,
+} from '../../services/localAlbumVideoService';
 import { useSystemBarSettingsStore } from '../../stores/useSystemBarSettingsStore';
 import { useShallow } from 'zustand/react/shallow';
 import MobileEqualizerSheet from './MobileEqualizerSheet';
@@ -63,6 +71,7 @@ import {
     type MobilePrimaryTab,
     type MobileSongSortOrder,
     buildMobileLibraryCollections,
+    computeRestoredLibraryScrollState,
     filterAndSortLocalSongs,
     isLocalSongCurrentlyPlaying,
     isMobileVisualizerVisible,
@@ -282,14 +291,18 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
     const setEqualizerSettings = useAudioSettingsStore(state => state.handleSetAudioEqualizerSettings);
     const openDesktopEqualizer = useAudioSettingsStore(state => state.openAudioEqualizer);
     const {
+        albumVideoEnabled,
         dynamicArtworkEnabled,
         dynamicArtworkIntensity,
+        setAlbumVideoEnabled,
         setDynamicArtworkEnabled,
         setDynamicArtworkIntensity,
     } = useDynamicAlbumArtworkStore(
         useShallow(state => ({
+            albumVideoEnabled: state.albumVideoEnabled,
             dynamicArtworkEnabled: state.enabled,
             dynamicArtworkIntensity: state.intensity,
+            setAlbumVideoEnabled: state.setAlbumVideoEnabled,
             setDynamicArtworkEnabled: state.setDynamicAlbumArtworkEnabled,
             setDynamicArtworkIntensity: state.setDynamicAlbumArtworkIntensity,
         })),
@@ -325,6 +338,13 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
     const [visibleSongLimit, setVisibleSongLimit] = useState(MAX_RENDERED_SONGS_STEP);
     const [isKeyboardOpen, setIsKeyboardOpen] = useState(false);
     const playlistInputRef = useRef<HTMLInputElement>(null);
+    const songsListScrollRef = useRef<HTMLDivElement>(null);
+    const collectionDetailScrollRef = useRef<HTMLDivElement>(null);
+    const albumsGridScrollRef = useRef<HTMLDivElement>(null);
+    const foldersListScrollRef = useRef<HTMLDivElement>(null);
+    const savedScrollOffsetsRef = useRef<Record<string, number>>({});
+    const openedSongContextRef = useRef<string | null>(null);
+    const wasPlayerExpandedRef = useRef(false);
 
     const navStateRef = useRef(navState);
     navStateRef.current = navState;
@@ -431,16 +451,149 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
         [localLibraryCatalog, localPlaylists, localSongs, t],
     );
 
+    // Keep collectionDetail synchronized with library updates made while the player is open
+    useEffect(() => {
+        if (!navState.collectionDetail) return;
+        const { kind, id } = navState.collectionDetail;
+        const pool = kind === 'album'
+            ? collections.albums
+            : kind === 'artist'
+                ? collections.artists
+                : kind === 'folder'
+                    ? collections.folders
+                    : collections.playlists;
+        const updated = pool.find(item => item.id === id);
+        if (!updated) {
+            setNavState(prev => (prev.collectionDetail ? { ...prev, collectionDetail: null } : prev));
+        } else if (
+            updated.songs.length !== navState.collectionDetail.songs.length
+            || updated.title !== navState.collectionDetail.title
+        ) {
+            setNavState(prev => (prev.collectionDetail ? { ...prev, collectionDetail: updated } : prev));
+        }
+    }, [collections, navState.collectionDetail]);
+
+    // Restore scroll offset and keep the active playing song visible when returning from the player sheet
+    useEffect(() => {
+        const wasExpanded = wasPlayerExpandedRef.current;
+        wasPlayerExpandedRef.current = isPlayerExpanded;
+        if (!wasExpanded || isPlayerExpanded) return;
+
+        if (navState.collectionDetail) {
+            const contextKey = `collection:${navState.collectionDetail.kind}:${navState.collectionDetail.id}`;
+            const container = collectionDetailScrollRef.current;
+            const activeIdx = navState.collectionDetail.songs.findIndex(song =>
+                isLocalSongCurrentlyPlaying(song, currentSong),
+            );
+            const restored = computeRestoredLibraryScrollState({
+                savedScrollTop: savedScrollOffsetsRef.current[contextKey] ?? container?.scrollTop ?? 0,
+                viewportHeight: container?.clientHeight || 480,
+                rowHeight: 64,
+                totalItems: navState.collectionDetail.songs.length,
+                currentVisibleLimit: navState.collectionDetail.songs.length,
+                stepSize: MAX_RENDERED_SONGS_STEP,
+                activeSongIndex: activeIdx,
+                openedFromThisContext: openedSongContextRef.current === contextKey,
+            });
+            if (container) {
+                container.scrollTop = restored.nextScrollTop;
+                if (restored.shouldScrollActiveSongIntoView && activeIdx >= 0) {
+                    const activeSong = navState.collectionDetail.songs[activeIdx];
+                    const rowEl = activeSong
+                        ? container.querySelector<HTMLElement>(`[data-song-id="${activeSong.id}"]`)
+                        : null;
+                    if (rowEl && typeof rowEl.scrollIntoView === 'function') {
+                        try {
+                            rowEl.scrollIntoView({ block: 'nearest' });
+                        } catch {
+                            // Ignore in non-DOM test environments
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
+        if (navState.activeTab === 'songs') {
+            const contextKey = 'songs';
+            const container = songsListScrollRef.current;
+            const activeIdx = filteredSongs.findIndex(song => isLocalSongCurrentlyPlaying(song, currentSong));
+            const restored = computeRestoredLibraryScrollState({
+                savedScrollTop: savedScrollOffsetsRef.current[contextKey] ?? container?.scrollTop ?? 0,
+                viewportHeight: container?.clientHeight || 480,
+                rowHeight: 64,
+                totalItems: filteredSongs.length,
+                currentVisibleLimit: visibleSongLimit,
+                stepSize: MAX_RENDERED_SONGS_STEP,
+                activeSongIndex: activeIdx,
+                openedFromThisContext: openedSongContextRef.current === contextKey,
+            });
+            if (restored.nextVisibleLimit !== visibleSongLimit) {
+                setVisibleSongLimit(restored.nextVisibleLimit);
+            }
+            if (container) {
+                container.scrollTop = restored.nextScrollTop;
+                if (restored.shouldScrollActiveSongIntoView && activeIdx >= 0) {
+                    const activeSong = filteredSongs[activeIdx];
+                    const rowEl = activeSong
+                        ? container.querySelector<HTMLElement>(`[data-song-id="${activeSong.id}"]`)
+                        : null;
+                    if (rowEl && typeof rowEl.scrollIntoView === 'function') {
+                        try {
+                            rowEl.scrollIntoView({ block: 'nearest' });
+                        } catch {
+                            // Ignore in non-DOM test environments
+                        }
+                    }
+                }
+            }
+        } else if (navState.activeTab === 'albums' && albumsGridScrollRef.current) {
+            const key = `albums:${navState.albumsSubTab}`;
+            albumsGridScrollRef.current.scrollTop = savedScrollOffsetsRef.current[key] ?? albumsGridScrollRef.current.scrollTop;
+        } else if (navState.activeTab === 'folders' && foldersListScrollRef.current) {
+            const key = `folders:${navState.foldersSubTab}`;
+            foldersListScrollRef.current.scrollTop = savedScrollOffsetsRef.current[key] ?? foldersListScrollRef.current.scrollTop;
+        }
+    }, [
+        currentSong,
+        filteredSongs,
+        isPlayerExpanded,
+        navState.activeTab,
+        navState.albumsSubTab,
+        navState.collectionDetail,
+        navState.foldersSubTab,
+        visibleSongLimit,
+    ]);
+
+    const [albumVideoCount, setAlbumVideoCount] = useState<number>(() => getRegisteredAlbumVideos().length);
+    useEffect(() => {
+        let mounted = true;
+        void ensureLocalAlbumVideoCatalogHydrated().then(() => {
+            if (mounted) setAlbumVideoCount(getRegisteredAlbumVideos().length);
+        });
+        if (typeof window === 'undefined') return undefined;
+        const onUpdated = () => setAlbumVideoCount(getRegisteredAlbumVideos().length);
+        window.addEventListener(LOCAL_ALBUM_VIDEOS_UPDATED_EVENT, onUpdated);
+        return () => {
+            mounted = false;
+            window.removeEventListener(LOCAL_ALBUM_VIDEOS_UPDATED_EVENT, onUpdated);
+        };
+    }, []);
+
+    const matchedPlayingLocalSong = useMemo(
+        () => localSongs.find(song => isLocalSongCurrentlyPlaying(song, currentSong)) ?? null,
+        [currentSong, localSongs],
+    );
+
     // Resolve cover artwork using the same reliable local song source that works in the library
     const effectiveCoverUrl = useMemo((): string | null => {
         if (coverUrl) return coverUrl;
         if (currentSong?.album?.coverUrl) return currentSong.album.coverUrl;
-        const matchedLocalSong = localSongs.find(song => isLocalSongCurrentlyPlaying(song, currentSong));
-        if (matchedLocalSong) {
-            return resolveLocalSongCoverThumb(matchedLocalSong, 1024) ?? null;
+        if (matchedPlayingLocalSong) {
+            return resolveLocalSongCoverThumb(matchedPlayingLocalSong, 1024) ?? null;
         }
         return null;
-    }, [coverUrl, currentSong, localSongs]);
+    }, [coverUrl, currentSong, matchedPlayingLocalSong]);
 
     const accentColor = theme.accentColor || theme.primaryColor || '#f4f4f5';
     const hasLyrics = Boolean(lyrics && lyrics.lines.length > 0);
@@ -462,8 +615,16 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
         }));
     };
 
+    const resolveCurrentLibraryContextKey = (): string => {
+        if (navState.collectionDetail) {
+            return `collection:${navState.collectionDetail.kind}:${navState.collectionDetail.id}`;
+        }
+        return navState.activeTab;
+    };
+
     const handlePlayAllSongs = (songs: LocalSong[], shuffle = false) => {
         if (songs.length === 0) return;
+        openedSongContextRef.current = resolveCurrentLibraryContextKey();
         const list = shuffle ? [...songs].sort(() => Math.random() - 0.5) : songs;
         onPlayLocalSongList(list[0]!, list);
     };
@@ -479,6 +640,8 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
         return (
             <div
                 key={song.id || index}
+                data-song-id={song.id}
+                data-song-active={active ? 'true' : 'false'}
                 className={`flex items-center gap-3 rounded-2xl px-3 py-2.5 transition-colors ${
                     active
                         ? 'bg-white/[0.10] border border-white/15'
@@ -487,7 +650,10 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
             >
                 <button
                     type="button"
-                    onClick={() => onPlayLocalSongList(song, queueContext)}
+                    onClick={() => {
+                        openedSongContextRef.current = resolveCurrentLibraryContextKey();
+                        onPlayLocalSongList(song, queueContext);
+                    }}
                     className="flex min-w-0 flex-1 items-center gap-3 text-left focus:outline-none"
                 >
                     <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded-xl border border-white/10 bg-zinc-900">
@@ -634,9 +800,14 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
 
     const renderCollectionDetailView = (detail: MobileCollectionDetail) => {
         const titleDir = detectTextDirection(detail.title || '');
+        const collectionScrollKey = `collection:${detail.kind}:${detail.id}`;
         return (
             <div
+                ref={collectionDetailScrollRef}
                 data-testid="mobile-collection-detail"
+                onScroll={(e) => {
+                    savedScrollOffsetsRef.current[collectionScrollKey] = e.currentTarget.scrollTop;
+                }}
                 className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain px-4 pb-6 pt-2"
             >
                 <div className="flex items-center gap-2 pb-3">
@@ -750,10 +921,13 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                 }}
             />
 
-            {/* Library chrome is rendered ONLY when the full-screen player sheet is collapsed,
-                preventing any visual overlap between the player/visualizer and the library list. */}
-            {!isPlayerExpanded && (
-                <>
+            {/* Library chrome stays mounted (`hidden` when expanded) so DOM scroll positions,
+                search filters, sort order, and decoded thumbnails are preserved across player navigation. */}
+            <div
+                data-testid="mobile-library-chrome"
+                aria-hidden={isPlayerExpanded}
+                className={isPlayerExpanded ? 'hidden' : 'flex min-h-0 flex-1 flex-col overflow-hidden'}
+            >
                     {/* Top Mobile App Header */}
                     <header className="flex shrink-0 items-center justify-between gap-3 px-4 py-2.5">
                         <div className="flex items-center gap-2.5">
@@ -950,8 +1124,11 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
 
                                     {/* Scrollable Windowed Song List */}
                                     <div
+                                        ref={songsListScrollRef}
+                                        data-testid="mobile-songs-scroll-container"
                                         onScroll={(e) => {
                                             const el = e.currentTarget;
+                                            savedScrollOffsetsRef.current.songs = el.scrollTop;
                                             if (el.scrollTop + el.clientHeight >= el.scrollHeight - 240) {
                                                 if (visibleSongLimit < filteredSongs.length) {
                                                     setVisibleSongLimit(prev => prev + MAX_RENDERED_SONGS_STEP);
@@ -1001,7 +1178,13 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                                 {localSongs.length === 0 ? (
                                     renderEmptyLibraryState()
                                 ) : (
-                                    <div className="grid grid-cols-2 sm:grid-cols-3 landscape:grid-cols-4 gap-3 overflow-y-auto overscroll-contain pb-6">
+                                    <div
+                                        ref={albumsGridScrollRef}
+                                        onScroll={(e) => {
+                                            savedScrollOffsetsRef.current[`albums:${navState.albumsSubTab}`] = e.currentTarget.scrollTop;
+                                        }}
+                                        className="grid grid-cols-2 sm:grid-cols-3 landscape:grid-cols-4 gap-3 overflow-y-auto overscroll-contain pb-6"
+                                    >
                                         {(navState.albumsSubTab === 'albums' ? collections.albums : collections.artists).map(item => (
                                             <button
                                                 key={item.id}
@@ -1078,7 +1261,13 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                                 {localSongs.length === 0 && navState.foldersSubTab === 'folders' ? (
                                     renderEmptyLibraryState()
                                 ) : (
-                                    <div className="flex-1 overflow-y-auto overscroll-contain space-y-2 pb-6">
+                                    <div
+                                        ref={foldersListScrollRef}
+                                        onScroll={(e) => {
+                                            savedScrollOffsetsRef.current[`folders:${navState.foldersSubTab}`] = e.currentTarget.scrollTop;
+                                        }}
+                                        className="flex-1 overflow-y-auto overscroll-contain space-y-2 pb-6"
+                                    >
                                         {(navState.foldersSubTab === 'folders' ? collections.folders : collections.playlists).map(item => (
                                             <button
                                                 key={item.id}
@@ -1151,6 +1340,37 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                                     </div>
 
                                     <div className="space-y-2.5">
+                                        {/* Switch 0a: Full-Screen Local Album Video Covers */}
+                                        <div
+                                            data-testid="mobile-settings-album-video-row"
+                                            className="flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/[0.03] px-3.5 py-2.5"
+                                        >
+                                            <div className="min-w-0">
+                                                <div className="flex items-center gap-1.5 text-xs font-semibold text-white">
+                                                    <Film size={13} style={{ color: accentColor }} />
+                                                    <span>{t('options.albumVideoCovers', 'Full-Screen Local Album Video Covers')}</span>
+                                                </div>
+                                                <p className="text-[11px] text-zinc-400">
+                                                    Play matching local album videos as an immersive full-screen player background ({albumVideoCount} indexed)
+                                                </p>
+                                            </div>
+                                            <button
+                                                type="button"
+                                                role="switch"
+                                                data-testid="switch-album-video-covers"
+                                                aria-label="Full-Screen Local Album Video Covers"
+                                                aria-checked={albumVideoEnabled}
+                                                onClick={() => setAlbumVideoEnabled(!albumVideoEnabled)}
+                                                className={`h-8 shrink-0 rounded-full border px-3.5 text-xs font-semibold transition-all ${
+                                                    albumVideoEnabled
+                                                        ? 'border-white bg-white text-zinc-950'
+                                                        : 'border-white/15 bg-white/[0.06] text-zinc-300'
+                                                }`}
+                                            >
+                                                {albumVideoEnabled ? 'On' : 'Off'}
+                                            </button>
+                                        </div>
+
                                         {/* Switch 0: Dynamic Album Artwork (On/Off + Low/Normal Motion Intensity) */}
                                         <div
                                             data-testid="mobile-settings-dynamic-artwork-row"
@@ -1290,13 +1510,13 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                                     </div>
                                 </section>
 
-                                {/* Section 2: Local Music Storage (SAF) */}
+                                {/* Section 2: Local Music & Album Video Storage (SAF) */}
                                 <section className="rounded-3xl border border-white/10 bg-white/[0.04] p-4 space-y-3">
                                     <div className="flex items-center justify-between">
                                         <div>
-                                            <h3 className="text-sm font-bold text-white">Local Music Library</h3>
+                                            <h3 className="text-sm font-bold text-white">Local Music & Album Videos</h3>
                                             <p className="text-xs text-zinc-400">
-                                                {localSongs.length} tracks · {collections.albums.length} albums · {collections.artists.length} artists
+                                                {localSongs.length} tracks · {collections.albums.length} albums · {albumVideoCount} album videos
                                             </p>
                                         </div>
                                         <FolderOpen size={20} style={{ color: accentColor }} />
@@ -1309,7 +1529,7 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                                             className="flex h-11 items-center justify-center gap-2 rounded-2xl bg-white text-xs font-semibold text-zinc-950"
                                         >
                                             <FolderOpen size={15} />
-                                            Add Folder
+                                            Add Music Folder
                                         </button>
                                         <button
                                             type="button"
@@ -1318,7 +1538,27 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                                             className="flex h-11 items-center justify-center gap-2 rounded-2xl border border-white/15 bg-white/[0.06] text-xs font-semibold text-white"
                                         >
                                             <RefreshCw size={15} className={isImportingOrScanning ? 'animate-spin' : ''} />
-                                            Rescan All
+                                            Rescan Music
+                                        </button>
+                                        <button
+                                            type="button"
+                                            data-testid="mobile-settings-add-video-folder-btn"
+                                            disabled={isImportingOrScanning}
+                                            onClick={() => void importAlbumVideoFolder()}
+                                            className="flex h-10 items-center justify-center gap-2 rounded-2xl border border-white/15 bg-white/[0.06] text-xs font-semibold text-zinc-100"
+                                        >
+                                            <Film size={14} style={{ color: accentColor }} />
+                                            Add Video Folder
+                                        </button>
+                                        <button
+                                            type="button"
+                                            data-testid="mobile-settings-refresh-videos-btn"
+                                            disabled={isImportingOrScanning}
+                                            onClick={() => void resyncAlbumVideoFolders()}
+                                            className="flex h-10 items-center justify-center gap-2 rounded-2xl border border-white/15 bg-white/[0.06] text-xs font-semibold text-zinc-100"
+                                        >
+                                            <RefreshCw size={14} />
+                                            Refresh Videos
                                         </button>
                                     </div>
                                 </section>
@@ -1562,8 +1802,7 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                             })}
                         </nav>
                     )}
-                </>
-            )}
+            </div>
 
             {/* Expanded Full-Screen Now Playing Sheet */}
             <MobileNowPlayingSheet
@@ -1576,6 +1815,7 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                 currentSong={currentSong}
                 artistName={artistName}
                 albumName={albumName}
+                folderName={matchedPlayingLocalSong?.folderName}
                 coverUrl={effectiveCoverUrl}
                 playerState={playerState}
                 currentTime={currentTime}

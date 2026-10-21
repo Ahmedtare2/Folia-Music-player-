@@ -1312,11 +1312,15 @@ export interface LocalSong {
   fileName: string;
   filePath: string; // File path for reference
   fileHandle?: FileSystemFileHandle; // For re-accessing the file (not persisted, stored in memory)
+  safContentUri?: string; // Persisted Android SAF document URI for O(1) direct streaming without tree scans
+  safTreeUri?: string; // Persisted Android SAF tree URI for permission verification
+  safDocumentId?: string; // Persisted Android SAF document identifier
   duration: number; // milliseconds
   fileSize: number; // bytes
   fileLastModified?: number; // milliseconds since epoch
   fileSignature?: string; // Lightweight file identity for incremental scans
   mimeType: string;
+  codec?: string; // Audio codec / container format
   bitrate?: number; // bps
   addedAt: number; // timestamp
 
@@ -1325,13 +1329,19 @@ export interface LocalSong {
   titleOrigin: import('./types/localLibrary').LocalSongTitleOrigin;
   importedMetadata: import('./types/localLibrary').LocalSongImportedMetadata;
   onlineMetadata?: import('./types/localLibrary').LocalSongOnlineMetadata;
+  albumArtist?: string;
   trackNumber?: number;
   discNumber?: number;
+  year?: number;
+  genre?: string;
   embeddedMetadataVersion?: number;
+  hydrationFailedSignature?: string; // File signature when metadata hydration failed so startup recovery does not loop
 
   localCoverAssetId?: string; // Content-addressed preferred local cover stored in local_cover_assets
   localCoverSource?: import('./types/localCover').LocalCoverSourceKind;
   localCoverNeedsAssetMigration?: boolean; // Retries local cover hashing/persistence during the next rescan
+  hasNoEmbeddedCover?: boolean; // True when the audio file was inspected and confirmed to have no embedded cover art
+  albumVideoUri?: string; // Optional reusable motion/video reference associated with the album or track
   replayGain?: number; // ReplayGain track gain in dB
   replayGainTrackGain?: number; // ReplayGain track gain in dB
   replayGainTrackPeak?: number; // ReplayGain track peak ratio
@@ -1372,7 +1382,7 @@ export interface LocalSong {
 export interface LocalLibrarySnapshotFile {
   name: string;
   relativePath: string;
-  kind: 'audio' | 'lyric' | 'translationLyric' | 'cover' | 'other';
+  kind: 'audio' | 'lyric' | 'translationLyric' | 'cover' | 'video' | 'other';
   size: number;
   lastModified: number;
   signature: string;

@@ -1,3 +1,4 @@
+import { requestLyricProxyOnDesktop } from '../../../services/lyricProxy';
 import type { AmllDbPlatform } from '../../../types';
 
 // src/utils/lyrics/providers/amllApi.ts
@@ -77,13 +78,13 @@ function getAmllApiUserAgent(): string | null {
 }
 
 async function requestAmllApi(url: string): Promise<{ status: number; bodyText: string }> {
-    const electronBridge = typeof window === 'undefined' ? undefined : window.electron;
-    if (electronBridge?.fetchLyricProxy) {
-        const userAgent = getAmllApiUserAgent();
-        const response = await electronBridge.fetchLyricProxy(url, {
-            method: 'GET',
-            ...(userAgent ? { headers: { 'User-Agent': userAgent } } : {}),
-        });
+    const userAgent = getAmllApiUserAgent();
+    const proxied = requestLyricProxyOnDesktop(url, {
+        method: 'GET',
+        ...(userAgent ? { headers: { 'User-Agent': userAgent } } : {}),
+    });
+    if (proxied) {
+        const response = await proxied;
         return { status: response.status, bodyText: response.bodyText };
     }
 

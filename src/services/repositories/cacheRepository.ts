@@ -146,6 +146,17 @@ export const removeCacheEntry = async (key: string): Promise<void> => {
   await getTable(getCacheTableName(key)).delete(key);
 };
 
+const isPersistentLocalLibraryKey = (key: string): boolean => (
+  key === 'local_dir_handles'
+  || key === 'local_playlists'
+  || key === 'local_lyric_negative_cache_v1'
+  || key === 'local_album_videos_v1'
+  || key === 'local_album_video_links_v1'
+  || key === 'local_video_dir_handles'
+  || key.startsWith('local_snapshot_')
+  || key.startsWith('local_video_snapshot_')
+);
+
 export const clearCacheTables = async (preserveKeys: string[] = []): Promise<void> => {
   const preserved = new Set([
     ...preserveKeys,
@@ -156,7 +167,7 @@ export const clearCacheTables = async (preserveKeys: string[] = []): Promise<voi
     await Promise.all(CACHE_TABLE_NAMES.map(async name => {
       const table = getTable(name);
       const keys = await table.toCollection().primaryKeys();
-      const deletedKeys = keys.map(String).filter(key => !preserved.has(key));
+      const deletedKeys = keys.map(String).filter(key => !preserved.has(key) && !isPersistentLocalLibraryKey(key));
       await table.bulkDelete(deletedKeys);
     }));
   });

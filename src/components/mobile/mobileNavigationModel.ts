@@ -285,3 +285,75 @@ export const isLocalSongCurrentlyPlaying = (
     if (localRefId && localRefId === localSong.id) return true;
     return currentSong.name === localSong.title;
 };
+
+export interface LibraryScrollRestorationInput {
+    savedScrollTop: number;
+    viewportHeight: number;
+    rowHeight: number;
+    totalItems: number;
+    currentVisibleLimit: number;
+    stepSize: number;
+    activeSongIndex: number;
+    openedFromThisContext: boolean;
+}
+
+export interface LibraryScrollRestorationResult {
+    nextVisibleLimit: number;
+    nextScrollTop: number;
+    shouldScrollActiveSongIntoView: boolean;
+}
+
+/**
+ * Computes the restored library window limit and scroll offset when returning from the Now Playing
+ * sheet back to the library view.
+ * - Preserves the exact saved scroll offset when valid.
+ * - Expands `visibleSongLimit` if the currently playing track was opened from this library context
+ *   and advanced beyond the rendered window while the player was open.
+ * - Keeps the currently playing song visible within the viewport if it was opened from this context
+ *   and moved outside the visible scroll range while the player was open.
+ * - Clamps scroll offset cleanly if items were removed or filtered while the player was open.
+ */
+export const computeRestoredLibraryScrollState = (
+    input: LibraryScrollRestorationInput,
+): LibraryScrollRestorationResult => {
+    const safeRowHeight = Math.max(40, input.rowHeight || 64);
+    const safeViewport = Math.max(safeRowHeight, input.viewportHeight || 480);
+    const safeStep = Math.max(20, input.stepSize || 120);
+    const safeTotal = Math.max(0, input.totalItems);
+
+    let nextVisibleLimit = Math.max(safeStep, input.currentVisibleLimit || safeStep);
+    if (input.openedFromThisContext && input.activeSongIndex >= 0) {
+        const neededLimit = Math.min(
+            safeTotal,
+            Math.ceil((input.activeSongIndex + 12) / safeStep) * safeStep,
+        );
+        if (neededLimit > nextVisibleLimit) {
+            nextVisibleLimit = neededLimit;
+        }
+    }
+
+    const renderedCount = Math.min(safeTotal, nextVisibleLimit);
+    const maxScrollTop = Math.max(0, renderedCount * safeRowHeight - safeViewport);
+    let nextScrollTop = Math.max(0, Math.min(input.savedScrollTop || 0, maxScrollTop));
+    let shouldScrollActiveSongIntoView = false;
+
+    if (input.openedFromThisContext && input.activeSongIndex >= 0 && input.activeSongIndex < safeTotal) {
+        const itemTop = input.activeSongIndex * safeRowHeight;
+        const itemBottom = itemTop + safeRowHeight;
+        const viewTop = nextScrollTop;
+        const viewBottom = nextScrollTop + safeViewport;
+        if (itemTop < viewTop) {
+            nextScrollTop = Math.max(0, Math.min(itemTop - safeRowHeight * 0.5, maxScrollTop));
+            shouldScrollActiveSongIntoView = true;
+        } else if (itemBottom > viewBottom) {
+            nextScrollTop = Math.max(0, Math.min(itemBottom - safeViewport + safeRowHeight * 0.5, maxScrollTop));
+            shouldScrollActiveSongIntoView = true;
+        }
+    }
+
+    return {
+        nextVisibleLimit,
+        nextScrollTop,
+        shouldScrollActiveSongIntoView,
+    };
+};

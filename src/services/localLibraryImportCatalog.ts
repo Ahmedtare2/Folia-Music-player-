@@ -18,11 +18,64 @@ import {
 // src/services/localLibraryImportCatalog.ts
 // Handles import/rescan assignment and the idempotent legacy bootstrap transaction.
 
+let initializedDatabaseRef: unknown = null;
+let initializationInFlight: Promise<void> | null = null;
+
+export const resetLocalLibraryInitializationCache = (): void => {
+  initializedDatabaseRef = null;
+  initializationInFlight = null;
+};
+
+const hasSameImportedEntityNames = (left: LocalSong, right: LocalSong): boolean => {
+  const leftAlbum = normalizeLocalLibraryName(getImportedAlbumName(left) || '');
+  const rightAlbum = normalizeLocalLibraryName(getImportedAlbumName(right) || '');
+  if (leftAlbum !== rightAlbum) return false;
+  const leftArtists = getImportedArtistNames(left).map(normalizeLocalLibraryName);
+  const rightArtists = getImportedArtistNames(right).map(normalizeLocalLibraryName);
+  if (leftArtists.length !== rightArtists.length) return false;
+  return leftArtists.every((artist, idx) => artist === rightArtists[idx]);
+};
+
 const assignImportedSongsInTransaction = async (
   songs: LocalSong[],
   preserveNonImportAssignments: boolean,
 ): Promise<string[]> => {
   if (songs.length === 0) return [];
+
+  // Fast path for single-song or small-batch metadata/cover updates where entity assignments
+  // already exist and imported artist/album names have not changed: avoids reading all 3 tables.
+  if (songs.length <= 5 && preserveNonImportAssignments) {
+    const songIds = songs.map(song => song.id);
+    const [existingSongs, existingAssignments] = await Promise.all([
+      appDatabase.local_music.bulkGet(songIds),
+      appDatabase.local_library_assignments.bulkGet(songIds),
+    ]);
+    const canFastUpdate = songs.every((song, idx) => {
+      const existingSong = existingSongs[idx];
+      const existingAssignment = existingAssignments[idx];
+      return Boolean(
+        existingSong
+        && existingAssignment
+        && hasSameImportedEntityNames(existingSong, song)
+      );
+    });
+    if (canFastUpdate) {
+      const replacedCoverAssetIds = songs.flatMap((song, idx) => {
+        const previousAssetId = existingSongs[idx]?.localCoverAssetId;
+        return previousAssetId && previousAssetId !== song.localCoverAssetId ? [previousAssetId] : [];
+      });
+      const songsForStorage = songs.map((song, idx) => {
+        const persisted = sanitizeLocalSongForStorage(song);
+        const existing = existingSongs[idx] as (LocalSong & { embeddedCover?: unknown }) | undefined;
+        return isBlob(existing?.embeddedCover) && (!song.localCoverAssetId || song.localCoverNeedsAssetMigration)
+          ? { ...persisted, embeddedCover: existing.embeddedCover }
+          : persisted;
+      });
+      await appDatabase.local_music.bulkPut(songsForStorage);
+      return replacedCoverAssetIds;
+    }
+  }
+
   const [entities, assignments, allSongs] = await Promise.all([
     appDatabase.local_library_entities.toArray(),
     appDatabase.local_library_assignments.toArray(),
@@ -134,13 +187,39 @@ export const assignImportedSongs = async (
   await deleteUnreferencedLocalCoverAssets(replacedCoverAssetIds);
 };
 
-// Repairs only genuinely missing assignments; the v0.8 upgrade owns legacy conversion.
+// Repairs only genuinely missing assignments; memoized per database instance after initial check
+// unless songs exist without assignments.
 export const ensureLocalLibraryInitialized = async (): Promise<void> => {
-  const [songs, assignments] = await Promise.all([
-    appDatabase.local_music.toArray(),
-    appDatabase.local_library_assignments.toArray(),
-  ]);
-  const assignedIds = new Set(assignments.map(assignment => assignment.songId));
-  const missing = songs.filter(song => !assignedIds.has(song.id));
-  if (missing.length > 0) await assignImportedSongs(missing, { preserveNonImportAssignments: false });
+  if (initializedDatabaseRef === appDatabase) {
+    const [songCount, assignmentCount] = await Promise.all([
+      appDatabase.local_music.count(),
+      appDatabase.local_library_assignments.count(),
+    ]);
+    if (songCount <= assignmentCount) {
+      return;
+    }
+  }
+  if (initializationInFlight) {
+    return await initializationInFlight;
+  }
+  const run = (async () => {
+    const [songs, assignments] = await Promise.all([
+      appDatabase.local_music.toArray(),
+      appDatabase.local_library_assignments.toArray(),
+    ]);
+    const assignedIds = new Set(assignments.map(assignment => assignment.songId));
+    const missing = songs.filter(song => !assignedIds.has(song.id));
+    if (missing.length > 0) {
+      await assignImportedSongs(missing, { preserveNonImportAssignments: false });
+    }
+    initializedDatabaseRef = appDatabase;
+  })();
+  initializationInFlight = run;
+  try {
+    await run;
+  } finally {
+    if (initializationInFlight === run) {
+      initializationInFlight = null;
+    }
+  }
 };

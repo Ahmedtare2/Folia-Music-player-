@@ -1,4 +1,5 @@
-import { LyricData, LyricProviderSource, SongResult } from '../../types';
+import { hasFoliaAndroidBridge } from '../../services/android/foliaAndroidBridge';
+import { AmllDbPlatform, LyricData, LyricProviderSource, SongResult } from '../../types';
 import { getOnlineMusicProvider } from '../../services/onlineMusic/providerRegistry';
 import type { OnlineProviderId, ProviderLyricsResult } from '../../types/onlineMusic';
 import { fetchAmllDbLyrics, getAmllDbMusicIds } from './providers/amllDbProvider';
@@ -389,6 +390,25 @@ async function matchUnderArtist(
 
         const neteaseCandidate = await getBestCandidate('netease');
         if (!neteaseCandidate) {
+            if (hasFoliaAndroidBridge()) {
+                const directAmllCandidate = await getBestCandidate('amll');
+                if (directAmllCandidate) {
+                    const directProcessed = await getProcessed('amll', directAmllCandidate);
+                    if (directProcessed && hasRenderableLyrics(directProcessed.lyrics)) {
+                        const directMatch: AutoMatchBestLyricMatch = {
+                            lyrics: directProcessed.lyrics,
+                            source: 'amll',
+                            id: directAmllCandidate.id,
+                            song: directAmllCandidate,
+                            matchedLyricsProviderPlatform: (directProcessed as { matchedLyricsProviderPlatform?: AmllDbPlatform }).matchedLyricsProviderPlatform,
+                        };
+                        if (directMatch.lyrics.isWordByWord) {
+                            return directMatch;
+                        }
+                        lineByLineFallback ??= directMatch;
+                    }
+                }
+            }
             console.log('[autoMatchBestLyric] Skipping AMLLDB auto probe because no reliable NetEase candidate id was found.');
             return null;
         }

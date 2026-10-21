@@ -2,7 +2,7 @@ import md5 from 'blueimp-md5';
 import { OnlineProviderError } from '../../../types/onlineMusic';
 import { readProviderSessionValue, removeProviderSessionValue, writeProviderSessionValue } from '../providerStorage';
 import { getStoredRuntimeApiBase } from '../runtimeApiConfig';
-import { lyricProxyWebUrl, requestLyricProxyOnDesktop } from '../../lyricProxy';
+import { fetchThroughLyricRelay, lyricProxyWebUrl, requestLyricProxyOnDesktop } from '../../lyricProxy';
 import { withLoginRequestLimit } from '../login/loginRequestLimit';
 
 // src/services/onlineMusic/kugou/kugouTransport.ts
@@ -279,10 +279,7 @@ export const requestKugouAnonymousSearch = async (
 
     const targetUrl = new URL('http://complexsearch.kugou.com/v2/search/song');
     Object.entries(params).forEach(([key, value]) => targetUrl.searchParams.set(key, String(value)));
-    const requestUrl = typeof window !== 'undefined' && window.electron
-        ? targetUrl.toString()
-        : lyricProxyWebUrl(targetUrl.toString());
-    const response = await fetch(requestUrl, {
+    const response = await fetchThroughLyricRelay(targetUrl.toString(), {
         method: 'GET',
         credentials: 'omit',
         headers: {

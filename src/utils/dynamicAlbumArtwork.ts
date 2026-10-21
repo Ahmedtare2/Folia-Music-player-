@@ -171,3 +171,101 @@ export const resolveDynamicAlbumArtworkMotion = ({
         cycleDurationSec: 18,
     };
 };
+
+export const ALBUM_VIDEO_COVERS_STORAGE_KEY = 'folia_album_video_covers_v1';
+
+export const readStoredAlbumVideoCoversEnabled = (): boolean => {
+    try {
+        const storage = getStorage();
+        const raw = storage?.getItem(ALBUM_VIDEO_COVERS_STORAGE_KEY);
+        if (raw === null || raw === undefined) {
+            return true;
+        }
+        return raw !== 'false';
+    } catch {
+        return true;
+    }
+};
+
+export const writeStoredAlbumVideoCoversEnabled = (enabled: boolean): boolean => {
+    const normalized = Boolean(enabled);
+    try {
+        const storage = getStorage();
+        storage?.setItem(ALBUM_VIDEO_COVERS_STORAGE_KEY, normalized ? 'true' : 'false');
+    } catch {
+        // Ignore storage errors
+    }
+    return normalized;
+};
+
+export interface AlbumVideoStageStateInput {
+    albumVideoEnabled: boolean;
+    videoStreamUrl: string | null | undefined;
+    videoId?: string | null;
+    isPlaying: boolean;
+    isCoverScreenActive: boolean;
+    isPageVisible?: boolean;
+    prefersReducedMotion?: boolean;
+    videoWidth?: number;
+    videoHeight?: number;
+    viewportWidth?: number;
+    viewportHeight?: number;
+}
+
+export interface AlbumVideoStageState {
+    shouldShowVideo: boolean;
+    shouldPlayVideo: boolean;
+    videoKey: string | null;
+    scalingMode: 'cover-fill' | 'ambient-framed';
+}
+
+/**
+ * Resolves full-screen local album video playback, continuity key, battery/visibility pause,
+ * and aspect-ratio-aware scaling.
+ * - `videoKey` is keyed by the video identity (`videoId` or `videoStreamUrl`), NEVER by `songId`,
+ *   so switching between tracks on the same album keeps the `<video>` element playing continuously.
+ * - Uses `'ambient-framed'` when a wide landscape video (`aspect > 1.32`) is displayed on a portrait
+ *   viewport (`aspect < 0.85`) to fill the screen while avoiding harsh horizontal cropping.
+ */
+export const resolveAlbumVideoStageState = ({
+    albumVideoEnabled,
+    videoStreamUrl,
+    videoId,
+    isPlaying,
+    isCoverScreenActive,
+    isPageVisible = true,
+    prefersReducedMotion = false,
+    videoWidth = 0,
+    videoHeight = 0,
+    viewportWidth = 390,
+    viewportHeight = 844,
+}: AlbumVideoStageStateInput): AlbumVideoStageState => {
+    const hasVideo = Boolean(albumVideoEnabled && videoStreamUrl);
+    if (!hasVideo) {
+        return {
+            shouldShowVideo: false,
+            shouldPlayVideo: false,
+            videoKey: null,
+            scalingMode: 'cover-fill',
+        };
+    }
+
+    const shouldPlayVideo = Boolean(
+        isPlaying
+        && isCoverScreenActive
+        && isPageVisible
+        && !prefersReducedMotion
+    );
+
+    const videoAspect = videoWidth > 0 && videoHeight > 0 ? videoWidth / videoHeight : 1;
+    const viewportAspect = viewportWidth > 0 && viewportHeight > 0 ? viewportWidth / viewportHeight : 0.46;
+    const scalingMode: 'cover-fill' | 'ambient-framed' =
+        videoAspect > 1.32 && viewportAspect < 0.85 ? 'ambient-framed' : 'cover-fill';
+
+    return {
+        shouldShowVideo: true,
+        shouldPlayVideo,
+        videoKey: videoId || videoStreamUrl || null,
+        scalingMode,
+    };
+};

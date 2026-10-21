@@ -10,6 +10,14 @@ import { resolveExplicitFileTimedLyricFormat, type ExplicitFileTimedLyricFormat 
 import { applyMatchedMetadata } from './localLibraryCatalogService';
 import { buildLyricSearchQuery } from '../utils/lyrics/searchQuery';
 import { buildLocalSongLyricMatchContext, shouldRefreshLocalSongLyricsFromMetadata } from '../utils/lyrics/localSongMatchContext';
+import {
+    clearNegativeLyricMatchRecord,
+    hasKnownGoodWordByWordLocalLyric,
+    hydrateNegativeLyricMatchCache,
+    isSongOnAutomaticLyricMatchCooldown,
+    recordAutomaticLyricMatchFailure,
+    recordAutomaticLyricMatchSuccess,
+} from '../utils/lyrics/lyricAutoMatchState';
 import { buildImportedMetadataSnapshot } from '../utils/localSongMetadata';
 import { getLocalLibraryCatalogSnapshot } from './localLibraryEntityRepository';
 import { resolveLocalSongMetadata } from './playbackAdapters';
@@ -28,6 +36,7 @@ import { createFoliaIgnoreMatcher, isIgnoredByFoliaMatchers, type FoliaIgnoreMat
 import { getLocalLibraryAvailability } from './localLibraryAvailability';
 import { hasFoliaAndroidBridge } from './android/foliaAndroidBridge';
 import {
+    createAndroidSafFileHandle,
     createLightweightStatFile,
     ensureLoadedSafFile,
     invalidateAndroidSafTreeCache,
@@ -40,6 +49,7 @@ import { useLyricSettingsStore } from '../stores/useLyricSettingsStore';
 import { getLocalLyricFilePriority, isSameLocalLyricFormatOrder, normalizeLocalLyricFormatOrder, type LocalLyricFileFormat } from '../utils/lyrics/localLyricFormatOrder';
 import { readLyricFile } from '../utils/lyrics/lyricFileDecoding';
 import { isLocalFolderIgnored, normalizeLocalFolderPath, runLocalFolderMutation, setLocalFolderIgnored } from './localLibraryFolderIgnore';
+import { isAlbumVideoFileName, reconcileVideosForRootFolder, type VideoSnapshotFileDescriptor } from './localAlbumVideoService';
 
 
 type EmbeddedMetadata = EmbeddedMetadataResult;
@@ -423,6 +433,9 @@ function getSnapshotFileKind(fileName: string): LocalLibrarySnapshotFile['kind']
     if (isAudioFileName(fileName)) {
         return 'audio';
     }
+    if (isAlbumVideoFileName(fileName)) {
+        return 'video';
+    }
     return 'other';
 }
 
@@ -514,14 +527,25 @@ async function extractSafHandleEmbeddedMetadata(
     let preparedNativeCover: PreparedLocalCoverBlob | undefined;
     if (includeCover && nativeMeta?.cover) {
         try {
-            preparedNativeCover = (await prepareLocalCoverBlob(nativeMeta.cover)) ?? undefined;
+            if (nativeMeta.coverAssetId && /^sha256:[a-f0-9]{64}$/i.test(nativeMeta.coverAssetId)) {
+                stageLocalCoverAsset(nativeMeta.coverAssetId, nativeMeta.cover);
+                preparedNativeCover = { assetId: nativeMeta.coverAssetId, blob: nativeMeta.cover };
+            } else {
+                preparedNativeCover = (await prepareLocalCoverBlob(nativeMeta.cover)) ?? undefined;
+            }
         } catch (err) {
             console.warn(`[LocalMusic] Failed to prepare native cover thumbnail for ${stat.name}:`, err);
         }
     }
 
-    // Read only a bounded header slice for tag parsing (embedded lyrics, ReplayGain, multi-artist tags).
-    const needWorkerCover = includeCover && !preparedNativeCover;
+    // When native MediaMetadataRetriever succeeded, it already inspected the embedded picture;
+    // do not read a 1.5 MB cover slice into the JS worker for coverless tracks.
+    const nativeConfirmedNoCover = Boolean(
+        includeCover
+        && nativeMeta
+        && (nativeMeta.hasEmbeddedCover === false || !nativeMeta.cover)
+    );
+    const needWorkerCover = includeCover && !preparedNativeCover && !nativeConfirmedNoCover;
     let workerMeta: EmbeddedMetadata = {};
     try {
         const headerFile = await fileHandle.getMetadataFile({ includeCover: needWorkerCover });
@@ -534,6 +558,8 @@ async function extractSafHandleEmbeddedMetadata(
 
     const durationMs = workerMeta.duration
         || (nativeMeta?.durationMs && nativeMeta.durationMs > 0 ? Math.round(nativeMeta.durationMs) : undefined);
+    const resolvedCover = preparedNativeCover?.blob ?? workerMeta.cover;
+    const resolvedCoverAssetId = preparedNativeCover?.assetId ?? workerMeta.coverAssetId;
 
     const merged: EmbeddedMetadata = {
         ...workerMeta,
@@ -542,13 +568,18 @@ async function extractSafHandleEmbeddedMetadata(
         artists: workerMeta.artists?.length
             ? workerMeta.artists
             : (nativeMeta?.artist ? [nativeMeta.artist] : undefined),
+        albumArtist: workerMeta.albumArtist || nativeMeta?.albumArtist,
         album: workerMeta.album || nativeMeta?.album,
+        year: workerMeta.year ?? nativeMeta?.year,
+        genre: workerMeta.genre || nativeMeta?.genre,
+        codec: workerMeta.codec || nativeMeta?.codec,
         duration: durationMs,
         bitrate: workerMeta.bitrate || nativeMeta?.bitrate,
         trackNumber: workerMeta.trackNumber ?? nativeMeta?.trackNumber,
         discNumber: workerMeta.discNumber ?? nativeMeta?.discNumber,
-        cover: preparedNativeCover?.blob ?? workerMeta.cover,
-        coverAssetId: preparedNativeCover?.assetId ?? workerMeta.coverAssetId,
+        cover: resolvedCover,
+        coverAssetId: resolvedCoverAssetId,
+        hasEmbeddedCover: includeCover ? Boolean(resolvedCover && resolvedCoverAssetId) : undefined,
     };
 
     return {
@@ -911,11 +942,34 @@ async function collectImportDiffPlan(
 
         fileHandleMap.set(existingSong.id, traversedFile.handle);
         existingSong.fileHandle = traversedFile.handle;
+        if (isAndroidSafFileHandle(traversedFile.handle)) {
+            existingSong.safContentUri = traversedFile.handle.contentUri;
+            existingSong.safTreeUri = traversedFile.handle.treeUri;
+            existingSong.safDocumentId = traversedFile.handle.documentId;
+        }
         existingSong.fileSize = snapshotFile.size;
         existingSong.fileLastModified = snapshotFile.lastModified;
         existingSong.fileSignature = snapshotFile.signature;
         reusedSongs.push(existingSong);
     }
+
+    const discoveredVideos: VideoSnapshotFileDescriptor[] = [];
+    currentFiles.forEach((file) => {
+        if (file.kind !== 'video') return;
+        const traversalEntry = traversalResult.filesByPath.get(file.relativePath);
+        discoveredVideos.push({
+            name: file.name,
+            relativePath: file.relativePath,
+            folderName: getParentRelativePath(file.relativePath) || rootFolderName,
+            size: file.size,
+            lastModified: file.lastModified,
+            mimeType: traversalEntry?.file.type,
+            handle: traversalEntry?.handle,
+        });
+    });
+    void reconcileVideosForRootFolder(rootFolderName, discoveredVideos).catch(err => {
+        console.warn('[LocalMusic][Import] Failed to reconcile album videos in music folder:', err);
+    });
 
     return {
         changedEntries,
@@ -1055,10 +1109,28 @@ async function buildImportedSong(
             embeddedArtists: embeddedMetadata.artists,
             fallbackArtist: metadata.artist,
             embeddedAlbum: embeddedMetadata.album,
+            embeddedAlbumArtist: embeddedMetadata.albumArtist,
+            embeddedYear: embeddedMetadata.year,
+            embeddedGenre: embeddedMetadata.genre,
+            embeddedCodec: embeddedMetadata.codec,
         });
     const titleOrigin = existingSong?.titleOrigin || 'import';
+    const safFields = isAndroidSafFileHandle(fileHandle)
+        ? {
+            safContentUri: fileHandle.contentUri,
+            safTreeUri: fileHandle.treeUri,
+            safDocumentId: fileHandle.documentId,
+        }
+        : (preserveHydratedAudioMetadata
+            ? {
+                safContentUri: existingSong?.safContentUri,
+                safTreeUri: existingSong?.safTreeUri,
+                safDocumentId: existingSong?.safDocumentId,
+            }
+            : {});
     const localSong: LocalSong = {
         ...existingSong,
+        ...safFields,
         id: songId,
         fileName: file.name,
         filePath: entry.relativePath,
@@ -1067,15 +1139,20 @@ async function buildImportedSong(
         fileLastModified: file.lastModified,
         fileSignature: nextFileSignature,
         mimeType: file.type,
+        codec: preserveHydratedAudioMetadata ? existingSong?.codec : embeddedMetadata.codec,
         bitrate: preserveHydratedAudioMetadata ? (existingSong?.bitrate || 0) : (embeddedMetadata.bitrate || 0),
         addedAt: existingSong?.addedAt || Date.now(),
         title: titleOrigin === 'import' ? importedMetadata.title : existingSong?.title || importedMetadata.title,
         titleOrigin,
         importedMetadata,
         onlineMetadata: existingSong?.onlineMetadata,
+        albumArtist: preserveHydratedAudioMetadata ? existingSong?.albumArtist : embeddedMetadata.albumArtist,
         trackNumber: preserveHydratedAudioMetadata ? existingSong?.trackNumber : embeddedMetadata.trackNumber,
         discNumber: preserveHydratedAudioMetadata ? existingSong?.discNumber : embeddedMetadata.discNumber,
+        year: preserveHydratedAudioMetadata ? existingSong?.year : embeddedMetadata.year,
+        genre: preserveHydratedAudioMetadata ? existingSong?.genre : embeddedMetadata.genre,
         embeddedMetadataVersion: preserveHydratedAudioMetadata ? existingSong?.embeddedMetadataVersion : undefined,
+        hydrationFailedSignature: preserveHydratedAudioMetadata ? existingSong?.hydrationFailedSignature : undefined,
         localCoverAssetId: folderCover
             ? folderCover.assetId
             : (preserveHydratedAudioMetadata && existingSong?.localCoverSource === 'embedded'
@@ -1089,6 +1166,9 @@ async function buildImportedSong(
         localCoverNeedsAssetMigration: folderCover && !folderCover.assetId
             ? true
             : (preserveHydratedAudioMetadata ? existingSong?.localCoverNeedsAssetMigration : undefined),
+        hasNoEmbeddedCover: folderCover
+            ? false
+            : (preserveHydratedAudioMetadata ? existingSong?.hasNoEmbeddedCover : undefined),
         hasManualLyricSelection: existingSong?.hasManualLyricSelection ?? false,
         folderName: entry.folderName,
         hasLocalLyrics: !!localLyricsContent,
@@ -1192,7 +1272,13 @@ async function hydrateSongMetadata(song: LocalSong): Promise<{ song: LocalSong; 
         // Kept in step with fileSize: buildLocalSourceRevision reads both, so refreshing only one
         // makes every cached playback representation look stale and re-transcode on each play.
         song.fileLastModified = fileLastModified;
+        if (isAndroidSafFileHandle(fileHandle)) {
+            song.safContentUri = fileHandle.contentUri;
+            song.safTreeUri = fileHandle.treeUri;
+            song.safDocumentId = fileHandle.documentId;
+        }
         song.mimeType = mimeType;
+        song.codec = embeddedMetadata.codec || song.codec;
         song.bitrate = embeddedMetadata.bitrate || song.bitrate || 0;
         const filenameMetadata = extractMetadataFromFilename(fileName);
         song.importedMetadata = buildImportedMetadataSnapshot({
@@ -1203,11 +1289,19 @@ async function hydrateSongMetadata(song: LocalSong): Promise<{ song: LocalSong; 
             embeddedArtists: embeddedMetadata.artists,
             fallbackArtist: filenameMetadata.artist,
             embeddedAlbum: embeddedMetadata.album,
+            embeddedAlbumArtist: embeddedMetadata.albumArtist,
+            embeddedYear: embeddedMetadata.year,
+            embeddedGenre: embeddedMetadata.genre,
+            embeddedCodec: embeddedMetadata.codec,
         });
         if (song.titleOrigin === 'import') song.title = song.importedMetadata.title;
+        song.albumArtist = embeddedMetadata.albumArtist;
         song.trackNumber = embeddedMetadata.trackNumber;
         song.discNumber = embeddedMetadata.discNumber;
+        song.year = embeddedMetadata.year;
+        song.genre = embeddedMetadata.genre;
         song.embeddedMetadataVersion = EMBEDDED_METADATA_VERSION;
+        song.hydrationFailedSignature = undefined;
         song.hasEmbeddedLyrics = !!embeddedMetadata.lyrics;
         song.embeddedLyricsContent = embeddedMetadata.lyrics;
         song.hasEmbeddedTranslationLyrics = !!embeddedMetadata.translationLyrics;
@@ -1218,14 +1312,28 @@ async function hydrateSongMetadata(song: LocalSong): Promise<{ song: LocalSong; 
         song.replayGainAlbumGain = embeddedMetadata.replayGainAlbumGain;
         song.replayGainAlbumPeak = embeddedMetadata.replayGainAlbumPeak;
         if (includeCover) {
-            stageLocalCoverAsset(embeddedMetadata.coverAssetId, embeddedMetadata.cover);
-            song.localCoverAssetId = embeddedMetadata.coverAssetId;
-            song.localCoverSource = embeddedMetadata.cover ? 'embedded' : undefined;
-            song.localCoverNeedsAssetMigration = coverHydrationFailed ? true : undefined;
+            if (embeddedMetadata.cover && embeddedMetadata.coverAssetId) {
+                stageLocalCoverAsset(embeddedMetadata.coverAssetId, embeddedMetadata.cover);
+                song.localCoverAssetId = embeddedMetadata.coverAssetId;
+                song.localCoverSource = 'embedded';
+                song.hasNoEmbeddedCover = false;
+                song.localCoverNeedsAssetMigration = coverHydrationFailed ? true : undefined;
+                songsWithoutEmbeddedCover.delete(song.id);
+            } else if (!coverHydrationFailed) {
+                song.localCoverAssetId = undefined;
+                song.localCoverSource = undefined;
+                song.hasNoEmbeddedCover = true;
+                song.localCoverNeedsAssetMigration = undefined;
+                songsWithoutEmbeddedCover.set(song.id, `${fileSize}:${fileLastModified}`);
+            } else {
+                song.localCoverNeedsAssetMigration = true;
+            }
         }
         return { song, failed: false };
     } catch (error) {
         console.warn(`[LocalMusic][Import] Failed to hydrate metadata for ${song.fileName}:`, error);
+        song.hydrationFailedSignature = song.fileSignature || `${song.filePath}::${song.fileSize}::${song.fileLastModified ?? 0}`;
+        song.embeddedMetadataVersion = EMBEDDED_METADATA_VERSION;
         return { song, failed: true };
     }
 }
@@ -1771,13 +1879,30 @@ function isTitleMatch(localTitle: string, searchTitle: string): boolean {
 }
 
 // Match lyrics for a local song using search API, respecting the configured local/online priority.
-export async function matchLyrics(song: LocalSong): Promise<LyricData | null> {
+export async function matchLyrics(
+    song: LocalSong,
+    options: { forceRefresh?: boolean } = {},
+): Promise<LyricData | null> {
     if (typeof navigator !== 'undefined' && navigator.onLine === false) {
         return null;
     }
+    await hydrateNegativeLyricMatchCache();
+    if (options.forceRefresh) {
+        await clearNegativeLyricMatchRecord(song.id);
+    }
     // 用户标记的纯音乐不再自动匹配；与在线判定的纯音乐一样，连带的封面自动匹配也跳过。
     // 下面每次写回都带 skipIfMarkedPureMusic：匹配途中才标上的，写回时在事务里按库里的最新记录放弃。
-    if (song.markedPureMusic || (song.matchedIsPureMusic && !shouldRefreshLocalSongLyricsFromMetadata(song))) {
+    if (song.markedPureMusic || (song.matchedIsPureMusic && !options.forceRefresh && !shouldRefreshLocalSongLyricsFromMetadata(song))) {
+        return null;
+    }
+    if (
+        !options.forceRefresh
+        && song.hasManualLyricSelection
+        && Boolean(song.hasLocalLyrics || song.hasEmbeddedLyrics || song.matchedLyrics)
+    ) {
+        return song.matchedLyrics ?? null;
+    }
+    if (!options.forceRefresh && isSongOnAutomaticLyricMatchCooldown(song) && !shouldRefreshLocalSongLyricsFromMetadata(song)) {
         return null;
     }
     try {
@@ -1792,14 +1917,14 @@ export async function matchLyrics(song: LocalSong): Promise<LyricData | null> {
             (song.hasLocalLyrics && song.localLyricsContent)
             || (song.hasEmbeddedLyrics && song.embeddedLyricsContent)
         );
-  const settingsLyricSettings = useLyricSettingsStore.getState();
+        const settingsLyricSettings = useLyricSettingsStore.getState();
         const onlineFirst = settingsLyricSettings.localLyricsPriority === 'online';
 
         console.log(`[LocalMusic] Searching lyrics for: "${searchQuery}"`);
 
         // A selected GridView metadata identity is authoritative and must not be replaced by lyric fallback metadata.
-        if (!hasLocalOrEmbeddedLyrics || onlineFirst) {
-            const shouldUseBestLyric = settingsLyricSettings.autoUseBestLyric;
+        if (!hasLocalOrEmbeddedLyrics || onlineFirst || options.forceRefresh) {
+            const shouldUseBestLyric = settingsLyricSettings.autoUseBestLyric || Boolean(options.forceRefresh);
             if (shouldUseBestLyric || matchContext.metadataCandidate) {
                 const bestMatch = await autoMatchBestLyric(
                     matchContext.title,
@@ -1818,16 +1943,28 @@ export async function matchLyrics(song: LocalSong): Promise<LyricData | null> {
                     song.matchedLyrics = undefined;
                     song.matchedLyricsSongId = bestMatch.id ?? matchContext.metadataCandidate?.songId;
                     song.matchedLyricsSource = bestMatch.source ?? matchContext.metadataCandidate?.source;
+                    await recordAutomaticLyricMatchSuccess(song);
                     await applyMatchedMetadata(song.id, {}, { lyricsOnly: true, songPatch: song, skipIfMarkedPureMusic: true });
                     return null;
                 }
 
                 if (bestMatch && 'lyrics' in bestMatch) {
+                    // Never silently replace a known-good local word-by-word/TTML lyric with an inferior line-by-line online match.
+                    if (
+                        !options.forceRefresh
+                        && hasLocalOrEmbeddedLyrics
+                        && hasKnownGoodWordByWordLocalLyric(song)
+                        && !bestMatch.lyrics.isWordByWord
+                    ) {
+                        await recordAutomaticLyricMatchSuccess(song);
+                        return null;
+                    }
                     song.matchedLyricsSongId = bestMatch.id;
                     song.matchedLyricsSource = bestMatch.source;
                     song.matchedLyricsProviderPlatform = bestMatch.matchedLyricsProviderPlatform;
                     song.matchedLyrics = bestMatch.lyrics;
                     song.matchedIsPureMusic = false;
+                    await recordAutomaticLyricMatchSuccess(song);
 
                     if (matchContext.metadataCandidate) {
                         await applyMatchedMetadata(song.id, {}, { lyricsOnly: true, songPatch: song, skipIfMarkedPureMusic: true });
@@ -1868,10 +2005,16 @@ export async function matchLyrics(song: LocalSong): Promise<LyricData | null> {
         }
 
         // Search on Netease
-        const searchPage = await getOnlineMusicProvider('netease')?.search?.searchSongs(searchQuery, 50, 0);
+        let searchPage: { items?: SongResult[] } | undefined;
+        try {
+            searchPage = await getOnlineMusicProvider('netease')?.search?.searchSongs(searchQuery, 50, 0);
+        } catch (catalogSearchError) {
+            console.warn('[LocalMusic] Secondary catalog search unavailable:', catalogSearchError);
+        }
 
         if (!searchPage?.items?.length) {
             console.warn(`[LocalMusic] No search results for: "${searchQuery}"`);
+            await recordAutomaticLyricMatchFailure(song);
             return null;
         }
 
@@ -1882,6 +2025,7 @@ export async function matchLyrics(song: LocalSong): Promise<LyricData | null> {
         // If no exact title match found, return null to trigger manual selection
         if (!matchedSong) {
             console.log(`[LocalMusic] No exact title match found for: "${localTitle}". Manual selection required.`);
+            await recordAutomaticLyricMatchFailure(song);
             return null;
         }
 
@@ -1913,12 +2057,16 @@ export async function matchLyrics(song: LocalSong): Promise<LyricData | null> {
 
         // Fetch lyrics (only when NO local lyrics)
         const processed = await getOnlineMusicProvider('netease')?.lyrics?.getLyrics(matchedSong);
-        if (!processed) return null;
+        if (!processed) {
+            await recordAutomaticLyricMatchFailure(song);
+            return null;
+        }
 
         song.matchedLyricsSongId = matchedSong.id;
         song.matchedLyricsSource = 'netease';
         song.matchedLyrics = processed.lyrics || undefined;
         song.matchedIsPureMusic = processed.isPureMusic;
+        await recordAutomaticLyricMatchSuccess(song);
 
         if (matchContext.metadataCandidate) {
             await applyMatchedMetadata(song.id, {}, { lyricsOnly: true, songPatch: song, skipIfMarkedPureMusic: true });
@@ -2011,7 +2159,16 @@ async function recoverFileHandleFromPersistedDirectory(song: LocalSong): Promise
         const recoveredHandle = await resolveFileHandleFromDirHandle(rootDirHandle, relativePathFromRoot);
         fileHandleMap.set(song.id, recoveredHandle);
         song.fileHandle = recoveredHandle;
-        await saveLocalSong(song);
+        if (isAndroidSafFileHandle(recoveredHandle)) {
+            const uriChanged = song.safContentUri !== recoveredHandle.contentUri
+                || song.safTreeUri !== recoveredHandle.treeUri;
+            song.safContentUri = recoveredHandle.contentUri;
+            song.safTreeUri = recoveredHandle.treeUri;
+            song.safDocumentId = recoveredHandle.documentId;
+            if (uriChanged) {
+                await saveLocalSong(song);
+            }
+        }
         return recoveredHandle;
     } catch (error) {
         console.warn(`[LocalMusic] Failed to recover file handle for ${song.filePath}:`, error);
@@ -2029,6 +2186,26 @@ async function getAccessibleFileHandle(song: LocalSong): Promise<FileSystemFileH
 
     if (fileHandle) {
         return fileHandle;
+    }
+
+    // Fast O(1) reconstruction from persisted Android SAF document URI when available.
+    if (song.safContentUri && song.safTreeUri && hasFoliaAndroidBridge()) {
+        const directHandle = createAndroidSafFileHandle(
+            {
+                name: song.fileName,
+                relativePath: song.filePath,
+                kind: 'file',
+                documentId: song.safDocumentId || song.safContentUri,
+                contentUri: song.safContentUri,
+                mimeType: song.mimeType,
+                size: song.fileSize,
+                lastModified: song.fileLastModified || 0,
+            },
+            song.safTreeUri,
+        );
+        fileHandleMap.set(song.id, directHandle);
+        song.fileHandle = directHandle;
+        return directHandle;
     }
 
     return await recoverFileHandleFromPersistedDirectory(song);
@@ -2158,6 +2335,7 @@ async function extractAndPersistSongCover(
     }
     if (!metadata.cover || !metadata.coverAssetId) {
         songsWithoutEmbeddedCover.set(song.id, fileRevision);
+        song.hasNoEmbeddedCover = true;
         return song;
     }
     songsWithoutEmbeddedCover.delete(song.id);
@@ -2167,6 +2345,7 @@ async function extractAndPersistSongCover(
         ...song,
         localCoverAssetId: metadata.coverAssetId,
         localCoverSource: 'embedded',
+        hasNoEmbeddedCover: false,
         fileHandle,
     };
     Object.assign(song, updatedSong);
@@ -2177,6 +2356,7 @@ async function extractAndPersistSongCover(
 export async function ensureLocalSongCoverAsset(song: LocalSong): Promise<LocalSong> {
     if (song.localCoverAssetId && await hasLocalCoverBinary(song.localCoverAssetId)) return song;
     if (song.localCoverSource === 'folder') return song;
+    if (song.hasNoEmbeddedCover && !song.localCoverNeedsAssetMigration) return song;
 
     if (!localCoverAssetRequestMap.has(song.id)) {
         localCoverAssetRequestMap.set(song.id, (async () => {

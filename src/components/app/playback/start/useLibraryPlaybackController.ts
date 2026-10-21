@@ -49,6 +49,7 @@ import { isSharedLocalCoverObjectUrl } from '../../../../services/localCoverRunt
 import { applyMatchedMetadata } from '../../../../services/localLibraryCatalogService';
 import { setLocalSongPureMusicMark } from '../../../../services/localSongMatchSelectionService';
 import { buildLocalSongLyricMatchContext, shouldRefreshLocalSongLyricsFromMetadata, shouldRunLocalSongAutomaticMatch } from '../../../../utils/lyrics/localSongMatchContext';
+import { clearNegativeLyricMatchRecord, recordAutomaticLyricMatchSuccess } from '../../../../utils/lyrics/lyricAutoMatchState';
 import { getLocalLibraryCatalogSnapshot } from '../../../../services/localLibraryEntityRepository';
 import { setStatusMessage as setStatusMsg } from '../../../../stores/useStatusMessageStore';
 import { useLyricSettingsStore } from '../../../../stores/useLyricSettingsStore';
@@ -472,7 +473,7 @@ export function useLibraryPlaybackController({
             && (!localSong.matchedLyrics && !localSong.matchedIsPureMusic
                 || shouldRefreshLocalSongLyricsFromMetadata(localSong))
         );
-        const needsCoverMatch = !hasLocalSongCover(localSong) && !localSong.onlineMetadata?.coverUrl;
+        const needsCoverMatch = !hasLocalSongCover(localSong) && !localSong.onlineMetadata?.coverUrl && !localSong.matchedLyrics && !localSong.matchedIsPureMusic;
 
         // 标记为纯音乐的歌 matchLyrics 整个不做（封面也是），这里就别提示「正在匹配歌词和封面」。
         if ((typeof navigator === 'undefined' || navigator.onLine !== false) && !localSong.markedPureMusic && (needsLyricsMatch || needsCoverMatch) && shouldRunLocalSongAutomaticMatch(localSong)) {
@@ -485,7 +486,14 @@ export function useLibraryPlaybackController({
             }
             // 只把这一首的最新记录换进 localSongs。以前这里整表 loadLocalSongs，换掉了预热正在写的那批对象，
             // 预热结果因此到不了下一次切歌；整表替换还会让依赖 localSongs 的曲库视图跟着全量重算。
-            const found = typeof getLocalSong === 'function' ? await getLocalSong(localSong.id) : (await getLocalSongs()).find(s => s.id === localSong.id);
+            let found: LocalSong | undefined;
+            try {
+                found = typeof getLocalSong === 'function'
+                    ? await getLocalSong(localSong.id)
+                    : (await getLocalSongs()).find(s => s.id === localSong.id);
+            } catch {
+                found = (await getLocalSongs()).find(s => s.id === localSong.id);
+            }
             if (found) {
                 updatedLocalSong = found;
                 patchLocalSongsInState([found]);
@@ -596,7 +604,7 @@ export function useLibraryPlaybackController({
             && (!localSong.matchedLyrics && !localSong.matchedIsPureMusic
                 || shouldRefreshLocalSongLyricsFromMetadata(localSong))
         );
-        const needsCoverMatch = !hasLocalSongCover(localSong) && !localSong.onlineMetadata?.coverUrl;
+        const needsCoverMatch = !hasLocalSongCover(localSong) && !localSong.onlineMetadata?.coverUrl && !localSong.matchedLyrics && !localSong.matchedIsPureMusic;
         if ((typeof navigator === 'undefined' || navigator.onLine !== false) && !localSong.markedPureMusic && (needsLyricsMatch || needsCoverMatch) && shouldRunLocalSongAutomaticMatch(localSong)) {
             try {
                 const { matchLyrics } = await import('../../../../services/localMusicService');
@@ -636,7 +644,13 @@ export function useLibraryPlaybackController({
                 // 预热结果必须回到 localSongs：队列与预热都从这里取记录，拿到旧快照就会重新提取封面、重新联网匹配。
                 // 等三首都做完才回写，此时才从库里读：每首做完就读的话，等后面几首联网匹配的这几秒里，
                 // 用户的改动或切到这首后的匹配写回会被这份更早的读覆盖回去。攒齐一次性回写，曲库视图只重算一次。
-                const records = await Promise.all(touchedSongIds.map(songId => getLocalSong(songId)));
+                const records = await Promise.all(touchedSongIds.map(async songId => {
+                    try {
+                        return typeof getLocalSong === 'function' ? await getLocalSong(songId) : undefined;
+                    } catch {
+                        return undefined;
+                    }
+                }));
                 patchLocalSongsInState(records.filter((record): record is LocalSong => Boolean(record)));
             })();
         }, 1000);
@@ -1407,6 +1421,7 @@ export function useLibraryPlaybackController({
                 // 读库里的最新记录：下面整条写回，不能带着 localSongs 里过期的字段（例如刚打的纯音乐标记）。
                 const localData = await resolveLatestLocalSongRecord(currentSong);
                 if (!localData) return false;
+                await clearNegativeLyricMatchRecord(localData.id);
                 const catalog = await getLocalLibraryCatalogSnapshot();
                 const resolvedMetadata = resolveLocalSongMetadata(localData.id, catalog);
                 const matchContext = buildLocalSongLyricMatchContext(localData, {
@@ -1439,6 +1454,7 @@ export function useLibraryPlaybackController({
                     markedPureMusic: undefined,
                     lyricsSource: 'online',
                 };
+                await recordAutomaticLyricMatchSuccess(updatedLocalSong);
                 await applyMatchedMetadata(localData.id, {}, {
                     lyricsOnly: true,
                     songPatch: updatedLocalSong,

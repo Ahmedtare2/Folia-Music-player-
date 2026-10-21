@@ -30,6 +30,10 @@ export interface LocalSongImportedMetadata {
   titleSource: 'embedded' | 'filename';
   artistNames: string[];
   albumName?: string;
+  albumArtist?: string;
+  year?: number;
+  genre?: string;
+  codec?: string;
 }
 
 export interface LocalSongOnlineMetadata {
@@ -63,4 +67,3 @@ export interface LocalLibrarySplitTarget {
 }
 
 export type LocalLibraryArtistAssignmentMode = 'append' | 'replace';
-

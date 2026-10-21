@@ -32,6 +32,14 @@ import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.zip.GZIPInputStream;
+import java.util.zip.InflaterInputStream;
 import java.lang.ref.WeakReference;
 import java.security.MessageDigest;
 import java.util.ArrayDeque;
@@ -53,6 +61,9 @@ import org.json.JSONObject;
 @CapacitorPlugin(name = "FoliaNativeBridge")
 public class FoliaNativeBridgePlugin extends Plugin {
     private static WeakReference<FoliaNativeBridgePlugin> activeInstanceRef = new WeakReference<>(null);
+    // Dedicated fast executor for foreground playback readability checks & path resolution so
+    // background library scanning or metadata hydration never blocks track switching.
+    private final ExecutorService playbackExecutor = Executors.newFixedThreadPool(2);
     private final ExecutorService ioExecutor = Executors.newFixedThreadPool(4);
 
     private static final String[] TREE_PROJECTION = new String[] {
@@ -78,6 +89,143 @@ public class FoliaNativeBridgePlugin extends Plugin {
             data.put("seekTimeMs", seekTimeMs);
         }
         instance.notifyListeners("mediaAction", data, true);
+    }
+
+
+    private static boolean isAllowedLyricProxyHost(@Nullable String hostname) {
+        if (hostname == null || hostname.isEmpty()) return false;
+        String host = hostname.toLowerCase(Locale.ROOT);
+        return "qq.com".equals(host)
+            || host.endsWith(".qq.com")
+            || "y.gtimg.cn".equals(host)
+            || "kugou.com".equals(host)
+            || host.endsWith(".kugou.com")
+            || "kgimg.com".equals(host)
+            || host.endsWith(".kgimg.com")
+            || "api.amll.dev".equals(host)
+            || "163.com".equals(host)
+            || host.endsWith(".163.com")
+            || "lrclib.net".equals(host);
+    }
+
+    /**
+     * Native HTTP/HTTPS relay for online lyric providers (matching Electron's proxyLyricRequest in
+     * electron/main.cjs) so Android WebView can query QQ Music, KuGou, AMLL TTML DB, and NetEase
+     * lyric endpoints without browser CORS or HTTP mixed-content blocks.
+     */
+    @PluginMethod
+    public void fetchLyricProxy(PluginCall call) {
+        final String targetUrlStr = call.getString("url");
+        if (targetUrlStr == null || targetUrlStr.trim().isEmpty()) {
+            call.reject("Missing url parameter");
+            return;
+        }
+        final String method = call.getString("method", "GET");
+        final JSObject reqHeaders = call.getObject("headers", new JSObject());
+        final String reqBody = call.getString("body");
+        final Integer timeoutParam = call.getInt("timeoutMs", 8000);
+        final int timeoutMs = Math.max(1500, Math.min(15000, timeoutParam != null ? timeoutParam : 8000));
+
+        ioExecutor.execute(() -> {
+            HttpURLConnection conn = null;
+            try {
+                URL targetUrl = new URL(targetUrlStr.trim());
+                String host = targetUrl.getHost();
+                if (!isAllowedLyricProxyHost(host)) {
+                    call.reject("Forbidden lyric proxy host: " + host);
+                    return;
+                }
+
+                conn = (HttpURLConnection) targetUrl.openConnection();
+                conn.setInstanceFollowRedirects(true);
+                conn.setConnectTimeout(timeoutMs);
+                conn.setReadTimeout(timeoutMs);
+                String upperMethod = method != null ? method.toUpperCase(Locale.ROOT) : "GET";
+                conn.setRequestMethod(upperMethod);
+
+                if (reqHeaders != null) {
+                    Iterator<String> keys = reqHeaders.keys();
+                    while (keys.hasNext()) {
+                        String key = keys.next();
+                        if (key == null) continue;
+                        String lowerKey = key.toLowerCase(Locale.ROOT);
+                        if ("host".equals(lowerKey)
+                            || "connection".equals(lowerKey)
+                            || "content-length".equals(lowerKey)
+                            || "origin".equals(lowerKey)
+                            || "referer".equals(lowerKey)) {
+                            continue;
+                        }
+                        String val = reqHeaders.getString(key);
+                        if (val != null) {
+                            conn.setRequestProperty(key, val);
+                        }
+                    }
+                }
+                if (host != null && (host.equals("163.com") || host.endsWith(".163.com"))) {
+                    conn.setRequestProperty("Referer", "https://music.163.com");
+                }
+
+                if (reqBody != null && !reqBody.isEmpty() && ("POST".equals(upperMethod) || "PUT".equals(upperMethod))) {
+                    conn.setDoOutput(true);
+                    byte[] bodyBytes = reqBody.getBytes(StandardCharsets.UTF_8);
+                    conn.setFixedLengthStreamingMode(bodyBytes.length);
+                    try (OutputStream os = conn.getOutputStream()) {
+                        os.write(bodyBytes);
+                        os.flush();
+                    }
+                }
+
+                int status = conn.getResponseCode();
+                String statusText = conn.getResponseMessage();
+                InputStream rawStream = status >= 400 ? conn.getErrorStream() : conn.getInputStream();
+                String bodyText = "";
+                if (rawStream != null) {
+                    String contentEncoding = conn.getContentEncoding();
+                    InputStream decodedStream = rawStream;
+                    if (contentEncoding != null) {
+                        String lowerEnc = contentEncoding.toLowerCase(Locale.ROOT);
+                        if (lowerEnc.contains("gzip")) {
+                            decodedStream = new GZIPInputStream(rawStream);
+                        } else if (lowerEnc.contains("deflate")) {
+                            decodedStream = new InflaterInputStream(rawStream);
+                        }
+                    }
+                    try (InputStream in = decodedStream; ByteArrayOutputStream baos = new ByteArrayOutputStream(16384)) {
+                        byte[] buf = new byte[8192];
+                        int read;
+                        while ((read = in.read(buf)) != -1) {
+                            baos.write(buf, 0, read);
+                        }
+                        bodyText = new String(baos.toByteArray(), StandardCharsets.UTF_8);
+                    }
+                }
+
+                JSObject respHeaders = new JSObject();
+                Map<String, List<String>> headerFields = conn.getHeaderFields();
+                if (headerFields != null) {
+                    for (Map.Entry<String, List<String>> entry : headerFields.entrySet()) {
+                        if (entry.getKey() != null && entry.getValue() != null && !entry.getValue().isEmpty()) {
+                            respHeaders.put(entry.getKey().toLowerCase(Locale.ROOT), entry.getValue().get(0));
+                        }
+                    }
+                }
+
+                JSObject result = new JSObject();
+                result.put("ok", status >= 200 && status < 300);
+                result.put("status", status);
+                result.put("statusText", statusText != null ? statusText : "");
+                result.put("headers", respHeaders);
+                result.put("bodyText", bodyText);
+                call.resolve(result);
+            } catch (Exception e) {
+                call.reject("Native lyric proxy request failed: " + e.getMessage(), e);
+            } finally {
+                if (conn != null) {
+                    conn.disconnect();
+                }
+            }
+        });
     }
 
     @PluginMethod
@@ -214,7 +362,8 @@ public class FoliaNativeBridgePlugin extends Plugin {
     public void pickAudioFiles(PluginCall call) {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("*/*");
+        String requestedMime = call.getString("mimeType", "*/*");
+        intent.setType(requestedMime != null && !requestedMime.isEmpty() ? requestedMime : "*/*");
         intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         intent.addFlags(
             Intent.FLAG_GRANT_READ_URI_PERMISSION
@@ -399,7 +548,7 @@ public class FoliaNativeBridgePlugin extends Plugin {
         }
 
         final Context context = getContext();
-        ioExecutor.execute(() -> {
+        playbackExecutor.execute(() -> {
             try {
                 Uri treeUri = Uri.parse(rawTreeUri);
                 ContentResolver resolver = context.getContentResolver();
@@ -485,7 +634,7 @@ public class FoliaNativeBridgePlugin extends Plugin {
         }
 
         final Context context = getContext();
-        ioExecutor.execute(() -> {
+        playbackExecutor.execute(() -> {
             JSObject res = new JSObject();
             try {
                 Uri uri = Uri.parse(rawContentUri);
@@ -605,6 +754,9 @@ public class FoliaNativeBridgePlugin extends Plugin {
                 String bitrateStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE);
                 String trackStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CD_TRACK_NUMBER);
                 String discStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DISC_NUMBER);
+                String yearStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_YEAR);
+                String genreStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_GENRE);
+                String mimeStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE);
 
                 if (title != null && !title.trim().isEmpty()) res.put("title", title.trim());
                 if (artist != null && !artist.trim().isEmpty()) {
@@ -612,7 +764,12 @@ public class FoliaNativeBridgePlugin extends Plugin {
                 } else if (albumArtist != null && !albumArtist.trim().isEmpty()) {
                     res.put("artist", albumArtist.trim());
                 }
+                if (albumArtist != null && !albumArtist.trim().isEmpty()) {
+                    res.put("albumArtist", albumArtist.trim());
+                }
                 if (album != null && !album.trim().isEmpty()) res.put("album", album.trim());
+                if (genreStr != null && !genreStr.trim().isEmpty()) res.put("genre", genreStr.trim());
+                if (mimeStr != null && !mimeStr.trim().isEmpty()) res.put("codec", mimeStr.trim());
 
                 long durationMs = parseLeadingLong(durationStr, 0L);
                 if (durationMs > 0L) res.put("durationMs", durationMs);
@@ -626,15 +783,21 @@ public class FoliaNativeBridgePlugin extends Plugin {
                 int discNumber = (int) parseLeadingLong(discStr, 0L);
                 if (discNumber > 0) res.put("discNumber", discNumber);
 
+                int year = (int) parseLeadingLong(yearStr, 0L);
+                if (year > 0) res.put("year", year);
+
                 if (includeCover) {
                     byte[] rawArt = retriever.getEmbeddedPicture();
                     if (rawArt != null && rawArt.length > 0) {
+                        res.put("hasEmbeddedCover", true);
                         EncodedCoverResult coverResult = downscaleCoverIfNeeded(rawArt, maxCoverDimension);
                         if (coverResult != null) {
                             res.put("coverBase64", Base64.encodeToString(coverResult.bytes, Base64.NO_WRAP));
                             res.put("coverMimeType", coverResult.mimeType);
                             res.put("coverAssetId", sha256AssetId(coverResult.bytes));
                         }
+                    } else {
+                        res.put("hasEmbeddedCover", false);
                     }
                 }
 
@@ -811,7 +974,13 @@ public class FoliaNativeBridgePlugin extends Plugin {
             || lower.endsWith(".qrc")
             || lower.endsWith(".yrc")
             || lower.endsWith(".krc")
-            || lower.endsWith(".fia");
+            || lower.endsWith(".fia")
+            || lower.endsWith(".mp4")
+            || lower.endsWith(".webm")
+            || lower.endsWith(".mkv")
+            || lower.endsWith(".m4v")
+            || lower.endsWith(".mov")
+            || lower.endsWith(".3gp");
     }
 
     private static void persistReadPermissionQuietly(ContentResolver resolver, Uri uri) {

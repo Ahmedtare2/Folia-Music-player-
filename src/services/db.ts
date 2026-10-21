@@ -7,7 +7,10 @@ import {
   deleteSongAssignment,
   deleteSongAssignments,
   ensureLocalLibraryInitialized,
+  resetLocalLibraryInitializationCache,
 } from './localLibraryCatalogService';
+import { clearParsedLocalLyricCache } from '../utils/lyrics/localSongLyrics';
+import { resetLocalAlbumVideoCatalogForTests } from './localAlbumVideoService';
 import {
   clearBrowserCacheByCategory,
   clearCacheTables,
@@ -249,6 +252,9 @@ export const clearAllData = async (): Promise<void> => {
     await cancelLocalCoverAssetMigration();
     await clearLocalCoverBinaries();
     resetLocalCoverAssetRuntime();
+    resetLocalLibraryInitializationCache();
+    clearParsedLocalLyricCache();
+    resetLocalAlbumVideoCatalogForTests();
     await appDatabase.delete();
     await appDatabase.open();
   } catch (error) {

@@ -21,7 +21,7 @@ import { deleteUnreferencedLocalCoverAssets } from './localCoverAssetService';
 // src/services/localLibraryCatalogService.ts
 // Applies every song/entity/assignment mutation in a single Dexie transaction.
 
-export { assignImportedSongs, ensureLocalLibraryInitialized } from './localLibraryImportCatalog';
+export { assignImportedSongs, ensureLocalLibraryInitialized, resetLocalLibraryInitializationCache } from './localLibraryImportCatalog';
 export {
   mergeEntities,
   moveEntityMembersToExistingEntity,

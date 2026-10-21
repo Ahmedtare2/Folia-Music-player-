@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import {
     ChevronDown,
     Disc3,
+    Film,
     FileText,
     FileUp,
     Grid,
@@ -41,6 +42,22 @@ import { isLocalCoverAssetUrl } from '../../services/localCoverAssetUrl';
 import { VISUALIZER_REGISTRY, getVisualizerModeLabel } from '../visualizer/registry';
 import { useAudioSettingsStore } from '../../stores/useAudioSettingsStore';
 import { useDynamicAlbumArtworkStore } from '../../stores/useDynamicAlbumArtworkStore';
+import { ANDROID_VISIBILITY_EVENT } from '../../services/android/foliaAndroidBridge';
+import {
+    detectPrefersReducedMotion,
+    resolveAlbumVideoStageState,
+} from '../../utils/dynamicAlbumArtwork';
+import {
+    LOCAL_ALBUM_VIDEOS_UPDATED_EVENT,
+    type LocalAlbumVideoEntry,
+    assignVideoToAlbum,
+    getRegisteredAlbumVideos,
+    importAlbumVideoFolder,
+    registerStandaloneAlbumVideoFile,
+    resetAlbumVideoAssociation,
+    resolveAlbumVideoForTrack,
+    scoreAlbumVideoCandidates,
+} from '../../services/localAlbumVideoService';
 import { useSystemBarSettingsStore } from '../../stores/useSystemBarSettingsStore';
 import { useShallow } from 'zustand/react/shallow';
 import DynamicAlbumCoverStage from './DynamicAlbumCoverStage';
@@ -118,7 +135,10 @@ interface MobileNowPlayingSheetProps {
     currentSong: SongResult | null;
     artistName: string;
     albumName: string;
+    folderName?: string;
     coverUrl: string | null;
+    albumVideoUrl?: string | null;
+    albumVideoId?: string | null;
     playerState: PlayerState;
     currentTime: MotionValue<number>;
     lyricCurrentTime: MotionValue<number>;
@@ -360,7 +380,10 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
     currentSong,
     artistName,
     albumName,
+    folderName,
     coverUrl,
+    albumVideoUrl: explicitAlbumVideoUrl,
+    albumVideoId: explicitAlbumVideoId,
     playerState,
     currentTime,
     lyricCurrentTime,
@@ -404,14 +427,18 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
     const isEqualizerEnabled = useAudioSettingsStore(state => state.audioEqualizerSettings.enabled);
     const openDesktopEqualizer = useAudioSettingsStore(state => state.openAudioEqualizer);
     const {
+        albumVideoEnabled,
         dynamicArtworkEnabled,
         dynamicArtworkIntensity,
+        setAlbumVideoEnabled,
         setDynamicArtworkEnabled,
         setDynamicArtworkIntensity,
     } = useDynamicAlbumArtworkStore(
         useShallow(state => ({
+            albumVideoEnabled: state.albumVideoEnabled,
             dynamicArtworkEnabled: state.enabled,
             dynamicArtworkIntensity: state.intensity,
+            setAlbumVideoEnabled: state.setAlbumVideoEnabled,
             setDynamicArtworkEnabled: state.setDynamicAlbumArtworkEnabled,
             setDynamicArtworkIntensity: state.setDynamicAlbumArtworkIntensity,
         })),
@@ -444,6 +471,122 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
         return getCachedLocalCoverObjectUrl(coverUrl) ?? coverUrl;
     });
     const [coverLoadError, setCoverLoadError] = useState(false);
+    const albumVideoRef = useRef<HTMLVideoElement>(null);
+    const albumVideoFileInputRef = useRef<HTMLInputElement>(null);
+    const [resolvedAlbumVideo, setResolvedAlbumVideo] = useState<{
+        albumKey: string;
+        video: LocalAlbumVideoEntry | null;
+        streamUrl: string | null;
+        origin: 'auto' | 'manual' | 'none';
+        ambiguousCandidates: LocalAlbumVideoEntry[];
+    }>(() => {
+        if (explicitAlbumVideoUrl) {
+            return {
+                albumKey: albumName || 'explicit',
+                video: null,
+                streamUrl: explicitAlbumVideoUrl,
+                origin: 'manual',
+                ambiguousCandidates: [],
+            };
+        }
+        const syncScored = scoreAlbumVideoCandidates(albumName || '', artistName || undefined, folderName || undefined);
+        const top = syncScored[0];
+        if (top && top.video.safContentUri) {
+            const topScore = top.score;
+            const ambig = syncScored.filter(c => Math.abs(c.score - topScore) <= 6).map(c => c.video);
+            return {
+                albumKey: albumName || '',
+                video: top.video,
+                streamUrl: `https://localhost/__folia_saf/stream?uri=${encodeURIComponent(top.video.safContentUri)}&mime=${encodeURIComponent(top.video.mimeType)}&size=${top.video.fileSize}`,
+                origin: 'auto',
+                ambiguousCandidates: ambig.length > 1 ? ambig : [],
+            };
+        }
+        return {
+            albumKey: '',
+            video: null,
+            streamUrl: null,
+            origin: 'none',
+            ambiguousCandidates: [],
+        };
+    });
+    const [videoLoadError, setVideoLoadError] = useState(false);
+    const [isVideoFrameReady, setIsVideoFrameReady] = useState<boolean>(Boolean(explicitAlbumVideoUrl));
+    const [videoDimensions, setVideoDimensions] = useState<{ width: number; height: number }>({ width: 1080, height: 1080 });
+    const [isPageVisible, setIsPageVisible] = useState<boolean>(() => (
+        typeof document === 'undefined' ? true : document.visibilityState !== 'hidden'
+    ));
+    const [prefersReducedMotion, setPrefersReducedMotion] = useState<boolean>(detectPrefersReducedMotion);
+    const [videoCatalogTick, setVideoCatalogTick] = useState(0);
+    const lastReadyVideoKeyRef = useRef<string | null>(explicitAlbumVideoId || explicitAlbumVideoUrl || null);
+
+    useEffect(() => {
+        if (typeof window === 'undefined') return undefined;
+        const onVideosUpdated = () => setVideoCatalogTick(t => t + 1);
+        window.addEventListener(LOCAL_ALBUM_VIDEOS_UPDATED_EVENT, onVideosUpdated);
+        return () => window.removeEventListener(LOCAL_ALBUM_VIDEOS_UPDATED_EVENT, onVideosUpdated);
+    }, []);
+
+    useEffect(() => {
+        if (typeof window === 'undefined' || typeof document === 'undefined') return undefined;
+        const onVis = () => setIsPageVisible(document.visibilityState !== 'hidden');
+        const onNativeVis = (event: Event) => {
+            const detail = (event as CustomEvent<{ visible?: boolean }>).detail;
+            if (typeof detail?.visible === 'boolean') setIsPageVisible(detail.visible);
+        };
+        document.addEventListener('visibilitychange', onVis);
+        window.addEventListener(ANDROID_VISIBILITY_EVENT, onNativeVis);
+        let mql: MediaQueryList | null = null;
+        const onMotion = () => setPrefersReducedMotion(detectPrefersReducedMotion());
+        if (typeof window.matchMedia === 'function') {
+            mql = window.matchMedia('(prefers-reduced-motion: reduce)');
+            mql.addEventListener?.('change', onMotion);
+        }
+        return () => {
+            document.removeEventListener('visibilitychange', onVis);
+            window.removeEventListener(ANDROID_VISIBILITY_EVENT, onNativeVis);
+            mql?.removeEventListener?.('change', onMotion);
+        };
+    }, []);
+
+    useEffect(() => {
+        if (explicitAlbumVideoUrl !== undefined) {
+            const nextKey = explicitAlbumVideoId || explicitAlbumVideoUrl || null;
+            if (nextKey !== lastReadyVideoKeyRef.current) {
+                setVideoLoadError(false);
+                setIsVideoFrameReady(Boolean(explicitAlbumVideoUrl));
+                lastReadyVideoKeyRef.current = nextKey;
+            }
+            setResolvedAlbumVideo({
+                albumKey: albumName || 'explicit',
+                video: null,
+                streamUrl: explicitAlbumVideoUrl,
+                origin: 'manual',
+                ambiguousCandidates: [],
+            });
+            return undefined;
+        }
+        let cancelled = false;
+        void resolveAlbumVideoForTrack({
+            albumName,
+            artistName,
+            folderName,
+        }).then((res) => {
+            if (cancelled) return;
+            const nextKey = res.video?.id || res.streamUrl || null;
+            // If moving between tracks on the SAME album that share the same videoKey,
+            // keep isVideoFrameReady = true so the video continues playing without blinking!
+            if (nextKey !== lastReadyVideoKeyRef.current) {
+                setVideoLoadError(false);
+                setIsVideoFrameReady(false);
+                lastReadyVideoKeyRef.current = nextKey;
+            }
+            setResolvedAlbumVideo(res);
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [albumName, artistName, explicitAlbumVideoId, explicitAlbumVideoUrl, folderName, videoCatalogTick]);
 
     useEffect(() => {
         setCoverLoadError(false);
@@ -565,6 +708,53 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
         }
     }, [currentLineIndex, displayMode, isOpen]);
 
+    const effectiveAlbumVideoUrl = !videoLoadError
+        ? (explicitAlbumVideoUrl !== undefined ? explicitAlbumVideoUrl : resolvedAlbumVideo.streamUrl)
+        : null;
+    const effectiveAlbumVideoId = explicitAlbumVideoId ?? resolvedAlbumVideo.video?.id ?? null;
+
+    const videoStageState = useMemo(
+        () =>
+            resolveAlbumVideoStageState({
+                albumVideoEnabled,
+                videoStreamUrl: effectiveAlbumVideoUrl,
+                videoId: effectiveAlbumVideoId,
+                isPlaying: playerState === PlayerState.PLAYING,
+                isCoverScreenActive: isOpen && displayMode === 'cover',
+                isPageVisible,
+                prefersReducedMotion,
+                videoWidth: videoDimensions.width,
+                videoHeight: videoDimensions.height,
+                viewportWidth: typeof window !== 'undefined' ? window.innerWidth || 390 : 390,
+                viewportHeight: typeof window !== 'undefined' ? window.innerHeight || 844 : 844,
+            }),
+        [
+            albumVideoEnabled,
+            displayMode,
+            effectiveAlbumVideoId,
+            effectiveAlbumVideoUrl,
+            isOpen,
+            isPageVisible,
+            playerState,
+            prefersReducedMotion,
+            videoDimensions.height,
+            videoDimensions.width,
+        ],
+    );
+
+    useEffect(() => {
+        const videoEl = albumVideoRef.current;
+        if (!videoEl || !videoStageState.shouldShowVideo) return;
+        if (videoStageState.shouldPlayVideo) {
+            const playPromise = videoEl.play?.();
+            if (playPromise && typeof playPromise.catch === 'function') {
+                playPromise.catch(() => {});
+            }
+        } else {
+            videoEl.pause?.();
+        }
+    }, [videoStageState.shouldPlayVideo, videoStageState.shouldShowVideo, videoStageState.videoKey]);
+
     if (!isOpen || !currentSong) {
         return null;
     }
@@ -624,6 +814,97 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                 className="hidden"
                 onChange={handleLyricFileChosen}
             />
+            {/* Hidden file input for standalone local album video import (.mp4, .webm, .mkv, .m4v, .mov, .3gp) */}
+            <input
+                ref={albumVideoFileInputRef}
+                type="file"
+                accept=".mp4,.webm,.mkv,.m4v,.mov,.3gp,video/*"
+                className="hidden"
+                onChange={async (e) => {
+                    const file = e.target.files?.[0];
+                    e.target.value = '';
+                    if (!file) return;
+                    await registerStandaloneAlbumVideoFile(file, {
+                        albumName: albumName || currentSong.album?.name || currentSong.name,
+                        artistName,
+                        folderName,
+                    });
+                    setVideoCatalogTick(t => t + 1);
+                }}
+            />
+
+            {/* Full-Screen Local Album Video Cover Stage (when enabled and a matching local video exists in 'cover' mode):
+                - Keyed by video identity (NEVER songId) so adjacent songs on the same album keep the video playing seamlessly.
+                - Crossfades in only when the new album's video frame is ready so the previous album's video never flashes.
+                - Layers a restrained top vignette and lower-edge gradient/blur so track metadata and controls blend naturally. */}
+            {displayMode === 'cover' && videoStageState.shouldShowVideo && effectiveAlbumVideoUrl && (
+                <div
+                    data-testid="mobile-fullscreen-album-video-stage"
+                    data-video-key={videoStageState.videoKey || ''}
+                    data-scaling-mode={videoStageState.scalingMode}
+                    data-video-playing={videoStageState.shouldPlayVideo ? 'true' : 'false'}
+                    className="pointer-events-none absolute inset-0 z-0 overflow-hidden"
+                >
+                    {videoStageState.scalingMode === 'ambient-framed' && (
+                        <video
+                            data-testid="mobile-album-video-ambient-backdrop"
+                            src={effectiveAlbumVideoUrl}
+                            muted
+                            loop
+                            playsInline
+                            aria-hidden="true"
+                            className="absolute inset-0 h-full w-full scale-110 object-cover opacity-65 blur-2xl saturate-125"
+                        />
+                    )}
+                    <video
+                        ref={albumVideoRef}
+                        data-testid="mobile-album-video-element"
+                        data-video-key={videoStageState.videoKey || ''}
+                        src={effectiveAlbumVideoUrl}
+                        poster={effectiveCover || undefined}
+                        muted
+                        loop
+                        playsInline
+                        preload="auto"
+                        onLoadedMetadata={(e) => {
+                            const v = e.currentTarget;
+                            if (v.videoWidth > 0 && v.videoHeight > 0) {
+                                setVideoDimensions({ width: v.videoWidth, height: v.videoHeight });
+                            }
+                            setIsVideoFrameReady(true);
+                        }}
+                        onLoadedData={() => setIsVideoFrameReady(true)}
+                        onCanPlay={() => setIsVideoFrameReady(true)}
+                        onError={() => {
+                            setVideoLoadError(true);
+                            setIsVideoFrameReady(false);
+                        }}
+                        className={`h-full w-full transition-opacity duration-500 ${
+                            videoStageState.scalingMode === 'ambient-framed'
+                                ? 'relative z-10 object-contain'
+                                : 'object-cover object-center'
+                        } ${isVideoFrameReady ? 'opacity-100' : 'opacity-0'}`}
+                    />
+                    {/* Restrained Multi-Stop Readability Gradient & Lower-Edge Blend */}
+                    <div
+                        data-testid="album-video-readability-gradient"
+                        aria-hidden="true"
+                        className="absolute inset-0 z-20"
+                        style={{
+                            background: `
+                                linear-gradient(
+                                    180deg,
+                                    rgba(5, 5, 9, 0.46) 0%,
+                                    rgba(5, 5, 9, 0.08) 18%,
+                                    rgba(5, 5, 9, 0.04) 52%,
+                                    color-mix(in srgb, ${bgTint} 68%, rgba(5, 5, 9, 0.72)) 78%,
+                                    color-mix(in srgb, ${bgTint} 92%, #050508) 100%
+                                )
+                            `,
+                        }}
+                    />
+                </div>
+            )}
 
             {/* OLED Artwork-Derived Ambient Background Layer:
                 - Rich multi-stop atmospheric blend in 'cover' mode that transitions seamlessly into the lower controls
@@ -774,20 +1055,73 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
             <div className="relative z-10 flex min-h-0 min-w-0 flex-1 flex-col landscape:flex-row landscape:items-stretch landscape:gap-4 px-4 landscape:px-3 pt-1 pb-1">
                 {displayMode === 'cover' && (
                     <div className="flex min-h-0 min-w-0 flex-1 flex-col items-center justify-center gap-3 landscape:flex-row landscape:justify-around">
-                        {/* Apple Music-Inspired Dynamic Album Cover Stage (or Unmodified Static Cover when toggled Off) */}
-                        <DynamicAlbumCoverStage
-                            songId={currentSong.id}
-                            songTitle={currentSong.name}
-                            coverUrl={effectiveCover}
-                            isPlaying={isPlaying}
-                            isActive={isOpen && displayMode === 'cover'}
-                            enabled={dynamicArtworkEnabled}
-                            intensity={dynamicArtworkIntensity}
-                            theme={theme}
-                            onOpenLyrics={() => onChangeDisplayMode('lyrics')}
-                            onToggleEnabled={() => setDynamicArtworkEnabled(!dynamicArtworkEnabled)}
-                            onImageError={() => setCoverLoadError(true)}
-                        />
+                        {videoStageState.shouldShowVideo && effectiveAlbumVideoUrl ? (
+                            /* Full-Screen Local Album Video Interactive Hero Frame */
+                            <div
+                                data-testid="album-video-interactive-hero"
+                                onClick={() => onChangeDisplayMode('lyrics')}
+                                className="relative flex min-h-[220px] w-full max-w-md flex-1 cursor-pointer flex-col justify-between rounded-3xl p-3"
+                            >
+                                <div className="flex items-center justify-between gap-2">
+                                    <button
+                                        type="button"
+                                        data-testid="album-video-status-pill"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            setAlbumVideoEnabled(false);
+                                        }}
+                                        className="flex items-center gap-1.5 rounded-full border border-white/15 bg-black/55 px-3 py-1 text-[11px] font-semibold text-white/95 backdrop-blur-md active:scale-95 transition-transform"
+                                        title="Album Video Cover is active. Tap to switch to album artwork"
+                                    >
+                                        <Film size={12} style={{ color: accentColor }} />
+                                        <span>Album Video</span>
+                                    </button>
+
+                                    {resolvedAlbumVideo.ambiguousCandidates.length > 1 && (
+                                        <button
+                                            type="button"
+                                            data-testid="album-video-ambiguity-badge"
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                onChangeSubDrawer('lyrics-tools');
+                                            }}
+                                            className="flex items-center gap-1 rounded-full border border-amber-400/40 bg-black/65 px-2.5 py-1 text-[11px] font-medium text-amber-200 backdrop-blur-md active:scale-95"
+                                        >
+                                            <span>{resolvedAlbumVideo.ambiguousCandidates.length} videos match · Choose</span>
+                                        </button>
+                                    )}
+                                </div>
+
+                                <div className="flex justify-end">
+                                    <button
+                                        type="button"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            onChangeDisplayMode('lyrics');
+                                        }}
+                                        className="flex items-center gap-1.5 rounded-full border border-white/12 bg-black/55 px-3 py-1.5 text-[11px] font-medium text-white/90 backdrop-blur-md active:scale-95"
+                                    >
+                                        <Sparkles size={12} style={{ color: accentColor }} />
+                                        <span>Tap for Lyrics</span>
+                                    </button>
+                                </div>
+                            </div>
+                        ) : (
+                            /* Apple Music-Inspired Dynamic Album Cover Stage (or Unmodified Static Cover when toggled Off) */
+                            <DynamicAlbumCoverStage
+                                songId={currentSong.id}
+                                songTitle={currentSong.name}
+                                coverUrl={effectiveCover}
+                                isPlaying={isPlaying}
+                                isActive={isOpen && displayMode === 'cover'}
+                                enabled={dynamicArtworkEnabled}
+                                intensity={dynamicArtworkIntensity}
+                                theme={theme}
+                                onOpenLyrics={() => onChangeDisplayMode('lyrics')}
+                                onToggleEnabled={() => setDynamicArtworkEnabled(!dynamicArtworkEnabled)}
+                                onImageError={() => setCoverLoadError(true)}
+                            />
+                        )}
 
                         {/* Live 2-Line Synchronized Lyric Preview Pill blended with Artwork Gradient & Frosted Blur */}
                         <button
@@ -939,7 +1273,11 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                             key={`${line.startTime}-${index}`}
                                             data-lyric-index={index}
                                             dir={lineDir}
-                                            onClick={() => onLyricLineSeek(line.startTime)}
+                                            onClick={() => {
+                                                userScrollingLyricsUntilRef.current = 0;
+                                                updateScrubberDOM(line.startTime, true);
+                                                onLyricLineSeek(line.startTime);
+                                            }}
                                             className={`cursor-pointer rounded-2xl px-3 py-2 transition-all duration-300 ${
                                                 isDuetSecondAgent
                                                     ? (isRtl ? 'text-left' : 'text-right')
@@ -1170,15 +1508,34 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                 aria-label="Seek progress"
                                 onPointerDown={(e) => {
                                     isScrubbingRef.current = true;
-                                    e.currentTarget.setPointerCapture(e.pointerId);
+                                    try {
+                                        e.currentTarget.setPointerCapture(e.pointerId);
+                                    } catch {
+                                        // Ignore in synthetic test events
+                                    }
+                                }}
+                                onTouchStart={() => {
+                                    isScrubbingRef.current = true;
                                 }}
                                 onInput={(e) => {
                                     const val = Number(e.currentTarget.value);
                                     updateScrubberDOM(val, true);
+                                    const indices = Array.from(computeActiveLyricLineIndices(lyricLines, currentLineIndex, val)).sort((a, b) => a - b);
+                                    const key = indices.join(',');
+                                    setActiveLineSetKey(prev => (prev === key ? prev : key));
                                 }}
                                 onPointerUp={(e) => {
                                     const val = Number(e.currentTarget.value);
                                     isScrubbingRef.current = false;
+                                    userScrollingLyricsUntilRef.current = 0;
+                                    updateScrubberDOM(val, true);
+                                    onSeek(val);
+                                }}
+                                onTouchEnd={(e) => {
+                                    if (!isScrubbingRef.current) return;
+                                    const val = Number(e.currentTarget.value);
+                                    isScrubbingRef.current = false;
+                                    userScrollingLyricsUntilRef.current = 0;
                                     updateScrubberDOM(val, true);
                                     onSeek(val);
                                 }}
@@ -1186,7 +1543,24 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                     isScrubbingRef.current = false;
                                     updateScrubberDOM(currentTime.get(), true);
                                 }}
-                                onChange={() => {}}
+                                onTouchCancel={() => {
+                                    isScrubbingRef.current = false;
+                                    updateScrubberDOM(currentTime.get(), true);
+                                }}
+                                onBlur={() => {
+                                    if (isScrubbingRef.current) {
+                                        isScrubbingRef.current = false;
+                                        updateScrubberDOM(currentTime.get(), true);
+                                    }
+                                }}
+                                onChange={(e) => {
+                                    if (!isScrubbingRef.current) {
+                                        const val = Number(e.currentTarget.value);
+                                        userScrollingLyricsUntilRef.current = 0;
+                                        updateScrubberDOM(val, true);
+                                        onSeek(val);
+                                    }
+                                }}
                                 className="absolute inset-0 h-full w-full cursor-pointer opacity-0 touch-none"
                             />
                         </div>
@@ -1320,7 +1694,99 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                         </div>
                     </div>
 
-                    {/* 2. Dynamic Album Artwork & Full-Screen Lyrics Mode Switches */}
+                    {/* 2. Full-Screen Local Album Video Cover & Manual Album-Video Association Selector */}
+                    <div
+                        data-testid="drawer-album-video-card"
+                        className="rounded-2xl border border-white/10 bg-white/[0.04] p-3.5 space-y-2.5"
+                    >
+                        <div className="flex items-center justify-between gap-2">
+                            <div className="min-w-0">
+                                <div className="flex items-center gap-1.5 text-xs font-semibold text-white">
+                                    <Film size={13} style={{ color: accentColor }} />
+                                    <span>{t('options.albumVideoCovers', 'Full-Screen Local Album Video Covers')}</span>
+                                </div>
+                                <p className="text-[11px] text-zinc-400 truncate mt-0.5">
+                                    {resolvedAlbumVideo.video
+                                        ? `Matched: ${resolvedAlbumVideo.video.fileName} (${resolvedAlbumVideo.origin})`
+                                        : effectiveAlbumVideoUrl
+                                            ? 'Album video active'
+                                            : `No matching video for "${albumName || currentSong.album?.name || 'Album'}"`}
+                                </p>
+                            </div>
+                            <button
+                                type="button"
+                                role="switch"
+                                data-testid="drawer-switch-album-video"
+                                aria-checked={albumVideoEnabled}
+                                aria-label="Full-Screen Local Album Video Covers"
+                                onClick={() => setAlbumVideoEnabled(!albumVideoEnabled)}
+                                className={`h-8 shrink-0 rounded-full border px-3 text-xs font-semibold transition-all ${
+                                    albumVideoEnabled
+                                        ? 'border-white bg-white text-zinc-950'
+                                        : 'border-white/15 bg-white/[0.06] text-zinc-300'
+                                }`}
+                            >
+                                {albumVideoEnabled ? 'On' : 'Off'}
+                            </button>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2 pt-1">
+                            <select
+                                data-testid="drawer-album-video-selector"
+                                aria-label="Select video for current album"
+                                value={
+                                    resolvedAlbumVideo.origin === 'manual'
+                                        ? (resolvedAlbumVideo.video?.id ?? '__none__')
+                                        : '__auto__'
+                                }
+                                onChange={async (e) => {
+                                    const val = e.target.value;
+                                    const targetAlbum = albumName || currentSong.album?.name || currentSong.name;
+                                    if (val === '__auto__') {
+                                        await resetAlbumVideoAssociation(targetAlbum, folderName);
+                                    } else if (val === '__none__') {
+                                        await assignVideoToAlbum(targetAlbum, null, artistName, folderName);
+                                    } else {
+                                        await assignVideoToAlbum(targetAlbum, val, artistName, folderName);
+                                    }
+                                    setVideoCatalogTick(t => t + 1);
+                                }}
+                                className="h-9 min-w-[160px] flex-1 rounded-xl border border-white/12 bg-[#14141c] px-2.5 text-xs text-zinc-200 focus:outline-none"
+                            >
+                                <option value="__auto__">Auto-match by album name</option>
+                                <option value="__none__">None (use album artwork)</option>
+                                {getRegisteredAlbumVideos().map(video => (
+                                    <option key={video.id} value={video.id}>
+                                        {video.fileName}
+                                    </option>
+                                ))}
+                            </select>
+
+                            <button
+                                type="button"
+                                data-testid="drawer-add-video-folder-btn"
+                                onClick={async () => {
+                                    await importAlbumVideoFolder();
+                                    setVideoCatalogTick(t => t + 1);
+                                }}
+                                className="flex h-9 items-center gap-1.5 rounded-xl border border-white/15 bg-white/[0.06] px-3 text-xs font-medium text-zinc-200"
+                            >
+                                <span>Add Video Folder</span>
+                            </button>
+
+                            <button
+                                type="button"
+                                data-testid="drawer-import-video-file-btn"
+                                onClick={() => albumVideoFileInputRef.current?.click()}
+                                className="flex h-9 items-center gap-1.5 rounded-xl border border-white/15 bg-white/[0.06] px-3 text-xs font-medium text-zinc-200"
+                            >
+                                <FileUp size={13} />
+                                <span>Pick Video File</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* 2b. Dynamic Album Artwork & Full-Screen Lyrics Mode Switches */}
                     <div className="grid grid-cols-1 landscape:grid-cols-2 gap-3 pt-1">
                         <div
                             data-testid="drawer-dynamic-artwork-card"

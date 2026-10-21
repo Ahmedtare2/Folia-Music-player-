@@ -29,6 +29,7 @@ const AI: SettingsGroupDef = { id: 'electronSettings', titleKey: 'options.electr
 
 const O = {
     lyricsAnimation: option(LYRICS, 'lyricsAnimationAdjust', 'options.lyricsAnimationAdjust'),
+    albumVideoCovers: option(DISPLAY_IMMERSIVE, 'albumVideoCovers', 'options.albumVideoCovers'),
     dynamicArtwork: option(DISPLAY_IMMERSIVE, 'dynamicAlbumArtwork', 'options.dynamicAlbumArtwork'),
     dynamicArtworkIntensity: option(DISPLAY_IMMERSIVE, 'dynamicAlbumArtworkIntensity', 'options.dynamicAlbumArtworkIntensity'),
     hideStatusBar: option(DISPLAY_IMMERSIVE, 'hideStatusBar', 'options.hideStatusBar'),
@@ -86,13 +87,17 @@ const AppearancePage: React.FC = () => {
         setFollowSystemTheme: state.setFollowSystemTheme,
     })));
     const {
+        albumVideoEnabled,
         dynamicArtworkEnabled,
         dynamicArtworkIntensity,
+        setAlbumVideoEnabled,
         setDynamicArtworkEnabled,
         setDynamicArtworkIntensity,
     } = useDynamicAlbumArtworkStore(useShallow(state => ({
+        albumVideoEnabled: state.albumVideoEnabled,
         dynamicArtworkEnabled: state.enabled,
         dynamicArtworkIntensity: state.intensity,
+        setAlbumVideoEnabled: state.setAlbumVideoEnabled,
         setDynamicArtworkEnabled: state.setDynamicAlbumArtworkEnabled,
         setDynamicArtworkIntensity: state.setDynamicAlbumArtworkIntensity,
     })));
@@ -148,6 +153,9 @@ const AppearancePage: React.FC = () => {
             </Group>
 
             <Group def={DISPLAY_IMMERSIVE}>
+                <Row option={O.albumVideoCovers} note={t('options.albumVideoCoversDesc', 'Play matching local album video files as a full-screen animated album visual on the player screen.')}>
+                    <Toggle checked={albumVideoEnabled} onChange={setAlbumVideoEnabled} />
+                </Row>
                 <Row option={O.dynamicArtwork} note={t('options.dynamicAlbumArtworkDesc', 'Animate the album cover on the player screen with subtle camera drift, layered parallax, ambient lighting, and feathered lower-edge blending.')}>
                     <Toggle checked={dynamicArtworkEnabled} onChange={setDynamicArtworkEnabled} />
                 </Row>

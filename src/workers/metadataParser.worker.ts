@@ -28,11 +28,16 @@ interface EmbeddedMetadataResult {
     title?: string;
     artist?: string;
     artists?: string[];
+    albumArtist?: string;
     album?: string;
     trackNumber?: number;
     discNumber?: number;
+    year?: number;
+    genre?: string;
+    codec?: string;
     cover?: Blob;
     coverAssetId?: string;
+    hasEmbeddedCover?: boolean;
     bitrate?: number;
     lyrics?: string;
     translationLyrics?: string;
@@ -235,11 +240,16 @@ async function extractEmbeddedMetadata(file: File, includeCover = false): Promis
         title: repairTagText(parsed.common.title),
         artist: repairTagText(parsed.common.artist),
         artists: parsed.common.artists?.map(artist => repairTagText(artist) ?? artist),
+        albumArtist: repairTagText(parsed.common.albumartist),
         album: repairTagText(parsed.common.album),
         trackNumber: parsed.common.track.no ?? undefined,
         discNumber: parsed.common.disk.no ?? undefined,
+        year: parsed.common.year ?? undefined,
+        genre: parsed.common.genre?.[0] ? repairTagText(parsed.common.genre[0]) : undefined,
+        codec: parsed.format.codec || parsed.format.container || undefined,
         cover,
         coverAssetId,
+        hasEmbeddedCover: includeCover ? Boolean(picture) : undefined,
         bitrate: parsed.format.bitrate,
         lyrics: originalLyric,
         translationLyrics: translationLyric,

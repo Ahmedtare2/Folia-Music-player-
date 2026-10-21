@@ -2002,6 +2002,13 @@ export default function App() {
         tailElement.pause();
         return true;
     };
+    const lastSeekIntentRef = useRef<{
+        timeSec: number;
+        wasPlaying: boolean;
+        timestampMs: number;
+        recoveredOnce?: boolean;
+    } | null>(null);
+
     const seekMainAudio = useCallback((time: number) => {
         // A seek is a statement that playback should go on, same as it is on a paused track. If a
         // pause is still fading out, take it back (the audio never stopped) so the pending pause
@@ -2013,15 +2020,49 @@ export default function App() {
         if (seekDuringTransitionRef.current(time)) {
             return;
         }
-        if (audioRef.current) {
-            audioRef.current.currentTime = time;
-            if (audioRef.current.paused) {
-                void audioRef.current.play();
+        const element = audioRef.current;
+        const effectiveDuration = element && Number.isFinite(element.duration) && element.duration > 0
+            ? element.duration
+            : duration;
+        const targetTime = Number.isFinite(time)
+            ? Math.max(
+                0,
+                effectiveDuration > 0 && time >= effectiveDuration
+                    ? Math.max(0, effectiveDuration - 0.05)
+                    : time,
+            )
+            : 0;
+
+        // Immediately synchronize the authoritative playback & lyric clock so synchronized lyrics
+        // and the scrubber update on the exact frame of the seek, even before DOM `seeked` fires.
+        currentTime.set(targetTime);
+
+        if (element) {
+            const wasPlaying = resumedFromFade
+                || playerState === PlayerState.PLAYING
+                || (!element.paused && !element.ended);
+            lastSeekIntentRef.current = {
+                timeSec: targetTime,
+                wasPlaying: true,
+                timestampMs: Date.now(),
+                recoveredOnce: false,
+            };
+            element.currentTime = targetTime;
+            if (element.paused || wasPlaying) {
                 setPlayerState(PlayerState.PLAYING);
+                const playPromise = element.play();
+                if (playPromise !== undefined) {
+                    playPromise.catch((err: unknown) => {
+                        const errName = (err as { name?: string })?.name;
+                        if (errName === 'AbortError') {
+                            shouldAutoPlay.current = true;
+                        }
+                    });
+                }
             }
             void publishStagePlayerPlaybackUpdate();
         }
-    }, [publishStagePlayerPlaybackUpdate]);
+    }, [currentTime, duration, playerState, publishStagePlayerPlaybackUpdate]);
 
     const handleMonetLyricLineSeek = useCallback((lyricTimeSec: number) => {
         if (isNowPlayingControlDisabled) {
@@ -2569,8 +2610,24 @@ export default function App() {
             onSeeked={(e) => {
                 // Same split as onTimeUpdate: whichever deck the bar is showing is the one a seek
                 // on it has to be reflected from.
-                const isActive = automix.isActiveDeck(e.currentTarget);
-                if (isShowingTail ? !isActive : isActive) currentTime.set(e.currentTarget.currentTime);
+                const audioElement = e.currentTarget;
+                const isActive = automix.isActiveDeck(audioElement);
+                if (isShowingTail ? !isActive : isActive) currentTime.set(audioElement.currentTime);
+                if (isActive) {
+                    const seekIntent = lastSeekIntentRef.current;
+                    const recentSeek = Boolean(seekIntent && Date.now() - seekIntent.timestampMs < 4000);
+                    if (
+                        (recentSeek && seekIntent?.wasPlaying || playerState === PlayerState.PLAYING || shouldAutoPlay.current)
+                        && audioElement.paused
+                        && !audioElement.ended
+                        && !audioElement.error
+                    ) {
+                        shouldAutoPlay.current = false;
+                        void audioElement.play().then(() => {
+                            setPlayerState(PlayerState.PLAYING);
+                        }).catch(() => {});
+                    }
+                }
             }}
             // Buffer progress debug helper. Uncomment to inspect how much of
             // the current source the browser has actually buffered.
@@ -2609,14 +2666,33 @@ export default function App() {
                     return;
                 }
 
-                // Guard against premature EOF or transient zero duration masquerading as track end.
+                // Guard against premature EOF or transient zero duration masquerading as track end
+                // (especially after a byte-range seek on Android SAF or streaming sources).
                 const knownDurationSec = (currentSong?.durationMs && currentSong.durationMs > 0 ? currentSong.durationMs / 1000 : 0)
                     || (Number.isFinite(duration) && duration > 0 ? duration : 0);
-                if (
+                const seekIntent = lastSeekIntentRef.current;
+                const isRecentSeek = Boolean(seekIntent && Date.now() - seekIntent.timestampMs < 5000);
+                const isPrematureEnd = (
                     knownDurationSec > 10
                     && audioElement.currentTime >= 0
-                    && audioElement.currentTime < Math.min(knownDurationSec * 0.5, knownDurationSec - 5)
-                ) {
+                    && audioElement.currentTime < knownDurationSec - 3
+                ) || (
+                    isRecentSeek
+                    && seekIntent !== null
+                    && (knownDurationSec <= 0 || seekIntent.timeSec < knownDurationSec - 2)
+                );
+                if (isPrematureEnd) {
+                    if (seekIntent && !seekIntent.recoveredOnce && audioSrc) {
+                        seekIntent.recoveredOnce = true;
+                        const resumeTarget = seekIntent.timeSec > 0 ? seekIntent.timeSec : audioElement.currentTime;
+                        pendingResumeTimeRef.current = resumeTarget;
+                        shouldAutoPlay.current = true;
+                        audioElement.load();
+                        void audioElement.play().then(() => {
+                            setPlayerState(PlayerState.PLAYING);
+                        }).catch(() => {});
+                        return;
+                    }
                     console.error('[Audio] Premature ended event detected before track completion', {
                         song: currentSong?.name,
                         currentTime: audioElement.currentTime,

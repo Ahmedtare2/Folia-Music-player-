@@ -5,6 +5,7 @@ import {
     INITIAL_MOBILE_NAVIGATION_STATE,
     type MobileNavigationState,
     buildMobileLibraryCollections,
+    computeRestoredLibraryScrollState,
     filterAndSortLocalSongs,
     isLocalSongCurrentlyPlaying,
     isMobileVisualizerVisible,
@@ -62,12 +63,25 @@ import { useSystemBarSettingsStore } from '@/stores/useSystemBarSettingsStore';
 import { VISUALIZER_REGISTRY } from '@/components/visualizer/registry';
 import { useVisualizerSettingsStore } from '@/stores/useVisualizerSettingsStore';
 import {
+    ALBUM_VIDEO_COVERS_STORAGE_KEY,
     DEFAULT_DYNAMIC_ALBUM_ARTWORK_SETTINGS,
     DYNAMIC_ALBUM_ARTWORK_STORAGE_KEY,
+    readStoredAlbumVideoCoversEnabled,
     readStoredDynamicAlbumArtworkSettings,
+    resolveAlbumVideoStageState,
     resolveDynamicAlbumArtworkMotion,
+    writeStoredAlbumVideoCoversEnabled,
     writeStoredDynamicAlbumArtworkSettings,
 } from '@/utils/dynamicAlbumArtwork';
+import {
+    assignVideoToAlbum,
+    getRegisteredAlbumVideos,
+    reconcileVideosForRootFolder,
+    resetAlbumVideoAssociation,
+    resetLocalAlbumVideoCatalogForTests,
+    resolveAlbumVideoForTrack,
+    scoreAlbumVideoCandidates,
+} from '@/services/localAlbumVideoService';
 import { useDynamicAlbumArtworkStore } from '@/stores/useDynamicAlbumArtworkStore';
 
 vi.mock('react', async (importOriginal) => {
@@ -1249,6 +1263,443 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
                 ),
             );
             expect(fallbackNodes.find(n => n.props?.['data-testid'] === 'dynamic-cover-fallback')).toBeTruthy();
+        });
+    });
+
+    describe('Seeking while playing/paused, lyric synchronization on seek, and library scroll restoration', () => {
+        it('commits pointer, touch, and tap seeks cleanly without stopping playback and immediately recalculates active lyrics', () => {
+            const seekTargets: number[] = [];
+            const currentTime = motionValue(30.0);
+            const lyricCurrentTime = motionValue(30.0);
+            const lines: LyricLine[] = [
+                {
+                    startTime: 0,
+                    endTime: 20,
+                    fullText: 'Intro line',
+                    words: [{ text: 'Intro', startTime: 0, endTime: 10 }, { text: 'line', startTime: 10, endTime: 20 }],
+                },
+                {
+                    startTime: 20,
+                    endTime: 60,
+                    fullText: 'Verse one',
+                    words: [{ text: 'Verse', startTime: 20, endTime: 40 }, { text: 'one', startTime: 40, endTime: 60 }],
+                },
+                {
+                    startTime: 110,
+                    endTime: 150,
+                    fullText: 'Chorus line',
+                    words: [{ text: 'Chorus', startTime: 110, endTime: 130 }, { text: 'line', startTime: 130, endTime: 150 }],
+                },
+            ];
+
+            const onSeek = vi.fn((targetSec: number) => {
+                const clamped = Math.max(0, Math.min(targetSec, 240 - 0.05));
+                seekTargets.push(clamped);
+                currentTime.set(clamped);
+                lyricCurrentTime.set(clamped);
+            });
+
+            const nodes = expandVNodeTree(
+                (MobileNowPlayingSheet as unknown as (p: any) => unknown)({
+                    isOpen: true,
+                    displayMode: 'lyrics',
+                    subDrawer: 'none',
+                    onChangeDisplayMode: vi.fn(),
+                    onChangeSubDrawer: vi.fn(),
+                    onClose: vi.fn(),
+                    currentSong: { id: -1, name: 'Test Song', artists: [{ id: 1, name: 'Artist' }], album: { id: 1, name: 'Album' } },
+                    artistName: 'Artist',
+                    albumName: 'Album',
+                    coverUrl: null,
+                    playerState: PlayerState.PLAYING,
+                    currentTime,
+                    lyricCurrentTime,
+                    duration: 240,
+                    lyrics: { lines },
+                    currentLineIndex: 1,
+                    isLyricsLoading: false,
+                    isLiked: false,
+                    loopMode: 'all',
+                    theme: { primaryColor: '#fff', secondaryColor: '#aaa', backgroundColor: '#000', accentColor: '#38bdf8' },
+                    visualizerMode: 'monet',
+                    onVisualizerModeChange: vi.fn(),
+                    lyricsFontScale: 1,
+                    onLyricsFontScaleChange: vi.fn(),
+                    showSubtitleTranslation: false,
+                    onToggleSubtitleTranslation: vi.fn(),
+                    lyricTimelineOffsetMs: 0,
+                    onLyricTimelineOffsetChange: vi.fn(),
+                    activeLocalLyricsSource: 'local',
+                    onChangeLyricsSource: vi.fn(),
+                    onImportLocalLyricsFile: vi.fn(),
+                    onOpenLyricMatch: vi.fn(),
+                    onSeek,
+                    onLyricLineSeek: onSeek,
+                    onTogglePlay: vi.fn(),
+                    onPrevTrack: vi.fn(),
+                    onNextTrack: vi.fn(),
+                    onToggleLoop: vi.fn(),
+                    onToggleLike: vi.fn(),
+                    onShuffleQueue: vi.fn(),
+                    playQueue: [],
+                    onPlayQueueSong: vi.fn(),
+                    onRemoveQueueSong: vi.fn(),
+                    onSaveQueueAsPlaylist: vi.fn().mockResolvedValue(undefined),
+                    onOpenVisualizerSettings: vi.fn(),
+                }),
+            );
+
+            const rangeInput = nodes.find(n => n.type === 'input' && n.props?.type === 'range' && n.props?.['aria-label'] === 'Seek progress');
+            expect(rangeInput).toBeTruthy();
+
+            // 1. Seek to middle (125s) via pointer scrub while playing -> lyrics immediately sync to Chorus line (index 2)
+            rangeInput?.props?.onPointerDown?.({ pointerId: 1, currentTarget: { setPointerCapture: vi.fn() } });
+            rangeInput?.props?.onInput?.({ currentTarget: { value: '125' } });
+            rangeInput?.props?.onPointerUp?.({ currentTarget: { value: '125' } });
+            expect(onSeek).toHaveBeenLastCalledWith(125);
+            expect(currentTime.get()).toBe(125);
+            expect(lyricCurrentTime.get()).toBe(125);
+            expect(Array.from(computeActiveLyricLineIndices(lines, 2, lyricCurrentTime.get()))).toEqual([2]);
+            expect(computeTimedWordProgressPercent(lines[2]!.words[0]!, lyricCurrentTime.get())).toBeCloseTo(75, 1);
+
+            // 2. Seek to beginning (0s) via touch scrub -> lyrics immediately sync to Intro line (index 0)
+            rangeInput?.props?.onTouchStart?.();
+            rangeInput?.props?.onInput?.({ currentTarget: { value: '0' } });
+            rangeInput?.props?.onTouchEnd?.({ currentTarget: { value: '0' } });
+            expect(onSeek).toHaveBeenLastCalledWith(0);
+            expect(currentTime.get()).toBe(0);
+            expect(Array.from(computeActiveLyricLineIndices(lines, 0, lyricCurrentTime.get()))).toEqual([0]);
+
+            // 3. Seek to end (240s) via direct tap (onChange) -> clamped to 239.95s so source is never unloaded
+            rangeInput?.props?.onChange?.({ currentTarget: { value: '240' } });
+            expect(seekTargets.at(-1)).toBeCloseTo(239.95, 2);
+        });
+
+        it('restores library scroll position, expands visible window when playing track moved ahead, and clamps invalid offsets on list changes', () => {
+            // Case 1: User scrolled to 1,280px (around song #20) and opened song #22, then returned without changing songs
+            const unchanged = computeRestoredLibraryScrollState({
+                savedScrollTop: 1280,
+                viewportHeight: 512,
+                rowHeight: 64,
+                totalItems: 500,
+                currentVisibleLimit: 120,
+                stepSize: 120,
+                activeSongIndex: 22,
+                openedFromThisContext: true,
+            });
+            expect(unchanged.nextScrollTop).toBe(1280);
+            expect(unchanged.nextVisibleLimit).toBe(120);
+            expect(unchanged.shouldScrollActiveSongIntoView).toBe(false);
+
+            // Case 2: While in the player, playback advanced to song #185 (beyond initial 120-song window)
+            const advanced = computeRestoredLibraryScrollState({
+                savedScrollTop: 1280,
+                viewportHeight: 512,
+                rowHeight: 64,
+                totalItems: 500,
+                currentVisibleLimit: 120,
+                stepSize: 120,
+                activeSongIndex: 185,
+                openedFromThisContext: true,
+            });
+            expect(advanced.nextVisibleLimit).toBe(240);
+            expect(advanced.shouldScrollActiveSongIntoView).toBe(true);
+            // Active song #185 is at 185 * 64 = 11,840px; restored scroll brings it into the 512px viewport
+            expect(advanced.nextScrollTop).toBeGreaterThanOrEqual(185 * 64 - 512);
+            expect(advanced.nextScrollTop).toBeLessThanOrEqual(185 * 64);
+
+            // Case 3: Filter or deletion reduced list to 5 items while player was open -> clamps scrollTop instead of restoring invalid offset
+            const shrunk = computeRestoredLibraryScrollState({
+                savedScrollTop: 4200,
+                viewportHeight: 512,
+                rowHeight: 64,
+                totalItems: 5,
+                currentVisibleLimit: 120,
+                stepSize: 120,
+                activeSongIndex: -1,
+                openedFromThisContext: false,
+            });
+            expect(shrunk.nextScrollTop).toBe(0);
+        });
+    });
+
+    describe('Part B: Full-Screen Local Album Video Covers & Shared Persistent Index', () => {
+        afterEach(() => {
+            resetLocalAlbumVideoCatalogForTests();
+        });
+
+        it('normalizes album names across case, punctuation, edition suffixes, and Arabic orthography, persists associations, and supports manual overrides', async () => {
+            (globalThis as { Capacitor?: unknown }).Capacitor = {
+                getPlatform: () => 'android',
+                isNativePlatform: () => true,
+            };
+            (globalThis as { __FOLIA_ANDROID_BRIDGE__?: unknown }).__FOLIA_ANDROID_BRIDGE__ = {
+                checkFileReadable: vi.fn(async () => ({ readable: true })),
+            };
+
+            await reconcileVideosForRootFolder('AlbumVideos', [
+                {
+                    name: 'Tamally_Maak (Deluxe Edition) [Animated Cover].mp4',
+                    relativePath: 'AlbumVideos/Tamally_Maak (Deluxe Edition) [Animated Cover].mp4',
+                    size: 14_500_000,
+                    lastModified: 1000,
+                    mimeType: 'video/mp4',
+                    safContentUri: 'content://saf/videos/TamallyMaak_v1.mp4',
+                    safTreeUri: 'content://saf/tree/AlbumVideos',
+                },
+                {
+                    name: 'Tamally Maak (Alternate Loop).webm',
+                    relativePath: 'AlbumVideos/Tamally Maak (Alternate Loop).webm',
+                    size: 11_200_000,
+                    lastModified: 2000,
+                    mimeType: 'video/webm',
+                    safContentUri: 'content://saf/videos/TamallyMaak_v2.webm',
+                    safTreeUri: 'content://saf/tree/AlbumVideos',
+                },
+                {
+                    name: 'Fairuz - Golden Classics.mp4',
+                    relativePath: 'AlbumVideos/Fairuz - Golden Classics.mp4',
+                    size: 18_000_000,
+                    lastModified: 3000,
+                    mimeType: 'video/mp4',
+                    safContentUri: 'content://saf/videos/GoldenClassics.mp4',
+                    safTreeUri: 'content://saf/tree/AlbumVideos',
+                },
+                {
+                    name: 'أحبك يا قلبي.mp4',
+                    relativePath: 'AlbumVideos/أحبك يا قلبي.mp4',
+                    size: 9_000_000,
+                    lastModified: 4000,
+                    mimeType: 'video/mp4',
+                    safContentUri: 'content://saf/videos/Ahebbak.mp4',
+                    safTreeUri: 'content://saf/tree/AlbumVideos',
+                },
+            ]);
+
+            expect(getRegisteredAlbumVideos()).toHaveLength(4);
+
+            // 1. Matches "Tamally Maak" and detects the 2 ambiguous candidate videos
+            const tamallyMatch = await resolveAlbumVideoForTrack({
+                albumName: 'Tamally Maak',
+                artistName: 'Amr Diab',
+            });
+            expect(tamallyMatch.video?.fileName).toBe('Tamally_Maak (Deluxe Edition) [Animated Cover].mp4');
+            expect(tamallyMatch.origin).toBe('auto');
+            expect(tamallyMatch.streamUrl).toContain('content%3A%2F%2Fsaf%2Fvideos%2FTamallyMaak_v1.mp4');
+            expect(tamallyMatch.ambiguousCandidates).toHaveLength(2);
+
+            // 2. User manually selects the second candidate (.webm) for "Tamally Maak"
+            const secondCandidate = tamallyMatch.ambiguousCandidates.find(v => v.fileName.endsWith('.webm'))!;
+            await assignVideoToAlbum('Tamally Maak', secondCandidate.id, 'Amr Diab');
+
+            const overriddenMatch = await resolveAlbumVideoForTrack({
+                albumName: 'Tamally Maak',
+                artistName: 'Amr Diab',
+            });
+            expect(overriddenMatch.origin).toBe('manual');
+            expect(overriddenMatch.video?.id).toBe(secondCandidate.id);
+            expect(overriddenMatch.streamUrl).toContain('TamallyMaak_v2.webm');
+
+            // 3. Multiple songs from the same album reuse the exact same video and streamUrl without re-scanning
+            const secondTrackSameAlbum = await resolveAlbumVideoForTrack({
+                albumName: 'Tamally Maak',
+                artistName: 'Amr Diab',
+            });
+            expect(secondTrackSameAlbum.video?.id).toBe(overriddenMatch.video?.id);
+            expect(secondTrackSameAlbum.streamUrl).toBe(overriddenMatch.streamUrl);
+
+            // 4. Matches "Artist - Album.mp4" and Arabic orthography ("احبك يا قلبي" -> "أحبك يا قلبي.mp4")
+            const fairuzMatch = await resolveAlbumVideoForTrack({
+                albumName: 'Golden Classics',
+                artistName: 'Fairuz',
+            });
+            expect(fairuzMatch.video?.fileName).toBe('Fairuz - Golden Classics.mp4');
+
+            const arabicMatch = await resolveAlbumVideoForTrack({
+                albumName: 'احبك يا قلبي',
+                artistName: 'Fairuz',
+            });
+            expect(arabicMatch.video?.fileName).toBe('أحبك يا قلبي.mp4');
+
+            // 5. Resetting manual association restores auto-matching
+            await resetAlbumVideoAssociation('Tamally Maak');
+            const restoredAuto = await resolveAlbumVideoForTrack({
+                albumName: 'Tamally Maak',
+                artistName: 'Amr Diab',
+            });
+            expect(restoredAuto.origin).toBe('auto');
+            expect(restoredAuto.video?.fileName).toBe('Tamally_Maak (Deluxe Edition) [Animated Cover].mp4');
+        });
+
+        it('renders Full-Screen Local Album Video Stage in MobileNowPlayingSheet, keeps the same videoKey across tracks on the same album, pauses when hidden/paused, and falls back to artwork when disabled', () => {
+            const storage = new Map<string, string>();
+            const mockLocalStorage = {
+                getItem: (key: string) => storage.get(key) ?? null,
+                setItem: (key: string, val: string) => storage.set(key, val),
+                removeItem: (key: string) => storage.delete(key),
+            };
+            (globalThis as { localStorage?: unknown }).localStorage = mockLocalStorage;
+            (globalThis as { window?: unknown }).window = { localStorage: mockLocalStorage };
+
+            writeStoredAlbumVideoCoversEnabled(true);
+            expect(readStoredAlbumVideoCoversEnabled()).toBe(true);
+            expect(storage.get(ALBUM_VIDEO_COVERS_STORAGE_KEY)).toBe('true');
+            useDynamicAlbumArtworkStore.getState().setAlbumVideoEnabled(true);
+
+            // Verify resolveAlbumVideoStageState continuity key & aspect-ratio scaling
+            const track1Stage = resolveAlbumVideoStageState({
+                albumVideoEnabled: true,
+                videoStreamUrl: 'https://localhost/__folia_saf/stream?uri=content%3A%2F%2Fsaf%2FGoldenClassics.mp4',
+                videoId: 'albvid_golden',
+                isPlaying: true,
+                isCoverScreenActive: true,
+                isPageVisible: true,
+                prefersReducedMotion: false,
+                videoWidth: 1080,
+                videoHeight: 1440,
+                viewportWidth: 390,
+                viewportHeight: 844,
+            });
+            const track2SameAlbumStage = resolveAlbumVideoStageState({
+                albumVideoEnabled: true,
+                videoStreamUrl: 'https://localhost/__folia_saf/stream?uri=content%3A%2F%2Fsaf%2FGoldenClassics.mp4',
+                videoId: 'albvid_golden',
+                isPlaying: true,
+                isCoverScreenActive: true,
+                isPageVisible: true,
+                prefersReducedMotion: false,
+                videoWidth: 1080,
+                videoHeight: 1440,
+                viewportWidth: 390,
+                viewportHeight: 844,
+            });
+            expect(track1Stage.shouldShowVideo).toBe(true);
+            expect(track1Stage.shouldPlayVideo).toBe(true);
+            expect(track1Stage.scalingMode).toBe('cover-fill');
+            // Same album -> identical videoKey so <video> never reloads across track switch
+            expect(track2SameAlbumStage.videoKey).toBe(track1Stage.videoKey);
+
+            // Wide 16:9 video on portrait viewport uses ambient-framed scaling
+            const wideLandscapeStage = resolveAlbumVideoStageState({
+                albumVideoEnabled: true,
+                videoStreamUrl: 'https://localhost/__folia_saf/stream?uri=content%3A%2F%2Fsaf%2FWide.mp4',
+                videoId: 'albvid_wide',
+                isPlaying: true,
+                isCoverScreenActive: true,
+                isPageVisible: true,
+                prefersReducedMotion: false,
+                videoWidth: 1920,
+                videoHeight: 1080,
+                viewportWidth: 390,
+                viewportHeight: 844,
+            });
+            expect(wideLandscapeStage.scalingMode).toBe('ambient-framed');
+
+            // Paused or reduced-motion pauses video playback to save battery
+            expect(
+                resolveAlbumVideoStageState({
+                    albumVideoEnabled: true,
+                    videoStreamUrl: 'https://localhost/__folia_saf/stream?uri=content%3A%2F%2Fsaf%2FGoldenClassics.mp4',
+                    videoId: 'albvid_golden',
+                    isPlaying: false,
+                    isCoverScreenActive: true,
+                    isPageVisible: true,
+                    prefersReducedMotion: false,
+                }).shouldPlayVideo,
+            ).toBe(false);
+
+            const makeVideoSheetProps = (overrides: Record<string, unknown> = {}) => ({
+                isOpen: true,
+                displayMode: 'cover' as const,
+                subDrawer: 'none' as const,
+                onChangeDisplayMode: vi.fn(),
+                onChangeSubDrawer: vi.fn(),
+                onClose: vi.fn(),
+                currentSong: {
+                    id: -101,
+                    name: 'Habaytak',
+                    artists: [{ id: 1, name: 'Fairuz' }],
+                    album: { id: 1, name: 'Golden Classics' },
+                },
+                artistName: 'Fairuz',
+                albumName: 'Golden Classics',
+                coverUrl: 'https://example.com/golden-classics.jpg',
+                albumVideoUrl: 'https://localhost/__folia_saf/stream?uri=content%3A%2F%2Fsaf%2FGoldenClassics.mp4',
+                albumVideoId: 'albvid_golden',
+                playerState: PlayerState.PLAYING,
+                currentTime: motionValue(18.5),
+                lyricCurrentTime: motionValue(18.5),
+                duration: 215,
+                lyrics: null,
+                currentLineIndex: -1,
+                isLyricsLoading: false,
+                isLiked: true,
+                loopMode: 'all' as const,
+                theme: {
+                    primaryColor: '#ffffff',
+                    secondaryColor: '#a1a1aa',
+                    backgroundColor: '#09090b',
+                    accentColor: '#38bdf8',
+                },
+                visualizerMode: 'monet' as const,
+                onVisualizerModeChange: vi.fn(),
+                lyricsFontScale: 1,
+                onLyricsFontScaleChange: vi.fn(),
+                showSubtitleTranslation: true,
+                onToggleSubtitleTranslation: vi.fn(),
+                lyricTimelineOffsetMs: 0,
+                onLyricTimelineOffsetChange: vi.fn(),
+                activeLocalLyricsSource: 'local' as const,
+                onChangeLyricsSource: vi.fn(),
+                onImportLocalLyricsFile: vi.fn(),
+                onOpenLyricMatch: vi.fn(),
+                onSeek: vi.fn(),
+                onLyricLineSeek: vi.fn(),
+                onTogglePlay: vi.fn(),
+                onPrevTrack: vi.fn(),
+                onNextTrack: vi.fn(),
+                onToggleLoop: vi.fn(),
+                onToggleLike: vi.fn(),
+                onShuffleQueue: vi.fn(),
+                playQueue: [],
+                onPlayQueueSong: vi.fn(),
+                onRemoveQueueSong: vi.fn(),
+                onSaveQueueAsPlaylist: vi.fn().mockResolvedValue(undefined),
+                onOpenVisualizerSettings: vi.fn(),
+                ...overrides,
+            });
+
+            // Render with album video active
+            const videoNodes = expandVNodeTree(
+                (MobileNowPlayingSheet as unknown as (p: any) => unknown)(makeVideoSheetProps()),
+            );
+            const fullScreenVideoStage = videoNodes.find(
+                n => n.props?.['data-testid'] === 'mobile-fullscreen-album-video-stage',
+            );
+            expect(fullScreenVideoStage).toBeTruthy();
+            expect(fullScreenVideoStage?.props?.['data-video-key']).toBe('albvid_golden');
+            expect(fullScreenVideoStage?.props?.['data-video-playing']).toBe('true');
+
+            const videoElement = videoNodes.find(
+                n => n.props?.['data-testid'] === 'mobile-album-video-element',
+            );
+            expect(videoElement).toBeTruthy();
+            expect(videoElement?.props?.src).toContain('GoldenClassics.mp4');
+            expect(videoElement?.props?.loop).toBe(true);
+            expect(videoElement?.props?.muted).toBe(true);
+            expect(videoNodes.find(n => n.props?.['data-testid'] === 'album-video-readability-gradient')).toBeTruthy();
+
+            // Disable album videos -> falls back to DynamicAlbumCoverStage without error
+            useDynamicAlbumArtworkStore.getState().setAlbumVideoEnabled(false);
+            const fallbackToArtworkNodes = expandVNodeTree(
+                (MobileNowPlayingSheet as unknown as (p: any) => unknown)(makeVideoSheetProps()),
+            );
+            expect(
+                fallbackToArtworkNodes.find(n => n.props?.['data-testid'] === 'mobile-fullscreen-album-video-stage'),
+            ).toBeUndefined();
+            expect(
+                fallbackToArtworkNodes.find(n => n.props?.['data-testid'] === 'dynamic-album-cover-stage'),
+            ).toBeTruthy();
         });
     });
 });

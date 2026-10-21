@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LocalSong } from '@/types';
 import { matchLyrics } from '@/services/localMusicService';
+import { clearNegativeLyricMatchRecord, isSongOnAutomaticLyricMatchCooldown } from '@/utils/lyrics/lyricAutoMatchState';
+import { shouldRunLocalSongAutomaticMatch } from '@/utils/lyrics/localSongMatchContext';
 import { autoMatchBestLyric } from '@/utils/lyrics/autoMatchBestLyric';
 import { applyMatchedMetadata } from '@/services/localLibraryCatalogService';
 import { neteaseApi } from '@/services/onlineMusic/netease/netease';
@@ -51,8 +53,9 @@ const song = (): LocalSong => ({
 });
 
 describe('localMusicService lyric matching', () => {
-    beforeEach(() => {
+    beforeEach(async () => {
         vi.resetAllMocks();
+        await clearNegativeLyricMatchRecord();
         lyricSettings.localLyricsPriority = 'local';
         vi.mocked(applyMatchedMetadata).mockResolvedValue(undefined);
         vi.mocked(getLocalLibraryCatalogSnapshot).mockResolvedValue({ entities: [], assignments: [] });
@@ -132,5 +135,88 @@ describe('localMusicService lyric matching', () => {
             preferredSource: 'amll',
         }));
         expect(localSong.matchedLyrics).toBe(lyrics);
+    });
+
+    it('remembers failed automatic lyric lookups so unavailable tracks are not repeatedly queried, while allowing explicit forceRefresh', async () => {
+        vi.mocked(autoMatchBestLyric).mockResolvedValue(null);
+        const unavailableSong: LocalSong = {
+            ...song(),
+            id: 'unavailable-track-1',
+            onlineMetadata: undefined,
+        };
+
+        expect(shouldRunLocalSongAutomaticMatch(unavailableSong)).toBe(true);
+        await expect(matchLyrics(unavailableSong)).resolves.toBeNull();
+        expect(autoMatchBestLyric).toHaveBeenCalledTimes(1);
+        expect(isSongOnAutomaticLyricMatchCooldown(unavailableSong)).toBe(true);
+        expect(shouldRunLocalSongAutomaticMatch(unavailableSong)).toBe(false);
+
+        // Second automatic attempt while on cooldown skips network calls entirely
+        await expect(matchLyrics(unavailableSong)).resolves.toBeNull();
+        expect(autoMatchBestLyric).toHaveBeenCalledTimes(1);
+
+        // Explicit user-triggered refresh bypasses cooldown and queries providers again
+        const refreshedLyrics = { lines: [{ fullText: 'Refreshed line', startTime: 0, endTime: 2, words: [] }], isWordByWord: true };
+        vi.mocked(autoMatchBestLyric).mockResolvedValueOnce({
+            lyrics: refreshedLyrics,
+            source: 'qq',
+            id: 555,
+            qqMid: 'mid555',
+            song: {
+                id: 555,
+                name: 'Correct title',
+                artists: [{ id: 1, name: 'Correct artist' }],
+                album: { id: 2, name: 'Correct album' },
+                durationMs: 200000,
+                qqMid: 'mid555',
+            },
+        });
+        await expect(matchLyrics(unavailableSong, { forceRefresh: true })).resolves.toBe(refreshedLyrics);
+        expect(autoMatchBestLyric).toHaveBeenCalledTimes(2);
+        expect(isSongOnAutomaticLyricMatchCooldown(unavailableSong)).toBe(false);
+    });
+
+    it('never replaces a manually selected lyric or a known-good local word-by-word TTML lyric with an inferior line-by-line match', async () => {
+        lyricSettings.localLyricsPriority = 'online';
+        const lineByLineOnline = {
+            lines: [{ fullText: 'Line only', startTime: 0, endTime: 3, words: [] }],
+            isWordByWord: false,
+        };
+        vi.mocked(autoMatchBestLyric).mockResolvedValue({
+            lyrics: lineByLineOnline,
+            source: 'qq',
+            id: 777,
+            song: {
+                id: 777,
+                name: 'Correct title',
+                artists: [{ id: 1, name: 'Correct artist' }],
+                album: { id: 2, name: 'Correct album' },
+                durationMs: 200000,
+            },
+        });
+
+        // 1. Song with local word-by-word TTML file is not downgraded to line-by-line online lyric
+        const ttmlSong: LocalSong = {
+            ...song(),
+            id: 'ttml-protected-song',
+            hasLocalLyrics: true,
+            localLyricsFormat: 'ttml',
+            localLyricsContent: '<tt xmlns="http://www.w3.org/ns/ttml"><body><div><p begin="00:01.000" end="00:02.000"><span>Word</span></p></div></body></tt>',
+        };
+        await expect(matchLyrics(ttmlSong)).resolves.toBeNull();
+        expect(ttmlSong.matchedLyrics).toBeUndefined();
+
+        // 2. Song with manual lyric selection is not overwritten by automatic match
+        vi.mocked(autoMatchBestLyric).mockClear();
+        const manualSong: LocalSong = {
+            ...song(),
+            id: 'manual-protected-song',
+            hasManualLyricSelection: true,
+            hasLocalLyrics: true,
+            localLyricsContent: '[00:01.00]Manual lyric',
+        };
+        expect(shouldRunLocalSongAutomaticMatch(manualSong)).toBe(false);
+        await expect(matchLyrics(manualSong)).resolves.toBeNull();
+        expect(autoMatchBestLyric).not.toHaveBeenCalled();
     });
 });

@@ -13,7 +13,7 @@ import { krcDecrypt } from './krcDecrypt';
 import { applyDetectedChorusEffects, applyChorusRangesByTime } from '../../../utils/lyrics/chorusEffects';
 import type { ChorusRange } from '../../../utils/lyrics/chorusEffects';
 import { buildKugouLyricSearchQuery } from '../../../utils/lyrics/searchQuery';
-import { lyricProxyWebUrl } from '../../lyricProxy';
+import { fetchThroughLyricRelay } from '../../lyricProxy';
 
 const isElectron = typeof window !== 'undefined' && (window as any).electron;
 type KugouLyricFormat = 'lrc' | 'enhanced-lrc' | 'vtt' | 'krc';
@@ -116,7 +116,6 @@ async function requestKugou(url: string, params: Record<string, any>, module: st
   });
 
   const finalUrl = urlObj.toString();
-  const requestUrl = isElectron ? finalUrl : lyricProxyWebUrl(finalUrl);
 
   const finalHeaders = {
     'User-Agent': `Android14-1070-11070-201-0-${module}-wifi`,
@@ -129,7 +128,7 @@ async function requestKugou(url: string, params: Record<string, any>, module: st
     ...headers,
   };
 
-  const response = await fetch(requestUrl, {
+  const response = await fetchThroughLyricRelay(finalUrl, {
     method: 'GET',
     credentials: 'omit',
     headers: finalHeaders,
@@ -232,10 +231,9 @@ async function searchKugouLyricsOld(keyword: string, page = 1, pageSize = 20): P
   });
 
   const finalUrl = urlObj.toString();
-  const requestUrl = isElectron ? finalUrl : lyricProxyWebUrl(finalUrl);
 
   try {
-    const response = await fetch(requestUrl, {
+    const response = await fetchThroughLyricRelay(finalUrl, {
       method: 'GET',
       credentials: 'omit',
       headers: {

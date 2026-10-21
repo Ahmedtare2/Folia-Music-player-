@@ -10,8 +10,31 @@ import { isCapacitorNativePlatform } from '../utils/platform';
 
 const WEB_COVER_PATH_PREFIX = '/__folia_cover/';
 const FOLIA_COVER_PROTOCOL_PREFIX = 'folia-cover://asset/';
+const MAX_CACHED_LOCAL_COVER_BLOB_URLS = 250;
 const capacitorCoverBlobUrls = new Map<string, string>();
 const sharedObjectUrlSet = new Set<string>();
+
+const touchCachedCoverBlobUrl = (assetId: string, objectUrl: string): void => {
+  capacitorCoverBlobUrls.delete(assetId);
+  capacitorCoverBlobUrls.set(assetId, objectUrl);
+  sharedObjectUrlSet.add(objectUrl);
+  while (capacitorCoverBlobUrls.size > MAX_CACHED_LOCAL_COVER_BLOB_URLS) {
+    const oldestKey = capacitorCoverBlobUrls.keys().next().value;
+    if (!oldestKey) break;
+    const evictedUrl = capacitorCoverBlobUrls.get(oldestKey);
+    capacitorCoverBlobUrls.delete(oldestKey);
+    if (evictedUrl) {
+      sharedObjectUrlSet.delete(evictedUrl);
+      if (typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+        try {
+          URL.revokeObjectURL(evictedUrl);
+        } catch {
+          // Ignore revoke failure.
+        }
+      }
+    }
+  }
+};
 const inflightCoverResolutions = new Map<string, Promise<string | null>>();
 let capacitorCoverFallbackInstalled = false;
 
@@ -71,6 +94,7 @@ export const resolveLocalCoverObjectUrl = async (url: string | null | undefined)
 
   const cachedUrl = capacitorCoverBlobUrls.get(assetId);
   if (cachedUrl) {
+    touchCachedCoverBlobUrl(assetId, cachedUrl);
     return cachedUrl;
   }
 
@@ -86,8 +110,7 @@ export const resolveLocalCoverObjectUrl = async (url: string | null | undefined)
       let objectUrl = capacitorCoverBlobUrls.get(assetId);
       if (!objectUrl) {
         objectUrl = URL.createObjectURL(blob);
-        capacitorCoverBlobUrls.set(assetId, objectUrl);
-        sharedObjectUrlSet.add(objectUrl);
+        touchCachedCoverBlobUrl(assetId, objectUrl);
       }
       return objectUrl;
     } catch {

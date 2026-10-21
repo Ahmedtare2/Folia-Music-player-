@@ -44,13 +44,18 @@ export interface FoliaAndroidPlaybackMetadataPayload {
 export interface FoliaAndroidExtractedMetadata {
     title?: string;
     artist?: string;
+    albumArtist?: string;
     album?: string;
     durationMs?: number;
     bitrate?: number;
     trackNumber?: number;
     discNumber?: number;
+    year?: number;
+    genre?: string;
+    codec?: string;
     cover?: Blob;
     coverAssetId?: string;
+    hasEmbeddedCover?: boolean;
 }
 
 export type FoliaAndroidMediaActionType =
@@ -78,9 +83,24 @@ export interface FoliaAndroidSystemBarsState extends FoliaAndroidSystemBarsConfi
     behavior?: string;
 }
 
+export interface FoliaAndroidLyricProxyResponse {
+    ok: boolean;
+    status: number;
+    statusText: string;
+    headers: Record<string, string>;
+    bodyText: string;
+}
+
 export interface FoliaNativeBridgePluginContract {
     pickDirectory?: () => Promise<FoliaSafPickedDirectory | { cancelled?: boolean }>;
-    pickAudioFiles?: () => Promise<FoliaSafPickedFilesResult | { cancelled?: boolean }>;
+    pickAudioFiles?: (options?: { mimeType?: string }) => Promise<FoliaSafPickedFilesResult | { cancelled?: boolean }>;
+    fetchLyricProxy?: (options: {
+        url: string;
+        method?: string;
+        headers?: Record<string, string>;
+        body?: string;
+        timeoutMs?: number;
+    }) => Promise<FoliaAndroidLyricProxyResponse>;
     checkDirectoryPermission?: (options: { treeUri: string }) => Promise<{ granted: boolean; exists: boolean }>;
     scanDirectoryTree?: (options: { treeUri: string; documentId?: string }) => Promise<{ entries: FoliaSafEntryDescriptor[] }>;
     resolveRelativeFile?: (options: { treeUri: string; relativePath: string }) => Promise<{ entry: FoliaSafEntryDescriptor | null }>;
@@ -98,14 +118,19 @@ export interface FoliaNativeBridgePluginContract {
     }) => Promise<{
         title?: string;
         artist?: string;
+        albumArtist?: string;
         album?: string;
         durationMs?: number;
         bitrate?: number;
         trackNumber?: number;
         discNumber?: number;
+        year?: number;
+        genre?: string;
+        codec?: string;
         coverBase64?: string;
         coverMimeType?: string;
         coverAssetId?: string;
+        hasEmbeddedCover?: boolean;
     }>;
     syncPlaybackState?: (payload: FoliaAndroidPlaybackMetadataPayload) => Promise<void>;
     stopPlaybackService?: () => Promise<void>;
@@ -445,16 +470,25 @@ export const extractAndroidAudioMetadata = async (
             }
         }
 
+        const hasEmbeddedCover = typeof res.hasEmbeddedCover === 'boolean'
+            ? res.hasEmbeddedCover
+            : (options?.includeCover ? Boolean(cover) : undefined);
+
         return {
             title: res.title,
             artist: res.artist,
+            albumArtist: res.albumArtist,
             album: res.album,
             durationMs: typeof res.durationMs === 'number' && res.durationMs > 0 ? res.durationMs : undefined,
             bitrate: typeof res.bitrate === 'number' && res.bitrate > 0 ? res.bitrate : undefined,
             trackNumber: typeof res.trackNumber === 'number' && res.trackNumber > 0 ? res.trackNumber : undefined,
             discNumber: typeof res.discNumber === 'number' && res.discNumber > 0 ? res.discNumber : undefined,
+            year: typeof res.year === 'number' && res.year > 0 ? res.year : undefined,
+            genre: res.genre,
+            codec: res.codec,
             cover,
             coverAssetId: res.coverAssetId,
+            hasEmbeddedCover,
         };
     } catch {
         return null;
@@ -500,7 +534,64 @@ export const subscribeAndroidMediaActions = (
 
     return () => {
         if (handlePromise) {
-            void handlePromise.then(handle => handle?.remove?.()).catch(() => undefined);
+            void handlePromise.then(handle => handle?.remove?.()).catch(() => {});
         }
     };
+};
+
+export const hasAndroidLyricProxyBridge = (): boolean => {
+    const plugin = getNativePlugin();
+    return Boolean(plugin && typeof plugin.fetchLyricProxy === 'function');
+};
+
+export const fetchAndroidLyricProxy = async (
+    targetUrl: string,
+    init?: RequestInit,
+): Promise<FoliaAndroidLyricProxyResponse> => {
+    const plugin = getNativePlugin();
+    if (!plugin?.fetchLyricProxy) {
+        throw new Error('Native Android lyric proxy bridge is unavailable');
+    }
+    const headers: Record<string, string> = {};
+    if (init?.headers) {
+        if (init.headers instanceof Headers) {
+            init.headers.forEach((value, key) => {
+                headers[key] = value;
+            });
+        } else if (Array.isArray(init.headers)) {
+            for (const [key, value] of init.headers) {
+                headers[String(key)] = String(value);
+            }
+        } else {
+            for (const [key, value] of Object.entries(init.headers as Record<string, unknown>)) {
+                if (value !== undefined && value !== null) {
+                    headers[key] = String(value);
+                }
+            }
+        }
+    }
+    const body = typeof init?.body === 'string' ? init.body : undefined;
+    return await plugin.fetchLyricProxy({
+        url: targetUrl,
+        method: init?.method || 'GET',
+        headers,
+        ...(body !== undefined ? { body } : {}),
+    });
+};
+
+export const pickAndroidVideoFiles = async (): Promise<FoliaSafPickedFilesResult | null> => {
+    const plugin = getNativePlugin();
+    if (!plugin?.pickAudioFiles) return null;
+    try {
+        const res = await plugin.pickAudioFiles({ mimeType: 'video/*' });
+        if (!res || ('cancelled' in res && res.cancelled)) {
+            return null;
+        }
+        if ('files' in res && Array.isArray(res.files) && res.files.length > 0) {
+            return res;
+        }
+    } catch (error) {
+        console.warn('[AndroidBridge] Failed to pick video files:', error);
+    }
+    return null;
 };

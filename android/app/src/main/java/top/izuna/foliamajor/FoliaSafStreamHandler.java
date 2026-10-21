@@ -7,22 +7,29 @@ import android.database.Cursor;
 import android.net.Uri;
 import android.os.ParcelFileDescriptor;
 import android.provider.OpenableColumns;
+import android.system.Os;
+import android.system.OsConstants;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
+import java.io.FileDescriptor;
 import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.channels.FileChannel;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Serves Storage Access Framework (SAF) content:// URIs over same-origin https://localhost/__folia_saf/stream
- * with full HTTP 206 Partial Content byte-range support so large lossless audio files (FLAC/WAV/MP3/M4A/OGG/OPUS)
- * stream and seek instantaneously without loading entire files into the WebView JavaScript heap.
+ * with full HTTP 206 Partial Content byte-range support and O(1) kernel descriptor seeking so large
+ * lossless audio files (FLAC/WAV/MP3/M4A/OGG/OPUS) stream and seek instantaneously without blocking
+ * the WebView network thread or loading entire files into the JavaScript heap.
  */
 public final class FoliaSafStreamHandler {
     public static final String STREAM_PATH = "/__folia_saf/stream";
+    private static final int MAX_SIZE_CACHE_ENTRIES = 2048;
+    private static final ConcurrentHashMap<String, Long> resolvedSizeCache = new ConcurrentHashMap<>();
 
     private FoliaSafStreamHandler() {}
 
@@ -73,7 +80,7 @@ public final class FoliaSafStreamHandler {
             }
 
             baseStream = new FileInputStreamWithAfd(afd);
-            long totalLength = resolveTotalLength(resolver, contentUri, afd, baseStream, sizeParam);
+            long totalLength = resolveTotalLength(resolver, contentUri, rawUri, afd, baseStream, sizeParam);
 
             String rangeHeader = null;
             if (request.getRequestHeaders() != null) {
@@ -99,7 +106,6 @@ public final class FoliaSafStreamHandler {
                     long start;
                     long end;
                     if (startPart.isEmpty()) {
-                        // Suffix byte-range spec: bytes=-500 (last 500 bytes)
                         long suffixLength = endPart.isEmpty() ? 0L : Long.parseLong(endPart);
                         if (suffixLength <= 0L) {
                             start = 0L;
@@ -163,19 +169,25 @@ public final class FoliaSafStreamHandler {
         }
     }
 
-    /**
-     * Resolves the exact byte length of a SAF document even when AssetFileDescriptor.getLength()
-     * returns UNKNOWN_LENGTH (-1), which is standard for ExternalStorageProvider documents.
-     */
+    private static void cacheResolvedSize(String rawUri, long size) {
+        if (rawUri == null || size <= 0L) return;
+        if (resolvedSizeCache.size() >= MAX_SIZE_CACHE_ENTRIES) {
+            resolvedSizeCache.clear();
+        }
+        resolvedSizeCache.put(rawUri, size);
+    }
+
     private static long resolveTotalLength(
         ContentResolver resolver,
         Uri contentUri,
+        String rawUri,
         AssetFileDescriptor afd,
         FileInputStreamWithAfd baseStream,
         String sizeParam
     ) {
         long declared = afd.getLength();
         if (declared > 0L) {
+            cacheResolvedSize(rawUri, declared);
             return declared;
         }
 
@@ -184,6 +196,7 @@ public final class FoliaSafStreamHandler {
             if (pfd != null) {
                 long statSize = pfd.getStatSize();
                 if (statSize > 0L) {
+                    cacheResolvedSize(rawUri, statSize);
                     return statSize;
                 }
             }
@@ -197,17 +210,20 @@ public final class FoliaSafStreamHandler {
                 long channelSize = channel.size();
                 long startOffset = Math.max(0L, afd.getStartOffset());
                 if (channelSize > startOffset) {
-                    return channelSize - startOffset;
+                    long resolved = channelSize - startOffset;
+                    cacheResolvedSize(rawUri, resolved);
+                    return resolved;
                 }
             }
         } catch (Exception ignored) {
-            // Fall through to ContentResolver query.
+            // Fall through to cached or query param size.
         }
 
         if (sizeParam != null && !sizeParam.isEmpty()) {
             try {
                 long parsedSize = Long.parseLong(sizeParam);
                 if (parsedSize > 0L) {
+                    cacheResolvedSize(rawUri, parsedSize);
                     return parsedSize;
                 }
             } catch (NumberFormatException ignored) {
@@ -215,10 +231,16 @@ public final class FoliaSafStreamHandler {
             }
         }
 
+        Long cachedSize = rawUri != null ? resolvedSizeCache.get(rawUri) : null;
+        if (cachedSize != null && cachedSize > 0L) {
+            return cachedSize;
+        }
+
         try (Cursor cursor = resolver.query(contentUri, new String[] { OpenableColumns.SIZE }, null, null, null)) {
             if (cursor != null && cursor.moveToFirst() && !cursor.isNull(0)) {
                 long queriedSize = cursor.getLong(0);
                 if (queriedSize > 0L) {
+                    cacheResolvedSize(rawUri, queriedSize);
                     return queriedSize;
                 }
             }
@@ -258,6 +280,17 @@ public final class FoliaSafStreamHandler {
 
         private void seekInternal(long targetPosition) throws IOException {
             try {
+                FileDescriptor fd = afd.getFileDescriptor();
+                if (fd != null && fd.valid()) {
+                    long positioned = Os.lseek(fd, targetPosition, OsConstants.SEEK_SET);
+                    if (positioned == targetPosition) {
+                        return;
+                    }
+                }
+            } catch (Exception ignored) {
+                // Fall back to FileChannel.position().
+            }
+            try {
                 FileChannel channel = getChannel();
                 if (channel != null) {
                     channel.position(targetPosition);
@@ -267,7 +300,7 @@ public final class FoliaSafStreamHandler {
                 // Pipe-backed descriptor: fall back to stream skip.
             }
             long remainingToSkip = targetPosition;
-            byte[] skipBuffer = new byte[8192];
+            byte[] skipBuffer = new byte[16384];
             while (remainingToSkip > 0L) {
                 long skipped = super.skip(remainingToSkip);
                 if (skipped > 0L) {

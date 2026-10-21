@@ -1,3 +1,4 @@
+import { fetchKugouLyrics } from './kugouLyricProvider';
 import type { SongResult, UnifiedSong } from '../../../types';
 import {
     OnlineProviderError,
@@ -733,7 +734,20 @@ const getKugouLyricCandidate = async (song: SongResult): Promise<any | null> => 
 
 // Fetches the server-decoded KRC payload exposed by the current KuGou provider API.
 const getKugouLyrics = async (song: SongResult) => {
-    const candidate = await getKugouLyricCandidate(song);
+    let candidate: any | null = null;
+    try {
+        candidate = await getKugouLyricCandidate(song);
+    } catch (error) {
+        if (error instanceof Error && error.message.includes('VITE_KUGOU_API_BASE')) {
+            const directLyrics = await fetchKugouLyrics(song);
+            return {
+                lyrics: hasRenderableLyrics(directLyrics) ? directLyrics : null,
+                isPureMusic: false,
+                chorusRanges: [],
+            };
+        }
+        throw error;
+    }
     if (!candidate?.id || !candidate?.accesskey) {
         return { lyrics: null, isPureMusic: false, chorusRanges: [] };
     }

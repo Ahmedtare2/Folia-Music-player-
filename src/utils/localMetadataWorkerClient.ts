@@ -2,11 +2,16 @@ export interface EmbeddedMetadataResult {
     title?: string;
     artist?: string;
     artists?: string[];
+    albumArtist?: string;
     album?: string;
     trackNumber?: number;
     discNumber?: number;
+    year?: number;
+    genre?: string;
+    codec?: string;
     cover?: Blob;
     coverAssetId?: string;
+    hasEmbeddedCover?: boolean;
     bitrate?: number;
     lyrics?: string;
     translationLyrics?: string;

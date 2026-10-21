@@ -654,13 +654,29 @@ export function usePlaybackQueueController({
         }
 
         if (isLocal) {
-            // The newest record of this song from the library, not only the one in `localSongs`: the warm-up
-            // of the songs nearby and a match writing back land in the store first, and an older copy here
-            // would extract the cover again before the sound, and match again after it. The state's record
-            // where the library has none.
-            const localData = (await getLocalSong(song.localRef.songId))
-                ?? localSongs.find(ls => ls.id === song.localRef.songId)
-                ?? null;
+            // The newest record of this song from the library merged with the live in-memory handle:
+            // IndexedDB strips `fileHandle` on write, so keeping `inMemorySong.fileHandle` avoids
+            // redundant SAF directory tree resolution on every Next/Previous track switch.
+            const localSongsById = new Map(localSongs.map(ls => [ls.id, ls]));
+            const inMemorySong = localSongsById.get(song.localRef.songId);
+            let dbSong: LocalSong | undefined;
+            if (typeof getLocalSong === 'function') {
+                try {
+                    dbSong = await getLocalSong(song.localRef.songId);
+                } catch {
+                    dbSong = undefined;
+                }
+            }
+            const localData = dbSong
+                ? {
+                    ...inMemorySong,
+                    ...dbSong,
+                    fileHandle: dbSong.fileHandle ?? inMemorySong?.fileHandle,
+                    safContentUri: dbSong.safContentUri ?? inMemorySong?.safContentUri,
+                    safTreeUri: dbSong.safTreeUri ?? inMemorySong?.safTreeUri,
+                    safDocumentId: dbSong.safDocumentId ?? inMemorySong?.safDocumentId,
+                }
+                : (inMemorySong ?? null);
             if (!isLatestPlaybackRequest()) return;
 
             if (!localData) {
@@ -674,7 +690,7 @@ export function usePlaybackQueueController({
             const localQueue = queueContext
                 .map(queuedSong => {
                     const songId = (queuedSong as UnifiedSong).localRef?.songId;
-                    return songId ? localSongs.find(localSong => localSong.id === songId) : undefined;
+                    return songId ? localSongsById.get(songId) : undefined;
                 })
                 .filter((queuedSong): queuedSong is LocalSong => Boolean(queuedSong));
             fmModeBeforePendingPlayRef.current = null;
