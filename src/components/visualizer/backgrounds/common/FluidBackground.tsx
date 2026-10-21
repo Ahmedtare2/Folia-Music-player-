@@ -130,9 +130,9 @@ const buildSoftFocusCover = (coverUrl: string): Promise<string | null> => new Pr
 // A full-screen blurred cover layer at scale 1.5 cost about 100 MB of Chromium's per-window tile memory
 // per copy, and the two copies kept during a song change ran that budget out, so whole layers dropped
 // for single frames. A small canvas stretched over the screen is composited as one small texture.
-const COVER_CANVAS_WIDTH = 320;
+const COVER_CANVAS_WIDTH = 288;
 /** Longest side (px) a cover is kept at for drawing: plenty under the blur, and not the full-size picture. */
-const COVER_SOURCE_MAX = 640;
+const COVER_SOURCE_MAX = 384;
 /** How long the overlay's colours take to follow a theme change: the backdrop's transition-colors duration-1000. */
 const OVERLAY_BLEND_MS = 1000;
 
@@ -330,7 +330,7 @@ const CoverCanvas: React.FC<CoverCanvasProps> = ({ image, primaryColor, secondar
         return () => cancelAnimationFrame(frame);
     }, [box, image, primaryColor, secondaryColor]);
 
-    return <canvas ref={canvasRef} aria-hidden="true" className="absolute inset-0 w-full h-full" />;
+    return <canvas ref={canvasRef} aria-hidden="true" className="absolute inset-0 w-full h-full" style={{ imageRendering: 'auto' }} />;
 };
 
 const FluidBackground: React.FC<FluidBackgroundProps> = memo(({ coverUrl, theme }) => {

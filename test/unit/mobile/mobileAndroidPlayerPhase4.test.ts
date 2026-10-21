@@ -29,11 +29,21 @@ import {
     MOBILE_MAX_CANVAS_DPR,
     MOBILE_MAX_PIXI_RESOLUTION,
     MOBILE_MAX_TEXTURE_AXIS_PX,
+    AMBIENT_BACKGROUND_DPR_SCALE,
+    AMBIENT_BACKGROUND_MAX_DIMENSION_PX,
+    AMBIENT_BACKGROUND_MAX_PIXELS,
+    resolveAmbientBackgroundCanvasSize,
     resolveMobileCanvasDpr,
     resolveMobileLumiereQuality,
     resolveMobilePixiResolution,
     shouldSuspendVisualizerForVisibility,
 } from '@/utils/mobileVisualizerBudget';
+import { MONET_BACKGROUND_HEIGHT, MONET_BACKGROUND_WIDTH } from '@/components/visualizer/monet/monetBackgroundPaint';
+import {
+    isAppForegroundVisible,
+    setNativeActivityVisibleForTests,
+    subscribeAppForegroundVisibility,
+} from '@/utils/visualizerVisibilityGate';
 import {
     isMobilePhoneViewport,
     shouldUseAndroidMobileShell,
@@ -1700,6 +1710,103 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
             expect(
                 fallbackToArtworkNodes.find(n => n.props?.['data-testid'] === 'dynamic-album-cover-stage'),
             ).toBeTruthy();
+        });
+
+        it('enforces 0.30x / max-384px ambient background resolution, viewport culling for off-screen lyric lines, and strict screen-off visibility freeze', () => {
+            // 1. Ambient background internal framebuffer resolution
+            expect(AMBIENT_BACKGROUND_DPR_SCALE).toBe(0.3);
+            expect(AMBIENT_BACKGROUND_MAX_DIMENSION_PX).toBe(384);
+            expect(AMBIENT_BACKGROUND_MAX_PIXELS).toBe(384 * 256);
+            expect(MONET_BACKGROUND_WIDTH).toBe(384);
+            expect(MONET_BACKGROUND_HEIGHT).toBe(256);
+
+            const sized1080p = resolveAmbientBackgroundCanvasSize(1920, 1080);
+            expect(sized1080p.width).toBeLessThanOrEqual(384);
+            expect(sized1080p.height).toBeLessThanOrEqual(256);
+
+            const sizedMobile = resolveAmbientBackgroundCanvasSize(412, 915);
+            expect(sizedMobile.height).toBeLessThanOrEqual(384);
+            expect(sizedMobile.width).toBeLessThanOrEqual(256);
+
+            // 2. Viewport culling on 30-line lyric list: lines far from active/viewport center are culled & un-blurred
+            const manyLines = Array.from({ length: 30 }, (_, idx) => ({
+                startTime: idx * 4,
+                endTime: (idx + 1) * 4,
+                fullText: `Lyric line number ${idx + 1}`,
+                words: [{ text: 'Lyric', startTime: idx * 4, endTime: idx * 4 + 2 }],
+            }));
+
+            const lyricsNodes = expandVNodeTree(
+                (MobileNowPlayingSheet as unknown as (p: any) => unknown)({
+                    isOpen: true,
+                    displayMode: 'lyrics' as const,
+                    subDrawer: 'none' as const,
+                    onChangeDisplayMode: vi.fn(),
+                    onChangeSubDrawer: vi.fn(),
+                    onClose: vi.fn(),
+                    currentSong: { id: 1, name: 'Test', artists: [{ id: 1, name: 'Artist' }], album: { id: 1, name: 'Album' } },
+                    artistName: 'Artist',
+                    albumName: 'Album',
+                    coverUrl: null,
+                    playerState: PlayerState.PLAYING,
+                    currentTime: motionValue(1),
+                    lyricCurrentTime: motionValue(1),
+                    duration: 120,
+                    lyrics: { lines: manyLines },
+                    currentLineIndex: 0,
+                    isLyricsLoading: false,
+                    isLiked: false,
+                    loopMode: 'all' as const,
+                    theme: { primaryColor: '#fff', secondaryColor: '#aaa', backgroundColor: '#000', accentColor: '#38bdf8' },
+                    visualizerMode: 'monet' as const,
+                    onVisualizerModeChange: vi.fn(),
+                    lyricsFontScale: 1,
+                    onLyricsFontScaleChange: vi.fn(),
+                    showSubtitleTranslation: true,
+                    onToggleSubtitleTranslation: vi.fn(),
+                    lyricTimelineOffsetMs: 0,
+                    onLyricTimelineOffsetChange: vi.fn(),
+                    activeLocalLyricsSource: 'local' as const,
+                    onChangeLyricsSource: vi.fn(),
+                    onImportLocalLyricsFile: vi.fn(),
+                    onOpenLyricMatch: vi.fn(),
+                    onSeek: vi.fn(),
+                    onLyricLineSeek: vi.fn(),
+                    onTogglePlay: vi.fn(),
+                    onPrevTrack: vi.fn(),
+                    onNextTrack: vi.fn(),
+                    onToggleLoop: vi.fn(),
+                    onToggleLike: vi.fn(),
+                    onShuffleQueue: vi.fn(),
+                    playQueue: [],
+                    onPlayQueueSong: vi.fn(),
+                    onRemoveQueueSong: vi.fn(),
+                    onSaveQueueAsPlaylist: vi.fn(),
+                    onOpenVisualizerSettings: vi.fn(),
+                }),
+            );
+
+            const line0 = lyricsNodes.find(n => n.props?.['data-lyric-index'] === 0);
+            const line1 = lyricsNodes.find(n => n.props?.['data-lyric-index'] === 1);
+            const line25 = lyricsNodes.find(n => n.props?.['data-lyric-index'] === 25);
+
+            expect(line0?.props?.['data-viewport-culled']).toBe('false');
+            expect(line0?.props?.style?.filter).toBe('none');
+            expect(line1?.props?.['data-viewport-culled']).toBe('false');
+            expect(line1?.props?.style?.filter).toBe('blur(0.5px)');
+            // Off-screen line 25 is culled and un-blurred
+            expect(line25?.props?.['data-viewport-culled']).toBe('true');
+            expect(line25?.props?.style?.filter).toBe('none');
+
+            // 3. Strict screen-off & background visibility gate
+            const observedStates: boolean[] = [];
+            const unsub = subscribeAppForegroundVisibility(v => observedStates.push(v));
+            setNativeActivityVisibleForTests(false);
+            expect(isAppForegroundVisible()).toBe(false);
+            setNativeActivityVisibleForTests(true);
+            expect(isAppForegroundVisible()).toBe(true);
+            expect(observedStates).toEqual([false, true]);
+            unsub();
         });
     });
 });

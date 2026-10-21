@@ -2,9 +2,38 @@ import { isAndroidNativeApp } from '../../utils/platform';
 
 // src/services/android/foliaAndroidBridge.ts
 // Typed interface and runtime bridge to the native Android Capacitor plugin (FoliaNativeBridgePlugin)
-// for Storage Access Framework (SAF) local folder/file access, byte-range media streaming,
-// off-thread native metadata/artwork extraction, AndroidX Media3 foreground playback notification,
-// and AndroidX WindowInsetsControllerCompat system bar visibility.
+// for Storage Access Framework (SAF) local folder/file access, 512 KB+ buffered & pre-staged
+// byte-range media streaming (context.getCacheDir()/saf_audio_stage/), off-thread native
+// metadata/artwork extraction, persistent internal disk caching
+// (context.getFilesDir()/media_cache/{covers,lyrics,palettes,index}), 256x256 + 1024x1024 WebP
+// cover mipmap generation & native Monet/palette color extraction, AndroidX Media3 foreground
+// playback notification, and AndroidX WindowInsetsControllerCompat system bar visibility.
+
+export type FoliaDiskCacheNamespace = 'covers' | 'lyrics' | 'palettes' | 'index';
+
+export interface FoliaDiskCacheStats {
+    coversBytes: number;
+    lyricsBytes: number;
+    palettesBytes: number;
+    indexBytes: number;
+    totalBytes: number;
+}
+
+export interface FoliaCachedCoverAndPaletteResult {
+    ok: boolean;
+    assetId?: string;
+    cover256Path?: string;
+    cover1024Path?: string;
+    vibrantColors?: string[];
+    representativeColors?: string[];
+}
+
+export interface FoliaPrestageSafAudioResult {
+    ok: boolean;
+    stagedCount: number;
+    stagedPaths?: string[];
+    cacheDir?: string;
+}
 
 export interface FoliaSafPickedDirectory {
     treeUri: string;
@@ -56,6 +85,8 @@ export interface FoliaAndroidExtractedMetadata {
     cover?: Blob;
     coverAssetId?: string;
     hasEmbeddedCover?: boolean;
+    vibrantColors?: string[];
+    representativeColors?: string[];
     hasEmbeddedLyrics?: boolean;
     lyrics?: string;
     translationLyrics?: string;
@@ -104,6 +135,29 @@ export interface FoliaNativeBridgePluginContract {
         body?: string;
         timeoutMs?: number;
     }) => Promise<FoliaAndroidLyricProxyResponse>;
+    readDiskCacheJson?: (options: {
+        namespace: FoliaDiskCacheNamespace;
+        key: string;
+    }) => Promise<{ hit: boolean; json?: string }>;
+    writeDiskCacheJson?: (options: {
+        namespace: FoliaDiskCacheNamespace;
+        key: string;
+        json: string;
+    }) => Promise<{ ok: boolean; size?: number }>;
+    deleteDiskCacheEntry?: (options: {
+        namespace: FoliaDiskCacheNamespace;
+        key?: string;
+    }) => Promise<{ ok: boolean }>;
+    getDiskCacheStats?: () => Promise<FoliaDiskCacheStats>;
+    cacheCoverAndExtractPalette?: (options: {
+        assetId?: string;
+        dataBase64?: string;
+        contentUri?: string;
+    }) => Promise<FoliaCachedCoverAndPaletteResult>;
+    prestageSafAudioTracks?: (options: {
+        uris: string[];
+        contentUri?: string;
+    }) => Promise<FoliaPrestageSafAudioResult>;
     checkDirectoryPermission?: (options: { treeUri: string }) => Promise<{ granted: boolean; exists: boolean }>;
     scanDirectoryTree?: (options: { treeUri: string; documentId?: string }) => Promise<{ entries: FoliaSafEntryDescriptor[] }>;
     resolveRelativeFile?: (options: { treeUri: string; relativePath: string }) => Promise<{ entry: FoliaSafEntryDescriptor | null }>;
@@ -134,6 +188,8 @@ export interface FoliaNativeBridgePluginContract {
         coverMimeType?: string;
         coverAssetId?: string;
         hasEmbeddedCover?: boolean;
+        vibrantColors?: string[];
+        representativeColors?: string[];
         hasEmbeddedLyrics?: boolean;
         lyrics?: string;
         translationLyrics?: string;
@@ -150,6 +206,7 @@ export interface FoliaNativeBridgePluginContract {
 }
 
 export const ANDROID_SAF_STREAM_PATH = '/__folia_saf/stream';
+export const ANDROID_SAF_STREAM_READ_BUFFER_BYTES = 512 * 1024;
 export const ANDROID_VISIBILITY_EVENT = 'folia:native-visibility';
 export const ANDROID_SYSTEM_BARS_STATE_EVENT = 'folia:system-bars-state';
 export const ANDROID_SYSTEM_INSETS_EVENT = 'folia:system-insets';
@@ -276,6 +333,32 @@ export const isAndroidSafStreamUrl = (url: string | null | undefined): boolean =
     )
 );
 
+/**
+ * Pre-stages the currently playing and next queued local SAF audio tracks into
+ * context.getCacheDir()/saf_audio_stage/ using a 512 KB copy buffer so playback reads from
+ * a contiguous local file instead of making hundreds of SAF ContentProvider IPC calls.
+ */
+export const prestageAndroidSafAudioTracks = async (
+    uris: ReadonlyArray<string | null | undefined>,
+): Promise<FoliaPrestageSafAudioResult | null> => {
+    const plugin = getNativePlugin();
+    if (!plugin?.prestageSafAudioTracks) return null;
+    const normalized = Array.from(new Set(
+        uris
+            .filter((uri): uri is string => typeof uri === 'string' && uri.trim().startsWith('content://'))
+            .map(uri => uri.trim()),
+    ));
+    if (normalized.length === 0) return null;
+    try {
+        return await plugin.prestageSafAudioTracks({
+            uris: normalized,
+            contentUri: normalized[0],
+        });
+    } catch {
+        return null;
+    }
+};
+
 /** Opens the Android SAF folder picker, falling back to multi-file selection if document trees are unsupported. */
 export const pickAndroidMusicSource = async (): Promise<
     | { mode: 'tree'; directory: FoliaSafPickedDirectory }
@@ -394,6 +477,19 @@ const decodeBase64ToUint8Array = (base64: string): Uint8Array => {
     return bytes;
 };
 
+const encodeUint8ArrayToBase64 = (bytes: Uint8Array): string => {
+    if (typeof Buffer !== 'undefined') {
+        return Buffer.from(bytes).toString('base64');
+    }
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+        const sub = bytes.subarray(i, i + chunkSize);
+        binary += String.fromCharCode(...sub);
+    }
+    return btoa(binary);
+};
+
 export interface ReadAndroidBytesOptions {
     offset?: number;
     maxBytes?: number;
@@ -495,10 +591,88 @@ export const extractAndroidAudioMetadata = async (
             cover,
             coverAssetId: res.coverAssetId,
             hasEmbeddedCover,
+            vibrantColors: Array.isArray(res.vibrantColors) ? res.vibrantColors : undefined,
+            representativeColors: Array.isArray(res.representativeColors) ? res.representativeColors : undefined,
             hasEmbeddedLyrics: typeof res.hasEmbeddedLyrics === "boolean" ? res.hasEmbeddedLyrics : Boolean(res.lyrics),
             lyrics: typeof res.lyrics === "string" && res.lyrics.trim() ? res.lyrics : undefined,
             translationLyrics: typeof res.translationLyrics === "string" && res.translationLyrics.trim() ? res.translationLyrics : undefined,
         };
+    } catch {
+        return null;
+    }
+};
+
+export const readAndroidDiskCacheJson = async (
+    namespace: FoliaDiskCacheNamespace,
+    key: string,
+): Promise<string | null> => {
+    const plugin = getNativePlugin();
+    if (!plugin?.readDiskCacheJson || !key) return null;
+    try {
+        const res = await plugin.readDiskCacheJson({ namespace, key });
+        return res?.hit && typeof res.json === 'string' && res.json.length > 0 ? res.json : null;
+    } catch {
+        return null;
+    }
+};
+
+export const writeAndroidDiskCacheJson = async (
+    namespace: FoliaDiskCacheNamespace,
+    key: string,
+    json: string,
+): Promise<boolean> => {
+    const plugin = getNativePlugin();
+    if (!plugin?.writeDiskCacheJson || !key || typeof json !== 'string') return false;
+    try {
+        const res = await plugin.writeDiskCacheJson({ namespace, key, json });
+        return Boolean(res?.ok);
+    } catch {
+        return false;
+    }
+};
+
+export const deleteAndroidDiskCacheEntry = async (
+    namespace: FoliaDiskCacheNamespace,
+    key?: string,
+): Promise<boolean> => {
+    const plugin = getNativePlugin();
+    if (!plugin?.deleteDiskCacheEntry) return false;
+    try {
+        const res = await plugin.deleteDiskCacheEntry({ namespace, key });
+        return Boolean(res?.ok);
+    } catch {
+        return false;
+    }
+};
+
+export const getAndroidDiskCacheStats = async (): Promise<FoliaDiskCacheStats | null> => {
+    const plugin = getNativePlugin();
+    if (!plugin?.getDiskCacheStats) return null;
+    try {
+        return await plugin.getDiskCacheStats();
+    } catch {
+        return null;
+    }
+};
+
+export const cacheAndroidCoverAndExtractPalette = async (options: {
+    assetId?: string;
+    blob?: Blob;
+    contentUri?: string;
+}): Promise<FoliaCachedCoverAndPaletteResult | null> => {
+    const plugin = getNativePlugin();
+    if (!plugin?.cacheCoverAndExtractPalette) return null;
+    try {
+        let dataBase64: string | undefined;
+        if (options.blob && options.blob.size > 0) {
+            const bytes = new Uint8Array(await options.blob.arrayBuffer());
+            dataBase64 = encodeUint8ArrayToBase64(bytes);
+        }
+        return await plugin.cacheCoverAndExtractPalette({
+            assetId: options.assetId,
+            dataBase64,
+            contentUri: options.contentUri,
+        });
     } catch {
         return null;
     }

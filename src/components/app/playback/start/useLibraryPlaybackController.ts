@@ -4,7 +4,7 @@ import type { MotionValue } from 'framer-motion';
 import { LyricParserFactory } from '../../../../utils/lyrics/LyricParserFactory';
 import { getFromCacheWithMigration, getLocalSong, getLocalSongs, removeFromCache, saveLocalSong, saveToCache } from '../../../../services/db';
 import { getCachedCoverUrl, loadCachedOrFetchCover } from '../../../../services/coverCache';
-import { ensureLocalSongCoverAsset } from '../../../../services/localMusicService';
+import { ensureLocalSongCoverAsset, prestageLocalSongsForPlayback } from '../../../../services/localMusicService';
 import { addSongsToLocalPlaylist, buildCanonicalLocalSongIdIndex, createLocalPlaylist, getLocalPlaylists, setLocalSongFavorite } from '../../../../services/localPlaylistService';
 import { applyLocalLibraryEntityDisplay, buildLocalQueue, buildNavidromeQueue, buildUnifiedLocalSong, buildUnifiedNavidromeSong, resolveLocalSongMetadata } from '../../../../services/playbackAdapters';
 import { getPrefetchedData, prefetchNearbySongs } from '../../../../services/prefetchService';
@@ -635,6 +635,9 @@ export function useLibraryPlaybackController({
             return;
         }
 
+        const nextQueuedSong = queue[currentIndex + 1] ?? queue[0];
+        void prestageLocalSongsForPlayback([currentLocalSong, nextQueuedSong]);
+
         const nearbySongs = [-1, 1, 2]
             .map(offset => queue[currentIndex + offset])
             .filter((song): song is LocalSong => Boolean(song));
@@ -680,6 +683,9 @@ export function useLibraryPlaybackController({
         }
 
         const { blobUrl, localSong: preparedLocalSong } = audio;
+        const activeIdx = queue.findIndex(item => item.id === preparedLocalSong.id);
+        const nextLocalSong = activeIdx >= 0 ? (queue[activeIdx + 1] ?? null) : null;
+        void prestageLocalSongsForPlayback([preparedLocalSong, nextLocalSong]);
         // A newer play started, or the plays in flight were dropped, while this one waited: nothing
         // of this song is written, and the blob URL just made for it is given back.
         const givesUp = () => {

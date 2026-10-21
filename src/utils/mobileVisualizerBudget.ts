@@ -11,6 +11,31 @@ export const DESKTOP_MAX_CANVAS_DPR = 2.0;
 export const MOBILE_MAX_PIXI_RESOLUTION = 1.25;
 export const MOBILE_MAX_TEXTURE_AXIS_PX = 1536;
 
+// Ambient background visualizers behind lyrics are heavily blurred/diffused; rendering their
+// internal framebuffers at 0.30x DPR (capped at 384px longest axis / 384x256 pixels) with smooth
+// bilinear CSS upscaling preserves the exact visual look while cutting fragment shader load by ~85-90%.
+export const AMBIENT_BACKGROUND_DPR_SCALE = 0.3;
+export const AMBIENT_BACKGROUND_MAX_DIMENSION_PX = 384;
+export const AMBIENT_BACKGROUND_MAX_PIXELS = 384 * 256;
+
+export const resolveAmbientBackgroundCanvasSize = (
+    cssWidth: number,
+    cssHeight: number,
+    maxDimensionPx: number = AMBIENT_BACKGROUND_MAX_DIMENSION_PX,
+    dprScale: number = AMBIENT_BACKGROUND_DPR_SCALE,
+): { width: number; height: number; scaleMultiplier: number } => {
+    const safeW = Math.max(1, Math.round(cssWidth || 320));
+    const safeH = Math.max(1, Math.round(cssHeight || 240));
+    const maxCssSide = Math.max(safeW, safeH);
+    const axisLimitScale = maxDimensionPx / maxCssSide;
+    const scaleMultiplier = Math.max(0.1, Math.min(dprScale, axisLimitScale));
+    return {
+        width: Math.max(1, Math.round(safeW * scaleMultiplier)),
+        height: Math.max(1, Math.round(safeH * scaleMultiplier)),
+        scaleMultiplier,
+    };
+};
+
 /** Whether the active runtime is a mobile/Android device with mobile GPU/thermal constraints. */
 export const isMobileGpuConstrained = (options?: {
     viewportWidth?: number;

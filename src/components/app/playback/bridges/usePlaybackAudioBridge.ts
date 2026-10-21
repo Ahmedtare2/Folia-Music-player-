@@ -5,6 +5,7 @@ import type { ReplayGainInfo, SongResult } from '../../../../types';
 import type { LocalSong } from '../../../../types';
 import { isLocalPlaybackSong, resolveNavidromePlaybackCarrier } from '../../../../utils/appPlaybackGuards';
 import { calculateReplayGain } from '../../../../utils/replayGain';
+import { shouldBypassWebAudioDspGraph } from '../../../../utils/audioEqualizer';
 import { applyAudioEqualizerSettings } from '../../../../services/audioEqualizerGraph';
 import { type AudioEffectChain } from '../../../../services/audioEffects/effectChain';
 import { buildPlaybackGraph } from '../../../../services/playbackGraph';
@@ -19,6 +20,11 @@ import { useTranslation } from 'react-i18next';
 import { usePlaybackStore } from '../../../../stores/usePlaybackStore';
 
 // src/components/app/playback/bridges/usePlaybackAudioBridge.ts
+
+type ManagedEffectChainHandle = AudioEffectChain & {
+    setGraphDspBypass?: (bypassed: boolean) => void;
+    isGraphDspBypassed?: () => boolean;
+};
 
 type UsePlaybackAudioBridgeParams = {
 
@@ -40,9 +46,13 @@ type UsePlaybackAudioBridgeParams = {
     syncOutputGain: (targetVolume: number, smoothing?: number) => void;
     getTargetPlaybackVolume: () => number;
     getCoverUrl: () => string | null;
+    /** True when Automix crossfade/blend transitions are enabled. */
+    automixEnabled?: boolean;
+    /** True when Stem Separation is enabled for transitions. */
+    stemSeparationEnabled?: boolean;
 };
 
-// Bridges audio element setup, autoplay, replay gain, and media caching.
+// Bridges audio element setup, direct hardware decoder bypass vs. WebAudio DSP graph, autoplay, replay gain, and media caching.
 export function usePlaybackAudioBridge({
     audioRef,
     localSongs,
@@ -58,6 +68,8 @@ export function usePlaybackAudioBridge({
     syncOutputGain,
     getTargetPlaybackVolume,
     getCoverUrl,
+    automixEnabled = false,
+    stemSeparationEnabled = false,
 }: UsePlaybackAudioBridgeParams) {
     // Read here rather than passed in: all store fields or i18n.
     const { t } = useTranslation();
@@ -69,8 +81,17 @@ export function usePlaybackAudioBridge({
     const previousAudioSrcRef = useRef<string | null>(null);
     const replayGainLogSignatureRef = useRef<string | null>(null);
     const equalizerNodesRef = useRef<BiquadFilterNode[]>([]);
-    const effectChainRef = useRef<AudioEffectChain | null>(null);
+    const effectChainRef = useRef<ManagedEffectChainHandle | null>(null);
     const audioEqualizerSettings = useAudioSettingsStore(state => state.audioEqualizerSettings);
+
+    // When Chorus/Effects, EQ, Automix, and Stem Separation are all turned off, bypass the WebAudio
+    // AudioContext processing nodes so the Android hardware audio decoder handles playback directly
+    // with minimal CPU usage, leaving maximum CPU/GPU resources for the 60/120fps lyrics visualizer.
+    const shouldBypassDsp = shouldBypassWebAudioDspGraph({
+        equalizerSettings: audioEqualizerSettings,
+        automixEnabled,
+        stemSeparationEnabled,
+    });
 
     // Recalculates source-specific gain after the audio graph or playback settings become ready.
     const applyReplayGain = useCallback(() => {
@@ -127,13 +148,21 @@ export function usePlaybackAudioBridge({
         }
     }, [audioContextRef, currentSong, gainNodeRef, getActiveChain, localSongs, replayGainMode]);
 
-    const setupAudioAnalyzer = useCallback(() => {
+    const setupAudioAnalyzer = useCallback((forceCreate = false) => {
         if (!audioRef.current) return;
-        // If the AudioContext already exists, ensure it is not stuck in 'suspended' state when playback starts.
+        // If the AudioContext already exists, update its DSP bypass state and ensure it is not stuck
+        // in 'suspended' state when playback starts.
         if (audioContextRef.current) {
+            effectChainRef.current?.setGraphDspBypass?.(shouldBypassDsp);
             if (audioContextRef.current.state === 'suspended') {
                 void audioContextRef.current.resume().catch(() => {});
             }
+            return;
+        }
+        // Direct Hardware Audio Path: when Chorus, EQ, Automix, and Stem Separation are all turned off,
+        // do not instantiate AudioContext or hijack the HTMLAudioElement via createMediaElementSource.
+        if (shouldBypassDsp && !forceCreate) {
+            syncOutputGain(getTargetPlaybackVolume(), 0);
             return;
         }
         try {
@@ -147,18 +176,25 @@ export function usePlaybackAudioBridge({
             analyser.smoothingTimeConstant = 0.6;
             analyserRef.current = analyser;
 
-            const { gainNode, fadeNode, effectChain, decksConnected } = buildPlaybackGraph({
+            const builtGraph = buildPlaybackGraph({
                 context: ctx,
                 analyser,
                 connectDecks,
                 equalizerNodesRef,
                 settings: audioEqualizerSettings,
+                bypassDsp: shouldBypassDsp,
             });
+            if (!builtGraph) return;
+            const { gainNode, fadeNode, effectChain, decksConnected, setDspBypass, isDspBypassed } = builtGraph;
             gainNodeRef.current = gainNode;
             // Hands the transport its own fade node; until this runs (or if setup fails) pause and
             // resume see no graph and fall back to plain element pause/play.
             registerPlaybackFadeGraph({ context: ctx, gain: fadeNode });
-            effectChainRef.current = effectChain;
+            const managedChain: ManagedEffectChainHandle = Object.assign(effectChain, {
+                setGraphDspBypass: setDspBypass,
+                isGraphDspBypassed: isDspBypassed,
+            });
+            effectChainRef.current = managedChain;
             if (!decksConnected) {
                 console.warn('[AudioContext] Deck setup incomplete, automix will stay idle');
             }
@@ -170,7 +206,7 @@ export function usePlaybackAudioBridge({
         } catch (error) {
             console.error('Audio Context Setup Failed:', error);
         }
-    }, [analyserRef, applyReplayGain, audioContextRef, audioEqualizerSettings, audioRef, connectDecks, gainNodeRef, getTargetPlaybackVolume, syncOutputGain]);
+    }, [analyserRef, applyReplayGain, audioContextRef, audioEqualizerSettings, audioRef, connectDecks, gainNodeRef, getTargetPlaybackVolume, shouldBypassDsp, syncOutputGain]);
 
     /**
      * Writes a fully-played track's audio and cover into the media cache.
@@ -205,16 +241,20 @@ export function usePlaybackAudioBridge({
     }, [applyReplayGain]);
 
     useEffect(() => {
-        if (!audioContextRef.current && audioEqualizerSettings.enabled && audioRef.current) {
-            setupAudioAnalyzer();
+        if (!shouldBypassDsp && !audioContextRef.current && audioRef.current) {
+            setupAudioAnalyzer(true);
         }
         const context = audioContextRef.current;
-        if (!context || equalizerNodesRef.current.length === 0) {
+        if (!context) {
+            return;
+        }
+        effectChainRef.current?.setGraphDspBypass?.(shouldBypassDsp);
+        if (equalizerNodesRef.current.length === 0) {
             return;
         }
         applyAudioEqualizerSettings(context, equalizerNodesRef.current, audioEqualizerSettings);
-        effectChainRef.current?.apply(audioEqualizerSettings.effects, audioEqualizerSettings.enabled);
-    }, [audioContextRef, audioEqualizerSettings, audioRef, setupAudioAnalyzer]);
+        effectChainRef.current?.apply(audioEqualizerSettings.effects, audioEqualizerSettings.enabled && !shouldBypassDsp);
+    }, [audioContextRef, audioEqualizerSettings, audioRef, setupAudioAnalyzer, shouldBypassDsp]);
 
     useEffect(() => () => {
         effectChainRef.current?.dispose();

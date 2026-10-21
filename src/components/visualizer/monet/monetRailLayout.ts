@@ -37,11 +37,6 @@ const MONET_RAIL_HEIGHT_FALLBACK_PX = 340;
 export const MONET_SUBTITLE_TRACK_STAGGER_S = 0.04;
 const MONET_ACTIVE_GAP_PX = 18;
 const MONET_INACTIVE_GAP_PX = 14;
-// Ratios reproduce the fixed gaps above at the default 36.5px lyric font, so nothing changes at
-// normal sizes; past that the gaps grow with the text instead of collapsing into it.
-// The height cap must clear the active block at large font scales, where a narrow column pushes
-// a normal lyric past four rows. Seven rows stays below the base cap at default sizes, so this
-// only ever raises the ceiling for oversized text on a tall display.
 export const MONET_RAIL_MIN_ROWS = 7;
 const MONET_ACTIVE_GAP_RATIO = 0.49;
 const MONET_INACTIVE_GAP_RATIO = 0.38;
@@ -93,15 +88,20 @@ const resolveLineTone = (
     const distance = Math.max(Math.abs(entry.offset), 1);
     const isWaiting = entry.status === 'waiting';
     const scale = clamp(inactiveScale * Math.pow(0.9, distance - 1), 0.68, 0.92);
+    // Viewport Culling: only apply CSS filter blur to lines within 2 lines of the viewport anchor;
+    // lines beyond 2 lines remain un-blurred (blurPx = 0) so off-viewport lines allocate no GPU filter surfaces.
+    const blurPx = distance > 2
+        ? 0
+        : isWaiting
+            ? (distance === 1 ? 0.7 : 1.8)
+            : (1.1 + (distance - 1) * 0.7);
 
     return {
         opacity: isWaiting
             ? clamp(0.72 - (distance - 1) * 0.18, 0.36, 0.72)
             : clamp(0.52 - (distance - 1) * 0.12, 0.28, 0.52),
         scale,
-        blurPx: isWaiting
-            ? distance === 1 ? 0.7 : 1.8 + (distance - 2) * 0.8
-            : 1.1 + (distance - 1) * 0.7,
+        blurPx,
         baseColor: colorWithAlpha(theme.primaryColor, isWaiting ? 0.46 : 0.36),
         fontWeight: 500,
         zIndex: isWaiting ? 3 - distance : 2 - distance,

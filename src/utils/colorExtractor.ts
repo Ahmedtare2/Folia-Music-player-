@@ -1,5 +1,10 @@
 import { extractRepresentativeColorsFromPixels } from './colorPalette';
 import { extractAssetIdFromCoverUrl, resolveLocalCoverObjectUrl } from '../services/localCoverRuntime';
+import { buildBuiltinDualTheme } from '../hooks/themeControllerState';
+import {
+    readCachedCoverPalette,
+    writeCachedCoverPalette,
+} from '../services/persistentDiskCacheService';
 
 // src/utils/colorExtractor.ts
 
@@ -120,14 +125,46 @@ const extractVibrantColorsFromPixels = (imageData: Uint8ClampedArray, count: num
 };
 
 export const extractColors = async (imageUrl: string, count: number = 5): Promise<string[]> => {
+    const cached = await readCachedCoverPalette(imageUrl);
+    if (cached?.vibrantColors && cached.vibrantColors.length > 0) {
+        return cached.vibrantColors.slice(0, count);
+    }
+
     const pixels = await loadImagePixels(imageUrl);
-    return pixels ? extractVibrantColorsFromPixels(pixels, count) : [];
+    if (!pixels) return [];
+    const targetCount = Math.max(count, 6);
+    const vibrant = extractVibrantColorsFromPixels(pixels, targetCount);
+    const representative = extractRepresentativeColorsFromPixels(pixels, targetCount);
+    if (vibrant.length > 0 || representative.length > 0) {
+        void writeCachedCoverPalette(imageUrl, {
+            vibrantColors: vibrant,
+            representativeColors: representative,
+            dualTheme: vibrant.length > 0 ? buildBuiltinDualTheme({ coverColors: vibrant }) : undefined,
+        });
+    }
+    return vibrant.slice(0, count);
 };
 
 export const extractRepresentativeColors = async (
     imageUrl: string,
     count: number = 5,
 ): Promise<string[]> => {
+    const cached = await readCachedCoverPalette(imageUrl);
+    if (cached?.representativeColors && cached.representativeColors.length > 0) {
+        return cached.representativeColors.slice(0, count);
+    }
+
     const pixels = await loadImagePixels(imageUrl);
-    return pixels ? extractRepresentativeColorsFromPixels(pixels, count) : [];
+    if (!pixels) return [];
+    const targetCount = Math.max(count, 6);
+    const representative = extractRepresentativeColorsFromPixels(pixels, targetCount);
+    const vibrant = extractVibrantColorsFromPixels(pixels, targetCount);
+    if (vibrant.length > 0 || representative.length > 0) {
+        void writeCachedCoverPalette(imageUrl, {
+            vibrantColors: vibrant,
+            representativeColors: representative,
+            dualTheme: vibrant.length > 0 ? buildBuiltinDualTheme({ coverColors: vibrant }) : undefined,
+        });
+    }
+    return representative.slice(0, count);
 };

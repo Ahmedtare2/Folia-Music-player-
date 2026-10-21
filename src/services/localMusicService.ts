@@ -34,7 +34,7 @@ import { hasLocalCoverBinary } from './localCoverBinaryStore';
 import { hasLocalSongCover } from '../utils/localSongCover';
 import { createFoliaIgnoreMatcher, isIgnoredByFoliaMatchers, type FoliaIgnoreMatcher } from '../utils/foliaIgnore';
 import { getLocalLibraryAvailability } from './localLibraryAvailability';
-import { hasFoliaAndroidBridge } from './android/foliaAndroidBridge';
+import { hasFoliaAndroidBridge, prestageAndroidSafAudioTracks } from './android/foliaAndroidBridge';
 import {
     createAndroidSafFileHandle,
     createLightweightStatFile,
@@ -50,6 +50,9 @@ import { getLocalLyricFilePriority, isSameLocalLyricFormatOrder, normalizeLocalL
 import { readLyricFile } from '../utils/lyrics/lyricFileDecoding';
 import { isLocalFolderIgnored, normalizeLocalFolderPath, runLocalFolderMutation, setLocalFolderIgnored } from './localLibraryFolderIgnore';
 import { isAlbumVideoFileName, reconcileVideosForRootFolder, type VideoSnapshotFileDescriptor } from './localAlbumVideoService';
+import { buildBuiltinDualTheme } from '../hooks/themeControllerState';
+import { stageCachedCoverPalette, writeCachedCoverPalette } from './persistentDiskCacheService';
+import { LyricParserFactory } from '../utils/lyrics/LyricParserFactory';
 
 
 type EmbeddedMetadata = EmbeddedMetadataResult;
@@ -569,6 +572,22 @@ async function extractSafHandleEmbeddedMetadata(
     const resolvedCover = preparedNativeCover?.blob ?? workerMeta.cover;
     const resolvedCoverAssetId = preparedNativeCover?.assetId ?? workerMeta.coverAssetId;
 
+    if (resolvedCoverAssetId && (nativeMeta?.vibrantColors?.length || nativeMeta?.representativeColors?.length)) {
+        const dualTheme = nativeMeta.vibrantColors?.length
+            ? buildBuiltinDualTheme({ coverColors: nativeMeta.vibrantColors })
+            : undefined;
+        stageCachedCoverPalette(resolvedCoverAssetId, {
+            vibrantColors: nativeMeta.vibrantColors,
+            representativeColors: nativeMeta.representativeColors,
+            dualTheme,
+        });
+        void writeCachedCoverPalette(resolvedCoverAssetId, {
+            vibrantColors: nativeMeta.vibrantColors,
+            representativeColors: nativeMeta.representativeColors,
+            dualTheme,
+        });
+    }
+
     const merged: EmbeddedMetadata = {
         ...workerMeta,
         title: workerMeta.title || nativeMeta?.title,
@@ -591,6 +610,14 @@ async function extractSafHandleEmbeddedMetadata(
         coverAssetId: resolvedCoverAssetId,
         hasEmbeddedCover: includeCover ? Boolean(resolvedCover && resolvedCoverAssetId) : undefined,
     };
+
+    if (merged.lyrics) {
+        void LyricParserFactory.parse({
+            type: 'embedded',
+            textContent: merged.lyrics,
+            translationContent: merged.translationLyrics,
+        }).catch(() => undefined);
+    }
 
     return {
         metadata: merged,
@@ -2255,6 +2282,37 @@ async function cleanupDirHandleIfUnused(rootFolderName: string): Promise<void> {
 
 // Get audio blob from local song using fileHandle
 // Returns blob URL if fileHandle exists, null otherwise
+
+/**
+ * Pre-stages the currently playing and next queued local SAF audio tracks into
+ * context.getCacheDir()/saf_audio_stage/ using a 512 KB copy buffer so playback reads from a
+ * contiguous local file instead of making hundreds of IPC calls through Android's SAF provider.
+ */
+export async function prestageLocalSongsForPlayback(
+    songs: ReadonlyArray<LocalSong | null | undefined>,
+): Promise<void> {
+    if (!hasFoliaAndroidBridge()) return;
+    const uris: string[] = [];
+    for (const candidate of songs) {
+        if (!candidate) continue;
+        if (candidate.safContentUri && candidate.safContentUri.startsWith("content://")) {
+            if (!uris.includes(candidate.safContentUri)) {
+                uris.push(candidate.safContentUri);
+            }
+            continue;
+        }
+        const handle = await getAccessibleFileHandle(candidate);
+        if (handle && isAndroidSafFileHandle(handle) && handle.contentUri.startsWith("content://")) {
+            if (!uris.includes(handle.contentUri)) {
+                uris.push(handle.contentUri);
+            }
+        }
+    }
+    if (uris.length > 0) {
+        await prestageAndroidSafAudioTracks(uris);
+    }
+}
+
 export async function getAudioFromLocalSong(song: LocalSong): Promise<string | null> {
     const resolvePlayableSource = async (handle: FileSystemFileHandle): Promise<string> => {
         if (isAndroidSafFileHandle(handle) && handle.canStreamDirectly()) {
@@ -2262,6 +2320,7 @@ export async function getAudioFromLocalSong(song: LocalSong): Promise<string | n
             if (!readable) {
                 throw new Error(`Android SAF file is unreadable or missing: ${song.filePath}`);
             }
+            void prestageAndroidSafAudioTracks([handle.contentUri]);
             return handle.getPlayableStreamUrl();
         }
         const file = await handle.getFile();

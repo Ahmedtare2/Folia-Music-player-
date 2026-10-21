@@ -37,6 +37,22 @@ public class MainActivity extends BridgeActivity {
         webView.post(() -> webView.evaluateJavascript(script, null));
     }
 
+    private void dispatchNativeVisibility(final boolean visible) {
+        if (this.bridge == null || this.bridge.getWebView() == null) {
+            return;
+        }
+        final WebView webView = this.bridge.getWebView();
+        final String script = String.format(
+            Locale.ROOT,
+            "(function(){try{window.__FOLIA_NATIVE_VISIBLE__=%b;"
+                + "window.dispatchEvent(new CustomEvent('folia:native-visibility',{detail:{visible:%b}}));"
+                + "}catch(e){}})();",
+            visible,
+            visible
+        );
+        webView.post(() -> webView.evaluateJavascript(script, null));
+    }
+
     /**
      * Applies native Android system bar visibility using AndroidX WindowCompat & WindowInsetsControllerCompat.
      * Always configures BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE so hidden system bars can be temporarily
@@ -191,6 +207,12 @@ public class MainActivity extends BridgeActivity {
                     if (FoliaSafStreamHandler.isSafStreamRequest(request)) {
                         return FoliaSafStreamHandler.handleRequest(MainActivity.this, request);
                     }
+                    if (FoliaSafStreamHandler.isLocalCoverRequest(request)) {
+                        WebResourceResponse coverResp = FoliaSafStreamHandler.handleCoverRequest(MainActivity.this, request);
+                        if (coverResp != null) {
+                            return coverResp;
+                        }
+                    }
                     return super.shouldInterceptRequest(view, request);
                 }
             });
@@ -233,15 +255,16 @@ public class MainActivity extends BridgeActivity {
     public void onResume() {
         super.onResume();
         applySystemBarsConfig(this.hideStatusBarRequested, this.hideNavigationBarRequested);
-        dispatchWindowEvent("folia:native-visibility", "{\"visible\":true}");
+        dispatchNativeVisibility(true);
     }
 
     @Override
     public void onPause() {
-        dispatchWindowEvent("folia:native-visibility", "{\"visible\":false}");
+        dispatchNativeVisibility(false);
         super.onPause();
         // Keep the single Web Audio + HTMLAudioElement playback clock running when the screen locks
-        // or the user switches apps while FoliaPlaybackService is actively playing a track.
+        // or the user switches apps while FoliaPlaybackService is actively playing a track, while
+        // window.__FOLIA_NATIVE_VISIBLE__ = false strictly freezes all WebGL/Canvas/rAF visualizers.
         if (FoliaPlaybackService.isPlaybackActive() && this.bridge != null && this.bridge.getWebView() != null) {
             WebView webView = this.bridge.getWebView();
             webView.onResume();
@@ -251,7 +274,7 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     public void onStop() {
-        dispatchWindowEvent("folia:native-visibility", "{\"visible\":false}");
+        dispatchNativeVisibility(false);
         super.onStop();
         if (FoliaPlaybackService.isPlaybackActive() && this.bridge != null && this.bridge.getWebView() != null) {
             WebView webView = this.bridge.getWebView();

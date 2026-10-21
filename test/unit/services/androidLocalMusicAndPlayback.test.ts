@@ -6,6 +6,7 @@ import {
     cancelLocalLibraryScan,
     getAudioFromLocalSong,
     importFolder,
+    prestageLocalSongsForPlayback,
     matchLyrics,
     resumeInterruptedLocalLibraryScans,
     resyncFolder,
@@ -38,13 +39,26 @@ import {
 } from '@/services/android/androidSafDirectoryHandle';
 import { fetchThroughLyricRelay, requestLyricProxyOnDesktop } from '@/services/lyricProxy';
 import { selectLocalSongLyricsSource } from '@/utils/lyrics/localSongLyrics';
+import { LyricParserFactory } from '@/utils/lyrics/LyricParserFactory';
+import { extractColors, extractRepresentativeColors } from '@/utils/colorExtractor';
+import {
+    clearPersistentDiskCacheForTests,
+    ensureCoverMipmapsAndPalettePersisted,
+    persistPreSegmentedLyricsToDisk,
+    readPersistedLibraryIndex,
+    writeCachedCoverPalette,
+    writePersistedLibraryIndex,
+} from '@/services/persistentDiskCacheService';
 import {
     getRegisteredAlbumVideos,
     resetLocalAlbumVideoCatalogForTests,
     resolveAlbumVideoForTrack,
 } from '@/services/localAlbumVideoService';
 import {
+    ANDROID_SAF_STREAM_PATH,
+    ANDROID_SAF_STREAM_READ_BUFFER_BYTES,
     buildAndroidSafStreamUrl,
+    prestageAndroidSafAudioTracks,
     hasFoliaAndroidBridge,
     readAndroidContentUriBytes,
     stopAndroidPlaybackNotification,
@@ -1035,5 +1049,173 @@ describe('Android SAF local music adapter & Media3 playback bridge', () => {
             },
         };
         expect(selectLocalSongLyricsSource(songWithUpgradedTtml, 'local')).toBe('online');
+    });
+
+    it('persists pre-parsed & pre-segmented lyrics, 256/1024 WebP cover mipmaps + Monet palettes, and the SAF library index to internal disk cache', async () => {
+        clearPersistentDiskCacheForTests();
+        const diskStore = new Map<string, string>();
+        let mipmapCalls = 0;
+
+        installAndroidEnvironment({
+            readDiskCacheJson: vi.fn(async ({ namespace, key }) => {
+                const fullKey = `${namespace}::${key}`;
+                const json = diskStore.get(fullKey);
+                return json ? { hit: true, json } : { hit: false };
+            }),
+            writeDiskCacheJson: vi.fn(async ({ namespace, key, json }) => {
+                diskStore.set(`${namespace}::${key}`, json);
+                return { ok: true, size: json.length };
+            }),
+            deleteDiskCacheEntry: vi.fn(async ({ namespace, key }) => {
+                if (!key || key === '*') {
+                    for (const k of Array.from(diskStore.keys())) {
+                        if (k.startsWith(`${namespace}::`)) diskStore.delete(k);
+                    }
+                } else {
+                    diskStore.delete(`${namespace}::${key}`);
+                }
+                return { ok: true };
+            }),
+            cacheCoverAndExtractPalette: vi.fn(async ({ assetId }) => {
+                mipmapCalls += 1;
+                const resolvedId = assetId || `sha256:${'b'.repeat(64)}`;
+                const digest = resolvedId.replace(/^sha256:/, '');
+                const vibrantColors = ['#e63946', '#457b9d', '#1d3557', '#a8dadc', '#f1faee', '#2a9d8f'];
+                const representativeColors = ['#1d3557', '#457b9d', '#e63946', '#f1faee', '#a8dadc', '#264653'];
+                diskStore.set(
+                    `palettes::${digest}`,
+                    JSON.stringify({
+                        assetId: resolvedId,
+                        vibrantColors,
+                        representativeColors,
+                        updatedAt: Date.now(),
+                    }),
+                );
+                return {
+                    ok: true,
+                    assetId: resolvedId,
+                    cover256Path: `/data/user/0/top.izuna.foliamajor/files/media_cache/covers/${digest}_256.webp`,
+                    cover1024Path: `/data/user/0/top.izuna.foliamajor/files/media_cache/covers/${digest}_1024.webp`,
+                    vibrantColors,
+                    representativeColors,
+                };
+            }),
+        });
+
+        // 1. Pre-Parsed & Pre-Segmented Lyrics Disk Cache
+        const parsedFirst = await LyricParserFactory.parse({
+            type: 'embedded',
+            textContent: '[00:01.00]故事的结局
+[00:03.50]Hello world',
+            translationContent: '[00:01.00]The end of the story
+[00:03.50]你好世界',
+        });
+        expect(parsedFirst).not.toBeNull();
+        expect(parsedFirst!.lines).toHaveLength(2);
+        expect(parsedFirst!.lines[0]!.translation).toBe('The end of the story');
+
+        // Simulate Jieba/ICU segmentation + Pinyin/romanization baked onto the parsed LyricData
+        const preSegmented = {
+            ...parsedFirst!,
+            lines: parsedFirst!.lines.map((line, idx) => ({
+                ...line,
+                autoWordSegments: idx === 0 ? ['故事', '的', '结局'] : ['Hello', ' ', 'world'],
+                romanization: idx === 0 ? 'gu shi de jie ju' : undefined,
+                isChorus: idx === 0,
+            })),
+        };
+        persistPreSegmentedLyricsToDisk(preSegmented, 'local_song_1');
+        await new Promise(resolve => setTimeout(resolve, 20));
+
+        // Evict in-memory cache and re-parse the same source: must load pre-segmented structure from disk!
+        clearPersistentDiskCacheForTests();
+        const parsedFromDisk = await LyricParserFactory.parse({
+            type: 'embedded',
+            textContent: '[00:01.00]故事的结局
+[00:03.50]Hello world',
+            translationContent: '[00:01.00]The end of the story
+[00:03.50]你好世界',
+        });
+        expect(parsedFromDisk).not.toBeNull();
+        expect(parsedFromDisk!.lines[0]!.autoWordSegments).toEqual(['故事', '的', '结局']);
+        expect(parsedFromDisk!.lines[0]!.romanization).toBe('gu shi de jie ju');
+        expect(parsedFromDisk!.lines[0]!.translation).toBe('The end of the story');
+        expect(parsedFromDisk!.lines[0]!.isChorus).toBe(true);
+
+        // 2. Cover Art Mipmaps (256x256 & 1024x1024 WebP) & Theme Palette Disk Cache
+        const coverAssetId = `sha256:${'b'.repeat(64)}`;
+        const paletteRecord = await ensureCoverMipmapsAndPalettePersisted(
+            coverAssetId,
+            new Blob(['fake-image-bytes'], { type: 'image/jpeg' }),
+        );
+        expect(mipmapCalls).toBe(1);
+        expect(paletteRecord?.vibrantColors).toEqual(['#e63946', '#457b9d', '#1d3557', '#a8dadc', '#f1faee', '#2a9d8f']);
+
+        // Evict in-memory cache so extractColors & extractRepresentativeColors read from persistent disk cache
+        // without touching Image / canvas decoding on the CPU
+        clearPersistentDiskCacheForTests();
+        const coverUrl256 = `/__folia_cover/sha256%3A${'b'.repeat(64)}?size=512`;
+        const coverUrl1024 = `/__folia_cover/sha256%3A${'b'.repeat(64)}?size=1024`;
+        const vibrant5 = await extractColors(coverUrl1024, 5);
+        const rep5 = await extractRepresentativeColors(coverUrl256, 5);
+        expect(vibrant5).toEqual(['#e63946', '#457b9d', '#1d3557', '#a8dadc', '#f1faee']);
+        expect(rep5).toEqual(['#1d3557', '#457b9d', '#e63946', '#f1faee', '#a8dadc']);
+
+        // 3. Persistent Library Index on disk
+        await importFolder();
+        await new Promise(resolve => setTimeout(resolve, 40));
+        await writePersistedLibraryIndex({ songs: persistedSongsStore });
+        clearPersistentDiskCacheForTests();
+
+        const restoredIndex = await readPersistedLibraryIndex();
+        expect(restoredIndex).not.toBeNull();
+        expect(restoredIndex!.songs).toHaveLength(2);
+        expect(restoredIndex!.songs.map(s => s.title)).toContain('Habaytak');
+    });
+
+    it('pre-stages the active and next queued local SAF tracks into context.getCacheDir()/saf_audio_stage with a 512 KB read buffer', async () => {
+        expect(ANDROID_SAF_STREAM_READ_BUFFER_BYTES).toBe(512 * 1024);
+
+        const prestagedBatches: string[][] = [];
+        installAndroidEnvironment({
+            prestageSafAudioTracks: vi.fn(async ({ uris }) => {
+                prestagedBatches.push(uris);
+                return {
+                    ok: true,
+                    stagedCount: uris.length,
+                    stagedPaths: uris.map((_, idx) => `/data/user/0/top.izuna.foliamajor/cache/saf_audio_stage/stage_${idx}.bin`),
+                    cacheDir: '/data/user/0/top.izuna.foliamajor/cache/saf_audio_stage',
+                };
+            }),
+        });
+
+        const imported = await importFolder();
+        expect(imported).toHaveLength(2);
+
+        const activeSong = imported[0]!;
+        const nextQueuedSong = imported[1]!;
+
+        // 1. Playing the active local SAF song immediately triggers pre-staging for its content:// URI
+        const streamUrl = await getAudioFromLocalSong(activeSong);
+        expect(streamUrl).toContain(ANDROID_SAF_STREAM_PATH);
+        await new Promise(resolve => setTimeout(resolve, 10));
+        expect(prestagedBatches.some(batch => batch.includes(activeSong.safContentUri!))).toBe(true);
+
+        // 2. Pre-staging active + next queued local SAF tracks sends both content:// URIs in one batch
+        prestagedBatches.length = 0;
+        await prestageLocalSongsForPlayback([activeSong, nextQueuedSong]);
+        expect(prestagedBatches).toEqual([
+            [activeSong.safContentUri!, nextQueuedSong.safContentUri!],
+        ]);
+
+        // 3. Direct bridge helper deduplicates and filters non-SAF URIs
+        const bridgeRes = await prestageAndroidSafAudioTracks([
+            activeSong.safContentUri!,
+            activeSong.safContentUri!,
+            'https://example.com/online.mp3',
+            nextQueuedSong.safContentUri!,
+        ]);
+        expect(bridgeRes?.ok).toBe(true);
+        expect(bridgeRes?.stagedCount).toBe(2);
     });
 });

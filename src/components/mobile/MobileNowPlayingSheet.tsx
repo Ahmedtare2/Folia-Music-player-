@@ -319,12 +319,19 @@ const MobileTimedWord: React.FC<MobileTimedWordProps> = React.memo(({
     lineDirection,
 }) => {
     const spanRef = useRef<HTMLSpanElement>(null);
+    const lastPhaseRef = useRef<'init' | 'waiting' | 'active' | 'passed'>('init');
+    const lastPctRef = useRef<number>(-1);
     const wordDir = useMemo(() => resolveTokenDirection(word.text, lineDirection), [lineDirection, word.text]);
 
     const applyWordProgress = useCallback((timeSec: number) => {
         const el = spanRef.current;
         if (!el) return;
         if (timeSec < word.startTime) {
+            if (lastPhaseRef.current === 'waiting') return;
+            lastPhaseRef.current = 'waiting';
+            lastPctRef.current = 0;
+            el.style.setProperty('--word-progress', '0%');
+            el.style.transform = 'translate3d(0, 0, 0)';
             el.style.color = inactiveColor;
             el.style.backgroundImage = '';
             el.style.webkitBackgroundClip = '';
@@ -333,6 +340,11 @@ const MobileTimedWord: React.FC<MobileTimedWordProps> = React.memo(({
             return;
         }
         if (timeSec >= word.endTime) {
+            if (lastPhaseRef.current === 'passed') return;
+            lastPhaseRef.current = 'passed';
+            lastPctRef.current = 100;
+            el.style.setProperty('--word-progress', '100%');
+            el.style.transform = 'translate3d(0, 0, 0)';
             el.style.color = passedColor;
             el.style.backgroundImage = '';
             el.style.webkitBackgroundClip = '';
@@ -341,15 +353,29 @@ const MobileTimedWord: React.FC<MobileTimedWordProps> = React.memo(({
             return;
         }
         const pct = computeTimedWordProgressPercent(word, timeSec);
+        if (lastPhaseRef.current === 'active' && Math.abs(pct - lastPctRef.current) < 0.25) {
+            return;
+        }
+        const enteringActive = lastPhaseRef.current !== 'active';
+        lastPhaseRef.current = 'active';
+        lastPctRef.current = pct;
+        const pctStr = `${pct.toFixed(1)}%`;
+        const featherStr = `${Math.min(100, pct + 12).toFixed(1)}%`;
         const angle = wordDir === 'rtl' ? '270deg' : '90deg';
-        el.style.color = 'transparent';
-        el.style.backgroundImage = `linear-gradient(${angle}, ${activeColor} 0%, ${activeColor} ${pct.toFixed(1)}%, ${inactiveColor} ${Math.min(100, pct + 12).toFixed(1)}%, ${inactiveColor} 100%)`;
-        el.style.webkitBackgroundClip = 'text';
-        el.style.backgroundClip = 'text';
-        el.style.textShadow = `0 0 18px color-mix(in srgb, ${glowColor} 45%, transparent)`;
+        el.style.setProperty('--word-progress', pctStr);
+        el.style.backgroundImage = `linear-gradient(${angle}, ${activeColor} 0%, ${activeColor} ${pctStr}, ${inactiveColor} ${featherStr}, ${inactiveColor} 100%)`;
+        if (enteringActive) {
+            el.style.transform = 'translate3d(0, -0.5px, 0)';
+            el.style.color = 'transparent';
+            el.style.webkitBackgroundClip = 'text';
+            el.style.backgroundClip = 'text';
+            el.style.textShadow = `0 0 18px color-mix(in srgb, ${glowColor} 45%, transparent)`;
+        }
     }, [activeColor, glowColor, inactiveColor, passedColor, word, wordDir]);
 
     useEffect(() => {
+        lastPhaseRef.current = 'init';
+        lastPctRef.current = -1;
         applyWordProgress(currentTime.get());
     }, [applyWordProgress, currentTime]);
 
@@ -359,9 +385,10 @@ const MobileTimedWord: React.FC<MobileTimedWordProps> = React.memo(({
         <span
             ref={spanRef}
             dir={wordDir}
-            className="inline-block whitespace-pre-wrap transition-transform duration-150"
+            className="inline-block whitespace-pre-wrap will-change-transform"
             style={{
                 color: inactiveColor,
+                transform: 'translate3d(0, 0, 0)',
                 unicodeBidi: 'isolate',
                 letterSpacing: '0px',
             }}
@@ -624,11 +651,27 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
     const lyricLines = useMemo(() => lyrics?.lines ?? [], [lyrics]);
     const hasRenderableLines = lyricLines.length > 0 && !(lyricLines.length === 1 && lyricLines[0]?.fullText === '......');
 
+    const [viewportCenterIndex, setViewportCenterIndex] = useState<number>(() => Math.max(0, currentLineIndex));
+    const scrollViewportRafRef = useRef<number>(0);
+
+    useEffect(() => {
+        if (Date.now() >= userScrollingLyricsUntilRef.current && currentLineIndex >= 0) {
+            setViewportCenterIndex(prev => (prev === currentLineIndex ? prev : currentLineIndex));
+        }
+    }, [currentLineIndex]);
+
+    useEffect(() => () => {
+        if (scrollViewportRafRef.current) {
+            cancelAnimationFrame(scrollViewportRafRef.current);
+        }
+    }, []);
+
     // Track all concurrently active overlapping lyric lines from lyricCurrentTime
     const [activeLineSetKey, setActiveLineSetKey] = useState<string>(() => {
         const indices = Array.from(computeActiveLyricLineIndices(lyricLines, currentLineIndex, lyricCurrentTime.get())).sort((a, b) => a - b);
         return indices.join(',');
     });
+    const lastActiveCheckTimeRef = useRef<number>(-1);
 
     useEffect(() => {
         const indices = Array.from(computeActiveLyricLineIndices(lyricLines, currentLineIndex, lyricCurrentTime.get())).sort((a, b) => a - b);
@@ -637,7 +680,9 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
     }, [currentLineIndex, lyricCurrentTime, lyricLines]);
 
     useMotionValueEvent(lyricCurrentTime, 'change', (latest: number) => {
-        if (!isOpen || displayMode !== 'lyrics' || lyricLines.length === 0) return;
+        if (!isOpen || !isPageVisible || displayMode !== 'lyrics' || lyricLines.length === 0) return;
+        if (Math.abs(latest - lastActiveCheckTimeRef.current) < 0.04) return;
+        lastActiveCheckTimeRef.current = latest;
         const indices = Array.from(computeActiveLyricLineIndices(lyricLines, currentLineIndex, latest)).sort((a, b) => a - b);
         const key = indices.join(',');
         setActiveLineSetKey(prev => (prev === key ? prev : key));
@@ -1295,11 +1340,31 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                 onWheel={() => {
                                     userScrollingLyricsUntilRef.current = Date.now() + 3500;
                                 }}
+                                onScroll={(e) => {
+                                    const container = e.currentTarget;
+                                    if (scrollViewportRafRef.current) return;
+                                    scrollViewportRafRef.current = requestAnimationFrame(() => {
+                                        scrollViewportRafRef.current = 0;
+                                        if (!container || lyricLines.length === 0) return;
+                                        const maxScroll = Math.max(1, container.scrollHeight - container.clientHeight);
+                                        const ratio = Math.max(0, Math.min(1, container.scrollTop / maxScroll));
+                                        const approxIdx = Math.round(ratio * (lyricLines.length - 1));
+                                        setViewportCenterIndex(prev => (Math.abs(prev - approxIdx) >= 2 ? approxIdx : prev));
+                                    });
+                                }}
                                 className="hide-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain py-6 landscape:py-3 px-1 space-y-4 landscape:space-y-3"
                             >
                                 {lyricLines.map((line, index) => {
                                     const isActive = activeLineIndices.has(index);
                                     const isPassed = !isActive && index < currentLineIndex;
+                                    const distanceFromViewport = Math.abs(index - viewportCenterIndex);
+                                    const distanceFromActive = currentLineIndex >= 0 ? Math.abs(index - currentLineIndex) : distanceFromViewport;
+                                    // Viewport Culling: Only apply active syllable progress and blur within the visible viewport (±2 lines buffer)
+                                    const isNearViewport = isActive || distanceFromViewport <= 6 || distanceFromActive <= 2;
+                                    const shouldAnimateSyllables = isActive && isNearViewport && isPageVisible;
+                                    const lineBlurFilter = !isActive && isNearViewport && distanceFromActive <= 2
+                                        ? 'blur(0.5px)'
+                                        : 'none';
                                     const lineDir = detectTextDirection(line.fullText);
                                     const isRtl = lineDir === 'rtl';
                                     const isDuetSecondAgent = Boolean(
@@ -1316,6 +1381,7 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                         <div
                                             key={`${line.startTime}-${index}`}
                                             data-lyric-index={index}
+                                            data-viewport-culled={isNearViewport ? 'false' : 'true'}
                                             dir={lineDir}
                                             onClick={() => {
                                                 userScrollingLyricsUntilRef.current = 0;
@@ -1333,7 +1399,11 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                                         ? 'opacity-40 hover:opacity-70'
                                                         : 'opacity-55 hover:opacity-80'
                                             }`}
-                                            style={{ unicodeBidi: 'isolate' }}
+                                            style={{
+                                                unicodeBidi: 'isolate',
+                                                filter: lineBlurFilter,
+                                                transform: isActive ? 'translate3d(0, 0, 0) scale(1.01)' : 'translate3d(0, 0, 0)',
+                                            }}
                                         >
                                             <div
                                                 className={`flex flex-wrap items-baseline gap-x-1.5 gap-y-1 font-bold leading-snug ${
@@ -1344,7 +1414,7 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                                     direction: lineDir,
                                                 }}
                                             >
-                                                {isActive && line.words.length > 0 ? (
+                                                {shouldAnimateSyllables && line.words.length > 0 ? (
                                                     line.words.map((word, wIdx) => (
                                                         <MobileTimedWord
                                                             key={`${wIdx}-${word.startTime}`}
@@ -1381,7 +1451,7 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                                                 style={{ unicodeBidi: 'isolate', direction: bgDir }}
                                                             >
                                                                 <span>(</span>
-                                                                {isActive && bg.words && bg.words.length > 0 ? (
+                                                                {shouldAnimateSyllables && bg.words && bg.words.length > 0 ? (
                                                                     bg.words.map((bgWord, bwIdx) => (
                                                                         <MobileTimedWord
                                                                             key={`bg-${bgIdx}-${bwIdx}-${bgWord.startTime}`}

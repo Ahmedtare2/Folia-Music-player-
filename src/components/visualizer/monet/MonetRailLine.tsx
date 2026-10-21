@@ -11,6 +11,7 @@ import { MonetTimedTokenSpan } from './MonetRailTokens';
 
 // src/components/visualizer/monet/MonetRailLine.tsx
 // 歌词栏中的一行：位置、缩放、模糊与副字幕轨，按行状态切换静态或扫字渲染。
+// Viewport Culling: 仅对距离视口中心 2 行以内的行启用动画、逐字进度和 CSS blur()，视口外的行保持静态且不加模糊滤镜。
 
 export const MonetRailLine: React.FC<{
     entry: PositionedMonetLineEntry;
@@ -33,10 +34,11 @@ export const MonetRailLine: React.FC<{
     const exitOffset = entry.status === 'passed' || entry.offset < 0 ? -38 : 38;
     const lineDirection = detectTextDirection(entry.line.fullText);
     const isRtlLine = lineDirection === 'rtl';
-    // The active lyric must never be truncated, so its box is sized by its own wrapped
-    // content instead of the pre-measured height, and it carries no truncation fade.
-    // Context lines keep the fixed two-line box that keeps the rail compact.
     const isActiveLine = entry.status === 'active';
+    const isWithinViewportWindow = Math.abs(entry.offset) <= 2;
+    const effectiveFilter = isWithinViewportWindow && entry.tone.blurPx > 0
+        ? `blur(${entry.tone.blurPx}px)`
+        : 'none';
     const textMask = isActiveLine
         ? undefined
         : getClippedTextMask(
@@ -72,7 +74,7 @@ export const MonetRailLine: React.FC<{
                 }
             } : undefined}
             className={`absolute top-0 min-w-0 will-change-transform ${canSeek ? 'cursor-pointer' : ''}`}
-            initial={disableEntryMotion ? false : {
+            initial={disableEntryMotion || !isWithinViewportWindow ? false : {
                 opacity: 0,
                 y: entry.y + initialOffset,
                 scale: entry.tone.scale * 0.98,
@@ -82,9 +84,9 @@ export const MonetRailLine: React.FC<{
                 opacity: entry.tone.opacity,
                 y: entry.y,
                 scale: entry.tone.scale,
-                filter: `blur(${entry.tone.blurPx}px)`,
+                filter: effectiveFilter,
             }}
-            exit={disableEntryMotion ? undefined : {
+            exit={disableEntryMotion || !isWithinViewportWindow ? undefined : {
                 opacity: 0,
                 y: entry.y + exitOffset,
                 scale: entry.tone.scale * 0.98,
@@ -101,7 +103,7 @@ export const MonetRailLine: React.FC<{
                 zIndex: entry.tone.zIndex,
             }}
         >
-            {entry.line.isChorus && (
+            {entry.line.isChorus && isWithinViewportWindow && (
                 <motion.div
                     className="absolute inset-0 pointer-events-none -z-10 rounded-2xl"
                     initial={{ opacity: 0 }}
@@ -155,7 +157,7 @@ export const MonetRailLine: React.FC<{
                     isChorus={entry.line.isChorus}
                     chorusAccentColor={theme.accentColor}
                     audioPower={audioPower}
-                    renderStaticPassed={renderStaticPassed}
+                    renderStaticPassed={renderStaticPassed || !isWithinViewportWindow}
                 />
             </div>
             {entry.layout.subtitleTracks.map((track, trackIndex) => {

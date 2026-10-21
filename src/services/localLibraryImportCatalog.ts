@@ -14,6 +14,11 @@ import {
   deleteUnreferencedLocalCoverAssets,
   prepareLocalSongsCoverAssets,
 } from './localCoverAssetService';
+import {
+  readPersistedLibraryIndex,
+  updatePersistedLibraryIndexSongs,
+  writePersistedLibraryIndex,
+} from './persistentDiskCacheService';
 
 // src/services/localLibraryImportCatalog.ts
 // Handles import/rescan assignment and the idempotent legacy bootstrap transaction.
@@ -72,6 +77,7 @@ const assignImportedSongsInTransaction = async (
           : persisted;
       });
       await appDatabase.local_music.bulkPut(songsForStorage);
+      void updatePersistedLibraryIndexSongs(songsForStorage.map(sanitizeLocalSongForStorage));
       return replacedCoverAssetIds;
     }
   }
@@ -158,6 +164,17 @@ const assignImportedSongsInTransaction = async (
     appDatabase.local_library_entities.bulkPut(entities),
     appDatabase.local_library_assignments.bulkPut(nextAssignments),
   ]);
+
+  const mergedAssignmentsBySongId = new Map<string, LocalLibraryAssignment>(
+    assignments.map(a => [a.songId, a]),
+  );
+  nextAssignments.forEach(a => mergedAssignmentsBySongId.set(a.songId, a));
+  void writePersistedLibraryIndex({
+    songs: Array.from(songById.values()).map(sanitizeLocalSongForStorage),
+    entities,
+    assignments: Array.from(mergedAssignmentsBySongId.values()),
+  });
+
   return replacedCoverAssetIds;
 };
 
@@ -203,10 +220,25 @@ export const ensureLocalLibraryInitialized = async (): Promise<void> => {
     return await initializationInFlight;
   }
   const run = (async () => {
-    const [songs, assignments] = await Promise.all([
+    let [songs, assignments] = await Promise.all([
       appDatabase.local_music.toArray(),
       appDatabase.local_library_assignments.toArray(),
     ]);
+    if (songs.length === 0) {
+      const diskIndex = await readPersistedLibraryIndex();
+      if (diskIndex && diskIndex.songs.length > 0) {
+        const sanitized = diskIndex.songs.map(sanitizeLocalSongForStorage);
+        await appDatabase.local_music.bulkPut(sanitized);
+        if (diskIndex.entities?.length) {
+          await appDatabase.local_library_entities.bulkPut(diskIndex.entities);
+        }
+        if (diskIndex.assignments?.length) {
+          await appDatabase.local_library_assignments.bulkPut(diskIndex.assignments);
+          assignments = diskIndex.assignments;
+        }
+        songs = sanitized;
+      }
+    }
     const assignedIds = new Set(assignments.map(assignment => assignment.songId));
     const missing = songs.filter(song => !assignedIds.has(song.id));
     if (missing.length > 0) {

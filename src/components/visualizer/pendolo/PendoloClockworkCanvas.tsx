@@ -1,4 +1,5 @@
 import { resolveMobileCanvasDpr } from '../../../utils/mobileVisualizerBudget';
+import { isAppForegroundVisible, subscribeAppForegroundVisibility } from '../../../utils/visualizerVisibilityGate';
 import React, { useEffect, useMemo, useRef } from 'react';
 import type { MotionValue } from 'framer-motion';
 import {
@@ -255,6 +256,11 @@ const PendoloClockworkCanvas: React.FC<PendoloClockworkCanvasProps> = ({
         let animationFrameId = 0;
 
         const render = (timestamp: number) => {
+            if (!isAppForegroundVisible()) {
+                animationFrameId = 0;
+                lastTimestampRef.current = null;
+                return;
+            }
             const p = propsRef.current;
             if (p.showGearDecor === 'none' && !p.showCenterGradient && !p.showCover) return;
 
@@ -404,9 +410,24 @@ const PendoloClockworkCanvas: React.FC<PendoloClockworkCanvasProps> = ({
             animationFrameId = window.requestAnimationFrame(render);
         };
 
-        animationFrameId = window.requestAnimationFrame(render);
+        const unsubscribeVisibility = subscribeAppForegroundVisibility((visible) => {
+            if (!visible) {
+                lastTimestampRef.current = null;
+                if (animationFrameId) {
+                    window.cancelAnimationFrame(animationFrameId);
+                    animationFrameId = 0;
+                }
+            } else if (!animationFrameId) {
+                animationFrameId = window.requestAnimationFrame(render);
+            }
+        });
+
+        if (isAppForegroundVisible()) {
+            animationFrameId = window.requestAnimationFrame(render);
+        }
 
         return () => {
+            unsubscribeVisibility();
             if (animationFrameId) window.cancelAnimationFrame(animationFrameId);
             webglCanvas?.removeEventListener('webglcontextlost', handleContextLost);
             webglCanvas?.removeEventListener('webglcontextrestored', handleContextRestored);

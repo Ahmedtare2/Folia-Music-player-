@@ -13,6 +13,7 @@ import type { ChorusRange } from '../../../utils/lyrics/chorusEffects';
 import { getPlaybackSongKey } from '../../../utils/appPlaybackGuards';
 import { applyLyricsTransform, lyricsForNoLyrics, untransformedLyrics } from '../../../services/hostExtensionHooks';
 import { setLyricsState as setPlaybackLyrics, usePlaybackStore } from '../../../stores/usePlaybackStore';
+import { persistPreSegmentedLyricsToDisk } from '../../../services/persistentDiskCacheService';
 
 // src/components/app/playback/createLyricsSetter.ts
 
@@ -106,8 +107,12 @@ export const createLyricsSetter = (
             // icu-folia's default split, for every line the saved one does not cover. A no-op until
             // its engines have loaded; useIcuFoliaSegmentation bakes it on afterwards in that case.
             processed = applyAutoWordSegmentation(processed);
+            const readyLyrics = ensureLyricDataRenderHints(processed);
+            // Persist the pre-parsed, pre-segmented, render-hinted structure to disk so future plays
+            // of this track load ready-to-render lyrics with zero CPU parsing or segmentation.
+            persistPreSegmentedLyricsToDisk(readyLyrics, currentSongId);
             // Extension layers (Folium `lyrics.transform`) see the finished lyrics once per load.
-            setLyricsState(applyLyricsTransform(ensureLyricDataRenderHints(processed)));
+            setLyricsState(applyLyricsTransform(readyLyrics));
         } else {
             setLyricsState(null);
         }

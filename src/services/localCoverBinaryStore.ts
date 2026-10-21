@@ -1,8 +1,12 @@
 import type { LocalCoverAssetBackend } from '../types/localCover';
 import { isBlob } from '../utils/blobGuards';
+import { deleteAndroidDiskCacheEntry } from './android/foliaAndroidBridge';
+import { ensureCoverMipmapsAndPalettePersisted } from './persistentDiskCacheService';
 
 // src/services/localCoverBinaryStore.ts
-// Persists canonical local covers outside IndexedDB with the same validated layout used by stable URLs.
+// Persists canonical local covers outside IndexedDB with the same validated layout used by stable URLs,
+// and triggers native Android 256x256 + 1024x1024 WebP mipmap & Monet palette generation in
+// context.getFilesDir()/media_cache/{covers,palettes}/.
 
 const ASSET_ID_PATTERN = /^sha256:([0-9a-f]{64})$/;
 const ALLOWED_MIME_TYPES = new Set([
@@ -130,6 +134,9 @@ export const writeLocalCoverBinary = async (
   const mimeType = isBlob(value) ? normalizeLocalCoverMimeType(value.type) : null;
   if (!isValidLocalCoverAssetId(assetId) || !isBlob(value) || value.size <= 0 || !mimeType) return null;
 
+  // Trigger native Android 256x256 + 1024x1024 WebP mipmap & Monet palette generation in background
+  void ensureCoverMipmapsAndPalettePersisted(assetId, value);
+
   if (hasElectronBridge()) {
     await window.electron!.saveLocalCoverAsset(assetId, await value.arrayBuffer(), mimeType);
     return { backend: 'electron', mimeType, size: value.size };
@@ -168,6 +175,7 @@ export const writeLocalCoverBinary = async (
 
 export const removeLocalCoverBinary = async (assetId: string): Promise<void> => {
   if (!isValidLocalCoverAssetId(assetId)) return;
+  void deleteAndroidDiskCacheEntry('covers', assetId);
   if (hasElectronBridge()) {
     await window.electron!.removeLocalCoverAsset(assetId);
     return;
@@ -185,6 +193,7 @@ export const removeLocalCoverBinary = async (assetId: string): Promise<void> => 
 };
 
 export const clearLocalCoverBinaries = async (): Promise<void> => {
+  void deleteAndroidDiskCacheEntry('covers', '*');
   if (hasElectronBridge()) {
     await window.electron!.clearLocalCoverAssets();
     return;

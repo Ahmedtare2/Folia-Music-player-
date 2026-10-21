@@ -1,11 +1,18 @@
 import type { ActiveLocalLyricsSource, LocalLyricsPriority, LocalSong, LyricData } from '../../types';
 import { LyricParserFactory } from './LyricParserFactory';
 import { hasKnownGoodWordByWordLocalLyric } from './lyricAutoMatchState';
+import {
+    clearPersistentDiskCacheForTests,
+    computeParsedLyricsContentDigest,
+    readPreParsedLyricsFromDisk,
+    writePreParsedLyricsToDisk,
+} from '../../services/persistentDiskCacheService';
 
 // src/utils/lyrics/localSongLyrics.ts
 // Resolves the lyric payload and its actual source from one local-song snapshot, caching parsed
-// TTML/LRC/VTT timing trees by content signature so track switches and metadata refreshes reuse
-// already-parsed synchronized lyrics without re-running XML/TTML parsing.
+// and pre-segmented TTML/LRC/VTT/QRC timing trees in memory and on persistent internal disk
+// (context.getFilesDir()/media_cache/lyrics/) so track switches and subsequent plays load
+// ready-to-render lyrics with zero XML/TTML parsing or Jieba/ICU segmentation overhead.
 
 export type ResolvedLocalSongLyrics = {
     lyrics: LyricData | null;
@@ -49,6 +56,7 @@ const writeCachedParsedLyrics = (key: string, value: LyricData | null): void => 
 
 export const clearParsedLocalLyricCache = (): void => {
     parsedLocalLyricCache.clear();
+    clearPersistentDiskCacheForTests();
 };
 
 export const selectLocalSongLyricsSource = (
@@ -100,7 +108,18 @@ export const resolveLocalSongLyrics = async (
 ): Promise<ResolvedLocalSongLyrics> => {
     const source = selectLocalSongLyricsSource(song, priority);
     if (source === 'online') {
-        return { lyrics: song.matchedLyrics ?? null, source };
+        const matched = song.matchedLyrics ?? null;
+        if (matched) {
+            const digest = computeParsedLyricsContentDigest(matched);
+            if (digest) {
+                const diskCached = await readPreParsedLyricsFromDisk(`matched_${digest}`);
+                if (diskCached) {
+                    return { lyrics: diskCached, source };
+                }
+                void writePreParsedLyricsToDisk(`matched_${digest}`, matched);
+            }
+        }
+        return { lyrics: matched, source };
     }
     if (source === 'local') {
         const cacheKey = buildLyricCacheKey(

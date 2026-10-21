@@ -68,10 +68,14 @@ const sameBoundaries = (a: string[] | undefined, b: string[]) => (
     a !== undefined && a.length === b.length && a.every((segment, index) => segment === b[index])
 );
 
+const hasPreBakedAutoSegments = (fullText: string, segments: string[] | undefined): boolean => (
+    Array.isArray(segments) && segments.length > 0 && segments.join('') === fullText
+);
+
 /**
  * Bakes icu-folia's split onto every line as `autoWordSegments`. Returns the input untouched when
- * the engines are not ready or every line already carries this exact split, so calling it again
- * (the late re-bake, a record patch) never replaces lyrics for nothing.
+ * the engines are not ready or every line already carries a valid pre-baked split (including splits
+ * restored from the persistent disk cache), so calling it again never runs Jieba/ICU or replaces lyrics.
  */
 export const applyAutoWordSegmentation = (lyrics: LyricData | null): LyricData | null => {
     if (!lyrics || !engines) {
@@ -81,6 +85,9 @@ export const applyAutoWordSegmentation = (lyrics: LyricData | null): LyricData |
     let changed = false;
     const lines = lyrics.lines.map(line => {
         if (!line.fullText) {
+            return line;
+        }
+        if (hasPreBakedAutoSegments(line.fullText, line.autoWordSegments)) {
             return line;
         }
         const boundaries = segmentWithIcuFolia(line.fullText, engines);

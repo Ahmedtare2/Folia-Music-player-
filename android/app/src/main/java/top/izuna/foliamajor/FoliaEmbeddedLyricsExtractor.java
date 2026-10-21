@@ -1,30 +1,37 @@
 package top.izuna.foliamajor;
 
 import android.content.ContentResolver;
+import android.content.Context;
 import android.content.res.AssetFileDescriptor;
 import android.net.Uri;
 import androidx.annotation.Nullable;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.channels.FileChannel;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import org.json.JSONObject;
 
 /**
  * Fast, zero-copy FileChannel tag extractor for embedded synchronized/unsynchronized lyrics
  * (TTML, Enhanced LRC, LRC, QRC/YRC/KRC, and plain text) across MP3 (ID3v2.2/2.3/2.4),
  * FLAC (Vorbis comments), M4A/MP4/ALAC/AAC (iTunes ilst ©lyr and ---- freeform boxes, even when
  * moov is at the end of the file after mdat or after a multi-megabyte cover), OGG/Opus (OggS
- * Vorbis/OpusTags packets), and WAV (RIFF ID3 chunks).
+ * Vorbis/OpusTags packets), and WAV (RIFF ID3 chunks), backed by a persistent disk cache in
+ * context.getFilesDir()/media_cache/lyrics/ so container tags are never parsed twice.
  */
 public final class FoliaEmbeddedLyricsExtractor {
     private static final int MAX_LYRIC_TAG_BYTES = 2 * 1024 * 1024; // 2 MiB safety cap per lyric tag
+    private static final String EMBEDDED_LYRIC_DISK_CACHE_VERSION = "v1";
 
     public static final class ExtractedLyrics {
         public final String lyrics;
@@ -53,6 +60,11 @@ public final class FoliaEmbeddedLyricsExtractor {
 
     @Nullable
     public static ExtractedLyrics extract(ContentResolver resolver, Uri uri) {
+        return extract(null, resolver, uri);
+    }
+
+    @Nullable
+    public static ExtractedLyrics extract(@Nullable Context context, ContentResolver resolver, Uri uri) {
         if (resolver == null || uri == null) return null;
         try (AssetFileDescriptor afd = resolver.openAssetFileDescriptor(uri, "r")) {
             if (afd == null) return null;
@@ -66,10 +78,104 @@ public final class FoliaEmbeddedLyricsExtractor {
                     ? declaredLength
                     : Math.max(0L, channelSize - baseOffset);
                 if (totalLength <= 12L) return null;
-                return extractFromChannel(channel, baseOffset, totalLength);
+
+                File diskCacheFile = resolveEmbeddedLyricCacheFile(context, uri, baseOffset, totalLength);
+                if (diskCacheFile != null && diskCacheFile.isFile() && diskCacheFile.length() > 0L) {
+                    try {
+                        String rawJson = readUtf8File(diskCacheFile);
+                        JSONObject cached = new JSONObject(rawJson);
+                        if (EMBEDDED_LYRIC_DISK_CACHE_VERSION.equals(cached.optString("v"))) {
+                            if (!cached.optBoolean("hasLyrics", false)) {
+                                return null;
+                            }
+                            String cachedLyrics = cached.optString("lyrics", "");
+                            String cachedTrans = cached.optString("translationLyrics", "");
+                            if (!cachedLyrics.isEmpty()) {
+                                return new ExtractedLyrics(
+                                    cachedLyrics,
+                                    cachedTrans.isEmpty() ? null : cachedTrans
+                                );
+                            }
+                        }
+                    } catch (Exception ignored) {
+                        // Corrupt cache entry; re-extract below.
+                    }
+                }
+
+                ExtractedLyrics extracted = extractFromChannel(channel, baseOffset, totalLength);
+                if (diskCacheFile != null) {
+                    try {
+                        JSONObject record = new JSONObject();
+                        record.put("v", EMBEDDED_LYRIC_DISK_CACHE_VERSION);
+                        record.put("hasLyrics", extracted != null && extracted.lyrics != null && !extracted.lyrics.isEmpty());
+                        if (extracted != null && extracted.lyrics != null) {
+                            record.put("lyrics", extracted.lyrics);
+                            if (extracted.translationLyrics != null) {
+                                record.put("translationLyrics", extracted.translationLyrics);
+                            }
+                        }
+                        writeUtf8FileAtomically(diskCacheFile, record.toString());
+                    } catch (Exception ignored) {
+                        // Ignore cache write errors.
+                    }
+                }
+                return extracted;
             }
         } catch (Exception ignored) {
             return null;
+        }
+    }
+
+    @Nullable
+    private static File resolveEmbeddedLyricCacheFile(@Nullable Context context, Uri uri, long baseOffset, long totalLength) {
+        if (context == null) return null;
+        try {
+            File dir = new File(new File(context.getFilesDir(), "media_cache"), "lyrics");
+            if (!dir.exists() && !dir.mkdirs()) return null;
+            String rawKey = uri.toString() + "::" + baseOffset + "::" + totalLength;
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(rawKey.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder("raw_embedded_");
+            for (byte b : digest) {
+                sb.append(String.format(Locale.ROOT, "%02x", b & 0xFF));
+            }
+            sb.append(".json");
+            return new File(dir, sb.toString());
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private static String readUtf8File(File file) throws IOException {
+        try (FileInputStream fis = new FileInputStream(file);
+             ByteArrayOutputStream bos = new ByteArrayOutputStream((int) Math.min(file.length(), 65536L))) {
+            byte[] buf = new byte[8192];
+            int r;
+            while ((r = fis.read(buf)) != -1) {
+                bos.write(buf, 0, r);
+            }
+            return new String(bos.toByteArray(), StandardCharsets.UTF_8);
+        }
+    }
+
+    private static void writeUtf8FileAtomically(File targetFile, String content) throws IOException {
+        File parent = targetFile.getParentFile();
+        if (parent != null && !parent.exists()) {
+            parent.mkdirs();
+        }
+        File tempFile = new File(parent, targetFile.getName() + ".tmp." + Thread.currentThread().getId());
+        byte[] bytes = content.getBytes(StandardCharsets.UTF_8);
+        try (FileOutputStream fos = new FileOutputStream(tempFile)) {
+            fos.write(bytes);
+            fos.getFD().sync();
+        }
+        if (!tempFile.renameTo(targetFile)) {
+            try (FileOutputStream fos = new FileOutputStream(targetFile)) {
+                fos.write(bytes);
+                fos.getFD().sync();
+            } finally {
+                tempFile.delete();
+            }
         }
     }
 
@@ -190,7 +296,6 @@ public final class FoliaEmbeddedLyricsExtractor {
         int flags = header[5] & 0xFF;
         long pos = 10L;
 
-        // Skip optional extended header in v2.3 / v2.4
         if ((flags & 0x40) != 0 && (versionMajor == 3 || versionMajor == 4)) {
             byte[] ext = readBytesAt(channel, baseOffset + pos, 4);
             if (ext != null && ext.length == 4) {
@@ -343,7 +448,6 @@ public final class FoliaEmbeddedLyricsExtractor {
             }
             return new String(buf, offset, safeLen, StandardCharsets.UTF_16LE);
         }
-        // encoding == 0: check if valid UTF-8, otherwise ISO-8859-1
         if (isValidUtf8(buf, offset, safeLen)) {
             return new String(buf, offset, safeLen, StandardCharsets.UTF_8);
         }
@@ -377,7 +481,7 @@ public final class FoliaEmbeddedLyricsExtractor {
     // 2. FLAC (Vorbis Comments, skipping PICTURE blocks in O(1))
     // =========================================================================
     private static void parseFlac(FileChannel channel, long baseOffset, long totalLength, List<LyricCandidate> out) throws IOException {
-        long pos = 4L; // After "fLaC"
+        long pos = 4L;
         while (pos + 4L <= totalLength) {
             byte[] bh = readBytesAt(channel, baseOffset + pos, 4);
             if (bh == null || bh.length < 4) break;
@@ -415,7 +519,6 @@ public final class FoliaEmbeddedLyricsExtractor {
             bb.position(cPos + cLen);
             if (cLen > MAX_LYRIC_TAG_BYTES) continue;
 
-            // Find '=' within first 64 bytes
             int eqIdx = -1;
             int searchMax = Math.min(cPos + 64, cPos + cLen);
             for (int k = cPos; k < searchMax; k++) {
@@ -476,7 +579,6 @@ public final class FoliaEmbeddedLyricsExtractor {
             if ("moov".equals(boxType) || "udta".equals(boxType) || "ilst".equals(boxType)) {
                 parseMp4Boxes(channel, baseOffset, boxContentStart, boxEnd, depth + 1, out);
             } else if ("meta".equals(boxType)) {
-                // MP4 'meta' FullBox has 4 bytes of version/flags before child boxes
                 long childStart = boxContentStart + 4L;
                 if (childStart + 8L <= boxEnd) {
                     byte[] probe = readBytesAt(channel, baseOffset + childStart, 8);

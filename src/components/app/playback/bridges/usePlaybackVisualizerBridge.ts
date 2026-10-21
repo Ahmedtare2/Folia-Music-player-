@@ -16,6 +16,7 @@ import { getTransitionHandoffProgress } from '../../../../services/automix/trans
 import { tickBeatFx } from '../../../../services/beatFx/beatFxLive';
 import { useBeatFxTrack } from '../../../../hooks/useBeatFxTrack';
 import { NATIVE_VISIBILITY_EVENT } from '../../../../hooks/useDocumentVisibility';
+import { isAppForegroundVisible, subscribeAppForegroundVisibility } from '../../../../utils/visualizerVisibilityGate';
 import { readIncomingLyricClock } from './incomingLyricClock';
 
 // src/components/app/playback/bridges/usePlaybackVisualizerBridge.ts
@@ -94,6 +95,9 @@ export function usePlaybackVisualizerBridge({
     const currentLineIndexRef = useRef(-1);
     const lyricsRef = useRef(lyrics);
     lyricsRef.current = lyrics;
+    // Reuse a single typed array for FFT frequency reads instead of allocating on every frame.
+    const fftBufferRef = useRef<Uint8Array | null>(null);
+    const emptySpectrumRef = useRef<Uint8Array>(new Uint8Array(0));
     // 智能动感模式: loads the track's beats while it is on; the clock is stepped below. A ref, so
     // switching it does not rebuild the frame loop.
     const beatFxWantedRef = useRef(false);
@@ -144,27 +148,6 @@ export function usePlaybackVisualizerBridge({
         applyLyricClockAtTime(latestTimeSec);
     }), [applyLyricClockAtTime]);
 
-    // Resynchronize playback position & active lyric immediately when returning from background or unlocking screen.
-    useEffect(() => {
-        if (typeof document === 'undefined' || typeof window === 'undefined') return undefined;
-        const handleVisibilityResume = (event?: Event) => {
-            if (document.visibilityState === 'hidden') return;
-            const custom = event as CustomEvent<{ visible?: boolean }> | undefined;
-            if (custom?.detail && custom.detail.visible === false) return;
-            const audioElement = getDisplayElement?.() ?? audioRef.current;
-            if (audioElement && Number.isFinite(audioElement.currentTime)) {
-                currentTime.set(audioElement.currentTime);
-                applyLyricClockAtTime(audioElement.currentTime);
-            }
-        };
-        document.addEventListener('visibilitychange', handleVisibilityResume);
-        window.addEventListener(NATIVE_VISIBILITY_EVENT, handleVisibilityResume);
-        return () => {
-            document.removeEventListener('visibilitychange', handleVisibilityResume);
-            window.removeEventListener(NATIVE_VISIBILITY_EVENT, handleVisibilityResume);
-        };
-    }, [applyLyricClockAtTime, audioRef, getDisplayElement]);
-
     // The ends of a blend, written as the store changes rather than on the next frame: the visualizer
     // renders from that same change, and a frame late it would draw the incoming track's lyrics from
     // the outgoing track's clock and line (or the last blend's finished hand-off at the next one's start).
@@ -192,6 +175,13 @@ export function usePlaybackVisualizerBridge({
     }), [audioRef]);
 
     const updateLoop = useCallback(() => {
+        // Strict Screen-Off & Background Freeze: never run 60/120fps FFT or lyric rAF updates
+        // when the phone screen is turned off or the document is hidden.
+        if (!isAppForegroundVisible()) {
+            animationFrameRef.current = 0;
+            return;
+        }
+
         // Normally the active deck; the outgoing one for as long as a blend holds the picture on
         // the track it is finishing, so that clock and picture never describe different songs.
         const audioElement = getDisplayElement?.() ?? audioRef.current;
@@ -203,7 +193,10 @@ export function usePlaybackVisualizerBridge({
 
         if (hasAudibleSignal && analyserRef.current) {
             const bufferLength = analyserRef.current.frequencyBinCount;
-            const dataArray = new Uint8Array(bufferLength);
+            if (!fftBufferRef.current || fftBufferRef.current.length !== bufferLength) {
+                fftBufferRef.current = new Uint8Array(bufferLength);
+            }
+            const dataArray = fftBufferRef.current;
             analyserRef.current.getByteFrequencyData(dataArray);
             audioBands.spectrum?.set(dataArray);
 
@@ -244,7 +237,7 @@ export function usePlaybackVisualizerBridge({
             audioBands.mid.set(breath);
             audioBands.vocal.set(breath);
             audioBands.treble.set(breath);
-            audioBands.spectrum?.set(new Uint8Array(0));
+            audioBands.spectrum?.set(emptySpectrumRef.current);
         }
 
         if (isActuallyPlaying && audioElement) {
@@ -346,11 +339,49 @@ export function usePlaybackVisualizerBridge({
         getDisplayElement,
     ]);
 
+    // Resynchronize playback position & active lyric immediately when returning from background or unlocking screen,
+    // and strictly cancel the rAF loop the moment the screen turns off.
     useEffect(() => {
-        animationFrameRef.current = requestAnimationFrame(updateLoop);
+        if (typeof document === 'undefined' || typeof window === 'undefined') return undefined;
+        const handleVisibilityChange = (visible: boolean) => {
+            if (!visible) {
+                if (animationFrameRef.current) {
+                    cancelAnimationFrame(animationFrameRef.current);
+                    animationFrameRef.current = 0;
+                }
+                return;
+            }
+            const audioElement = getDisplayElement?.() ?? audioRef.current;
+            if (audioElement && Number.isFinite(audioElement.currentTime)) {
+                currentTime.set(audioElement.currentTime);
+                applyLyricClockAtTime(audioElement.currentTime);
+            }
+            if (!animationFrameRef.current) {
+                animationFrameRef.current = requestAnimationFrame(updateLoop);
+            }
+        };
+        const unsubscribe = subscribeAppForegroundVisibility(handleVisibilityChange);
+        const handleRawNativeEvent = (event: Event) => {
+            const custom = event as CustomEvent<{ visible?: boolean }> | undefined;
+            if (typeof custom?.detail?.visible === 'boolean') {
+                handleVisibilityChange(custom.detail.visible && document.visibilityState !== 'hidden');
+            }
+        };
+        window.addEventListener(NATIVE_VISIBILITY_EVENT, handleRawNativeEvent);
+        return () => {
+            unsubscribe();
+            window.removeEventListener(NATIVE_VISIBILITY_EVENT, handleRawNativeEvent);
+        };
+    }, [animationFrameRef, applyLyricClockAtTime, audioRef, getDisplayElement, updateLoop]);
+
+    useEffect(() => {
+        if (isAppForegroundVisible()) {
+            animationFrameRef.current = requestAnimationFrame(updateLoop);
+        }
         return () => {
             if (animationFrameRef.current) {
                 cancelAnimationFrame(animationFrameRef.current);
+                animationFrameRef.current = 0;
             }
         };
     }, [animationFrameRef, updateLoop]);

@@ -8,6 +8,7 @@ import {
     PaperTexture,
 } from '@paper-design/shaders-react';
 import { DEFAULT_NOMAND_BACKGROUND_TUNING, type MonetBackgroundImage, type NomandBackgroundTuning, type Theme } from '../../../../types';
+import { AMBIENT_BACKGROUND_DPR_SCALE, AMBIENT_BACKGROUND_MAX_DIMENSION_PX } from '../../../../utils/mobileVisualizerBudget';
 import {
     getLensDistortionOverscan,
     getPaperTextureOverscan,
@@ -20,7 +21,8 @@ import { useFirstFrameDrawn } from '../../styleTransition/firstFrame';
 import { PAPER_SHADER_CONTEXT_ATTRIBUTES } from '../../../../utils/paperShaderContext';
 
 // src/components/visualizer/backgrounds/nomand/NomandBackgroundLayer.tsx
-// Renders the selected Paper image shader with the current theme palette.
+// Renders the selected Paper image shader with the current theme palette at a reduced
+// ambient resolution (0.30x DPR / max 384x384) with smooth bilinear CSS upscaling.
 
 interface NomandBackgroundLayerProps {
     coverUrl?: string | null;
@@ -30,6 +32,7 @@ interface NomandBackgroundLayerProps {
     isDaylight?: boolean;
 }
 
+const NOMAND_MAX_SHADER_PIXELS = AMBIENT_BACKGROUND_MAX_DIMENSION_PX * AMBIENT_BACKGROUND_MAX_DIMENSION_PX;
 
 /**
  * For a copy mounted for a new song (or type): says it is ready once its shader has loaded the image,
@@ -92,10 +95,10 @@ const NomandBackgroundLayer: React.FC<NomandBackgroundLayerProps> = ({
             ref: shaderRef,
             image: sourceUrl,
             fit: 'cover' as const,
-            minPixelRatio: 1,
-            maxPixelCount: 1920 * 1080,
+            minPixelRatio: AMBIENT_BACKGROUND_DPR_SCALE,
+            maxPixelCount: NOMAND_MAX_SHADER_PIXELS,
             webGlContextAttributes: PAPER_SHADER_CONTEXT_ATTRIBUTES,
-            style: { width: '100%', height: '100%' },
+            style: { width: '100%', height: '100%', imageRendering: 'auto' as const },
         };
 
         switch (tuning.effect) {

@@ -13,6 +13,7 @@ import {
   USER_CACHE_KEYS,
   type CacheUsage,
 } from './cacheUsage';
+import { writeAndroidDiskCacheJson } from '../android/foliaAndroidBridge';
 
 // src/services/repositories/cacheRepository.ts
 // Centralizes cache routing, legacy user-cache migration, prefix operations, cleanup, and usage metrics.
@@ -60,6 +61,9 @@ const getTable = (name: CacheTableName): Table<StoredCacheEntry, string> => appD
 
 export const putCacheEntry = async (key: string, data: unknown): Promise<void> => {
   await getTable(getCacheTableName(key)).put({ key, data, timestamp: Date.now() });
+  if (key.startsWith('dual_theme_') && data && typeof data === 'object') {
+    void writeAndroidDiskCacheJson('palettes', key, JSON.stringify(data));
+  }
 };
 
 export const readCacheEntry = async <T>(key: string): Promise<T | null> => {
@@ -200,17 +204,18 @@ const countCacheUsageOffThread = (): Promise<CacheUsage> | null => {
 };
 
 export const getBrowserCacheUsageByCategory = async (): Promise<CacheUsage> => {
-  const offThread = countCacheUsageOffThread();
-  if (offThread) {
-    try {
-      return await offThread;
-    } catch (error) {
-      console.warn('[Cache] Counting the cache on the page instead:', error);
-    }
+  try {
+    const offThread = countCacheUsageOffThread();
+    if (offThread) return await offThread;
+  } catch {
+    // Fall back to main-thread scan below.
   }
   const usage = emptyCacheUsage();
-  const entries = (await Promise.all(CACHE_TABLE_NAMES.map(name => getTable(name).toArray()))).flat();
-  entries.forEach(entry => countCacheEntry(usage, entry));
+  await Promise.all(CACHE_TABLE_NAMES.map(async name => {
+    await getTable(name).each(item => {
+      countCacheEntry(usage, item.key, item.data);
+    });
+  }));
   return usage;
 };
 
@@ -218,8 +223,9 @@ export const clearBrowserCacheByCategory = async (category: CacheCategory): Prom
   await appDatabase.transaction('rw', CACHE_TABLE_NAMES, async () => {
     await Promise.all(CACHE_TABLE_NAMES.map(async name => {
       const table = getTable(name);
-      const keys = (await table.toCollection().primaryKeys()).map(String).filter(key => matchesCategory(key, category));
-      await table.bulkDelete(keys);
+      const keys = await table.toCollection().primaryKeys();
+      const deletedKeys = keys.map(String).filter(key => !isPersistentLocalLibraryKey(key) && matchesCategory(key, category));
+      await table.bulkDelete(deletedKeys);
     }));
   });
 };

@@ -43,6 +43,15 @@ import {
   serializeDirHandlesForStorage,
   type SerializedAndroidSafDirectoryHandle,
 } from './android/androidSafDirectoryHandle';
+import {
+  deleteAndroidDiskCacheEntry,
+  readAndroidDiskCacheJson,
+  writeAndroidDiskCacheJson,
+} from './android/foliaAndroidBridge';
+import {
+  clearPersistentDiskCacheForTests,
+  clearPersistentDiskCacheNamespace,
+} from './persistentDiskCacheService';
 
 // src/services/db.ts
 // Keeps the historical storage API stable while delegating every IndexedDB operation to Dexie repositories.
@@ -190,6 +199,7 @@ export const clearCacheByCategory = async (category: CacheCategory): Promise<voi
       await window.electron!.clearAudioCache();
     }
     if (category === 'cover') await clearCoverAssets();
+    if (category === 'lyrics') await clearPersistentDiskCacheNamespace('lyrics');
   } catch (error) {
     console.error('Failed to clear cache by category', error);
   }
@@ -254,6 +264,10 @@ export const clearAllData = async (): Promise<void> => {
     resetLocalCoverAssetRuntime();
     resetLocalLibraryInitializationCache();
     clearParsedLocalLyricCache();
+    clearPersistentDiskCacheForTests();
+    void clearPersistentDiskCacheNamespace('lyrics');
+    void clearPersistentDiskCacheNamespace('palettes');
+    void clearPersistentDiskCacheNamespace('index');
     resetLocalAlbumVideoCatalogForTests();
     await appDatabase.delete();
     await appDatabase.open();
@@ -263,14 +277,25 @@ export const clearAllData = async (): Promise<void> => {
 };
 
 export const saveDirHandles = async (handles: Record<string, FileSystemDirectoryHandle>): Promise<void> => {
-  await saveToCache('local_dir_handles', serializeDirHandlesForStorage(handles));
+  const serialized = serializeDirHandlesForStorage(handles);
+  await saveToCache('local_dir_handles', serialized);
+  void writeAndroidDiskCacheJson('index', 'local_dir_handles', JSON.stringify(serialized));
 };
 
-export const getDirHandles = async (): Promise<Record<string, FileSystemDirectoryHandle>> => (
-  rehydrateDirHandlesFromStorage(
-    await getFromCache<Record<string, FileSystemDirectoryHandle | SerializedAndroidSafDirectoryHandle>>('local_dir_handles'),
-  )
-);
+export const getDirHandles = async (): Promise<Record<string, FileSystemDirectoryHandle>> => {
+  let stored = await getFromCache<Record<string, FileSystemDirectoryHandle | SerializedAndroidSafDirectoryHandle>>('local_dir_handles');
+  if (!stored || Object.keys(stored).length === 0) {
+    const diskJson = await readAndroidDiskCacheJson('index', 'local_dir_handles');
+    if (diskJson) {
+      try {
+        stored = JSON.parse(diskJson) as Record<string, SerializedAndroidSafDirectoryHandle>;
+      } catch {
+        // Ignore parse error.
+      }
+    }
+  }
+  return rehydrateDirHandlesFromStorage(stored);
+};
 
 export const deleteDirHandle = async (rootFolderName: string): Promise<void> => {
   const handles = await getDirHandles();
@@ -282,13 +307,32 @@ export const deleteDirHandle = async (rootFolderName: string): Promise<void> => 
 const getLocalSnapshotCacheKey = (rootFolderName: string) => `local_snapshot_${rootFolderName}`;
 
 export const saveLocalLibrarySnapshot = async (snapshot: LocalLibrarySnapshot): Promise<void> => {
-  await saveToCache(getLocalSnapshotCacheKey(snapshot.rootFolderName), snapshot);
+  const key = getLocalSnapshotCacheKey(snapshot.rootFolderName);
+  await saveToCache(key, snapshot);
+  void writeAndroidDiskCacheJson('index', key, JSON.stringify(snapshot));
 };
 
-export const getLocalLibrarySnapshot = async (rootFolderName: string): Promise<LocalLibrarySnapshot | null> => (
-  await getFromCache<LocalLibrarySnapshot>(getLocalSnapshotCacheKey(rootFolderName))
-);
+export const getLocalLibrarySnapshot = async (rootFolderName: string): Promise<LocalLibrarySnapshot | null> => {
+  const key = getLocalSnapshotCacheKey(rootFolderName);
+  const cached = await getFromCache<LocalLibrarySnapshot>(key);
+  if (cached) return cached;
+  const diskJson = await readAndroidDiskCacheJson('index', key);
+  if (diskJson) {
+    try {
+      const parsed = JSON.parse(diskJson) as LocalLibrarySnapshot;
+      if (parsed && parsed.rootFolderName === rootFolderName && parsed.tree) {
+        void saveToCache(key, parsed);
+        return parsed;
+      }
+    } catch {
+      // Ignore parse error.
+    }
+  }
+  return null;
+};
 
 export const deleteLocalLibrarySnapshot = async (rootFolderName: string): Promise<void> => {
-  await removeFromCache(getLocalSnapshotCacheKey(rootFolderName));
+  const key = getLocalSnapshotCacheKey(rootFolderName);
+  await removeFromCache(key);
+  void deleteAndroidDiskCacheEntry('index', key);
 };

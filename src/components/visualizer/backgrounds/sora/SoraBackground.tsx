@@ -2,12 +2,15 @@ import React, { useEffect, useRef } from 'react';
 import type { MotionValue } from 'framer-motion';
 import * as twgl from 'twgl.js';
 import { Theme } from '../../../../types';
+import { AMBIENT_BACKGROUND_DPR_SCALE, AMBIENT_BACKGROUND_MAX_DIMENSION_PX } from '../../../../utils/mobileVisualizerBudget';
+import { isAppForegroundVisible, subscribeAppForegroundVisibility } from '../../../../utils/visualizerVisibilityGate';
 import { parseColorChannels } from '../../colorMix';
 import { useBlendedColors } from '../useBlendedColors';
 
 // src/components/visualizer/backgrounds/sora/SoraBackground.tsx
 // SoraBackground component is a shader-based space starfield background.
-// Refactored to use GL_POINTS for massive performance gains, resolving blur CPU usage issues.
+// Renders its internal WebGL framebuffer at a reduced ambient DPR (0.30x–0.35x, max 384px)
+// with smooth bilinear CSS upscaling and freezes immediately when the screen is off or hidden.
 
 interface SoraBackgroundProps {
   theme: Theme;
@@ -20,6 +23,12 @@ interface SoraBackgroundProps {
 }
 
 const PARTICLE_COUNT = 150;
+
+const resolveSoraBufferScale = (canvas: HTMLCanvasElement): number | undefined => {
+  const maxCssSide = Math.max(canvas.clientWidth || 0, canvas.clientHeight || 0);
+  if (maxCssSide <= 0) return undefined;
+  return Math.max(0.25, Math.min(AMBIENT_BACKGROUND_DPR_SCALE, AMBIENT_BACKGROUND_MAX_DIMENSION_PX / maxCssSide));
+};
 
 const VERTEX_SHADER = `
 attribute float a_index;
@@ -97,8 +106,6 @@ const SoraBackground: React.FC<SoraBackgroundProps> = ({ theme, isDaylight, paus
   const animationRef = useRef<number | null>(null);
   const timeRef = useRef<number>(0);
   const invalidateRef = useRef<(() => void) | null>(null);
-  // A new song's colours blend in where the host plays transitions: a second copy of the canvas for the
-  // soft focus would compile its program again on every song change.
   const [primaryColor, accentColor] = useBlendedColors([theme.primaryColor, theme.accentColor], blendMs, blendProgress);
 
   const primaryColorChannels = parseColorChannels(primaryColor) || 
@@ -155,6 +162,7 @@ const SoraBackground: React.FC<SoraBackgroundProps> = ({ theme, isDaylight, paus
 
     // While paused, render only when inputs or dimensions change.
     const invalidate = () => {
+      if (!isAppForegroundVisible()) return;
       if (animationRef.current === null) {
         animationRef.current = requestAnimationFrame(render);
       }
@@ -162,13 +170,22 @@ const SoraBackground: React.FC<SoraBackgroundProps> = ({ theme, isDaylight, paus
 
     const render = (now: number) => {
       animationRef.current = null;
+      if (!isAppForegroundVisible()) {
+        lastTimestamp = null;
+        return;
+      }
       if (!pausedRef.current && lastTimestamp !== null) {
         const delta = (now - lastTimestamp) / 1000;
         timeRef.current += delta;
       }
       lastTimestamp = pausedRef.current ? null : now;
 
-      twgl.resizeCanvasToDisplaySize(canvas);
+      const scaleMultiplier = resolveSoraBufferScale(canvas);
+      if (scaleMultiplier !== undefined) {
+        twgl.resizeCanvasToDisplaySize(canvas, scaleMultiplier);
+      } else {
+        twgl.resizeCanvasToDisplaySize(canvas);
+      }
       gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
 
       // Clear background
@@ -193,8 +210,20 @@ const SoraBackground: React.FC<SoraBackgroundProps> = ({ theme, isDaylight, paus
       
       twgl.drawBufferInfo(gl, bufferInfo, gl.POINTS);
 
-      if (!pausedRef.current) invalidate();
+      if (!pausedRef.current && isAppForegroundVisible()) invalidate();
     };
+
+    const unsubscribeVisibility = subscribeAppForegroundVisibility((visible) => {
+      if (!visible) {
+        lastTimestamp = null;
+        if (animationRef.current !== null) {
+          cancelAnimationFrame(animationRef.current);
+          animationRef.current = null;
+        }
+      } else {
+        invalidate();
+      }
+    });
 
     const resizeObserver = new ResizeObserver(invalidate);
     resizeObserver.observe(canvas);
@@ -202,6 +231,7 @@ const SoraBackground: React.FC<SoraBackgroundProps> = ({ theme, isDaylight, paus
     invalidate();
 
     return () => {
+      unsubscribeVisibility();
       invalidateRef.current = null;
       resizeObserver.disconnect();
       if (animationRef.current !== null) {
@@ -226,6 +256,7 @@ const SoraBackground: React.FC<SoraBackgroundProps> = ({ theme, isDaylight, paus
       style={{
         width: '100%',
         height: '100%',
+        imageRendering: 'auto',
         willChange: 'transform',
         transform: 'translateZ(0)',
       }}

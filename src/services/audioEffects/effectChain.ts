@@ -11,7 +11,7 @@ import { dbToLinear, rampParam } from './effectParams';
 import { connectAudioEffectNodes, createAudioEffectNodes, disconnectAudioEffectNodes } from './effectNodes';
 
 // src/services/audioEffects/effectChain.ts
-// Owns the post-EQ effect chain: cutoff filters, saturation, bit crush, wow/flutter,
+// Owns the post-EQ effect chain: cutoff filters, saturation, bit crush, wow/flutter (chorus/pitch LFO),
 // vinyl noise, stereo width, dynamics and reverb, without routing audio through React.
 
 type CreateAudioEffectChainParams = {
@@ -24,6 +24,8 @@ type CreateAudioEffectChainParams = {
 
 export type AudioEffectChain = {
     apply: (effects: AudioEffectSettings, enabled: boolean) => void;
+    setBypassed: (bypassed: boolean) => void;
+    isBypassed: () => boolean;
     dispose: () => void;
 };
 
@@ -43,10 +45,15 @@ export const createAudioEffectChain = ({
     const wow = createWowBranch(context, nodes);
     let lastDrive = -1;
     let lastCrush = -1;
+    let bypassed = false;
+    let latestEffects = effects;
+    let latestEnabled = enabled;
 
     // Maps normalized settings onto every stage; a disabled chain falls back to the neutral set.
     const apply = (nextEffects: AudioEffectSettings, nextEnabled: boolean) => {
-        const active = nextEnabled ? normalizeAudioEffects(nextEffects) : DEFAULT_AUDIO_EFFECT_SETTINGS;
+        latestEffects = nextEffects;
+        latestEnabled = nextEnabled;
+        const active = (nextEnabled && !bypassed) ? normalizeAudioEffects(nextEffects) : DEFAULT_AUDIO_EFFECT_SETTINGS;
 
         rampParam(context, nodes.highpass.frequency, active.highpass);
         rampParam(context, nodes.lowpass.frequency, Math.min(active.lowpass, context.sampleRate * 0.475));
@@ -79,10 +86,32 @@ export const createAudioEffectChain = ({
         rampParam(context, nodes.makeup.gain, dbToLinear(active.punch * 3));
     };
 
+    const setBypassed = (nextBypassed: boolean) => {
+        if (bypassed === nextBypassed) return;
+        bypassed = nextBypassed;
+        if (bypassed) {
+            wow.set(0);
+            noise.set(0);
+            reverb.set(0);
+            try { nodes.dry.disconnect(); } catch { /* ignore */ }
+            try { nodes.wet.disconnect(); } catch { /* ignore */ }
+            try { nodes.noiseGain.disconnect(); } catch { /* ignore */ }
+            try { input.disconnect(nodes.highpass); } catch { /* ignore */ }
+        } else {
+            try { input.connect(nodes.highpass); } catch { /* ignore */ }
+            try { nodes.dry.connect(output); } catch { /* ignore */ }
+            try { nodes.wet.connect(output); } catch { /* ignore */ }
+            try { nodes.noiseGain.connect(output); } catch { /* ignore */ }
+            apply(latestEffects, latestEnabled);
+        }
+    };
+
     apply(effects, enabled);
 
     return {
         apply,
+        setBypassed,
+        isBypassed: () => bypassed,
         dispose: () => {
             wow.dispose();
             noise.dispose();

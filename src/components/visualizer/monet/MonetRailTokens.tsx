@@ -15,6 +15,8 @@ import type { PositionedMonetLineEntry } from './monetRailLayout';
 
 // src/components/visualizer/monet/MonetRailTokens.tsx
 // 行内的逐词渲染：按时间着色的 token 与当前行的扫字遮罩 / 填充 / glow。
+// Waiting lines and off-viewport lines render plain static spans rather than mounting 6 useTransform
+// MotionValues per word, keeping GPU and JS overhead strictly bounded to the active/just-passed lines.
 
 /** A clock that never moves, for words whose look does not depend on the time. */
 const STILL_TIME = motionValue(0);
@@ -51,6 +53,7 @@ export const MonetTimedTokenSpan: React.FC<{
     const resolvedAccentColor = isChorus && chorusAccentColor
         ? mixColors(accentColor, chorusAccentColor, 0.48)
         : accentColor;
+    const isWaitingLine = entry.status === 'waiting';
 
     return (
         <span dir={lineDirection} className="block w-full min-w-0 max-w-full whitespace-pre-wrap break-words">
@@ -59,11 +62,15 @@ export const MonetTimedTokenSpan: React.FC<{
                     <span
                         key={token.key}
                         style={{
-                            color: token.timed
+                            color: token.timed && entry.status !== 'waiting'
                                 ? tokenColors.get(token.key) ?? resolvedAccentColor
                                 : entry.tone.baseColor,
                         }}
                     >
+                        {token.text}
+                    </span>
+                ) : isWaitingLine ? (
+                    <span key={token.key} style={{ color: entry.tone.baseColor }}>
                         {token.text}
                     </span>
                 ) : token.timed && token.startTime !== null && token.endTime !== null ? (
@@ -127,7 +134,6 @@ const MonetWordSweep: React.FC<{
     fontSpec,
     fontsEpoch,
     isChorus,
-    audioPower,
 }) => {
         const isLineActive = lineStatus === 'active';
         const canRenderGlow = lineStatus === 'active' || lineStatus === 'passed';
@@ -142,11 +148,6 @@ const MonetWordSweep: React.FC<{
             [text, fontPx, fontSpec, fontsEpoch],
         );
 
-        // Only a line being sung moves with the clock, and only sung lines can still be glowing.
-        // Every other word reads a clock that never ticks: its transforms already ignore the time
-        // when the line is not active, so the values are the same, but dozens of words per rail no
-        // longer each run four transforms on every frame. useTransform re-subscribes on every
-        // render, so a word picks the live clock up on the render that makes its line active.
         const sweepTime = isLineActive ? currentTime : STILL_TIME;
         const glowTime = canRenderGlow ? currentTime : STILL_TIME;
 
@@ -197,11 +198,6 @@ const MonetWordSweep: React.FC<{
             return `0 0 ${radiusOne}px ${glowColor}, 0 0 ${radiusTwo}px ${glowColor}`;
         }) as unknown as MotionValue<string>;
 
-        // Glyphs with deep descenders (g, j, p, y, and many CJK forms) sit below the line box
-        // whenever the font's em box is taller than `line-height`, which drives half-leading
-        // negative. `background-clip: text` paints no background outside the fill box and the mask
-        // clips at the overlay's border box, so the sweep used to stop mid-glyph — more visibly the
-        // larger the font. Grow both boxes, then pull the text back so its position is unchanged.
         const sweepOverflowPx = Math.round(fontPx * 0.5);
 
         return (

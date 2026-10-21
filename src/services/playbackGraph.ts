@@ -5,10 +5,10 @@ import type { AudioEqualizerSettings } from '../utils/audioEqualizer';
 // src/services/playbackGraph.ts
 // The order the playback nodes are wired in, as one function so the order can be asserted.
 //
-// This lived inline in usePlaybackAudioBridge, where nothing could reach it: testing it meant
-// rendering the hook, and the alternative - a test that rebuilds the same wiring - would have
-// passed no matter what the hook did. The order matters enough to be worth reaching (see the
-// volume note below), so it moved here and the hook now only owns the refs.
+// Supports full DSP bypass (`setDspBypass(true)` / `bypassDsp: true`) when Chorus, EQ, Automix,
+// and Stem Separation are turned off so `mixNode` routes directly to `gainNode` without running
+// the 10-band biquad EQ cascade or the 4x-oversampled WaveShaper / Compressor / Convolver / LFO
+// effect chain on every audio quantum.
 
 type BuildPlaybackGraphParams = {
     context: AudioContext;
@@ -18,6 +18,8 @@ type BuildPlaybackGraphParams = {
     connectDecks: (context: AudioContext, output: AudioNode) => boolean;
     equalizerNodesRef: { current: BiquadFilterNode[] };
     settings: AudioEqualizerSettings;
+    /** When true, bypasses the 10-band EQ and AudioEffectChain nodes so mixNode feeds gainNode directly. */
+    bypassDsp?: boolean;
 };
 
 export type PlaybackGraph = {
@@ -32,6 +34,10 @@ export type PlaybackGraph = {
     effectChain: AudioEffectChain;
     /** False when a deck was missing, so automix will stay idle. Audio still flows. */
     decksConnected: boolean;
+    /** Switches between direct hardware/mix passthrough (`mixNode -> gainNode`) and full EQ+Effects DSP. */
+    setDspBypass: (bypassed: boolean) => void;
+    /** True when the 10-band EQ and AudioEffectChain DSP nodes are currently bypassed. */
+    isDspBypassed: () => boolean;
 };
 
 export const buildPlaybackGraph = ({
@@ -40,6 +46,7 @@ export const buildPlaybackGraph = ({
     connectDecks,
     equalizerNodesRef,
     settings,
+    bypassDsp = false,
 }: BuildPlaybackGraphParams): PlaybackGraph => {
     // The shared mix point. Both decks land here, so the equaliser and the analyser each exist
     // once and see the sum: the tone never steps mid-blend and the visualiser draws what is
@@ -59,23 +66,6 @@ export const buildPlaybackGraph = ({
 
     /**
      * Volume, and it sits AFTER the effects rather than at the mix point where it started.
-     *
-     * Three of the effects are absolute rather than relative, so a fader upstream of them changes
-     * what they DO instead of how loud they are. Measured through the real chain with an
-     * OfflineAudioContext, before and after this moved:
-     *
-     * - Vinyl noise is mixed into the chain OUTPUT, so upstream of it the fader never touched it
-     *   at all: -51.9 dBFS of crackle at volume 1.00, 0.50 and 0.25 alike. Turning the music down
-     *   turned the record hiss UP relative to it, 6 dB per halving, and there was no volume at
-     *   which the crackle could be made quiet. Downstream: -51.8 / -57.9 / -64.0 dBFS.
-     * - Bit crush quantizes on a fixed staircase, so its step is a fixed fraction of FULL scale.
-     *   Fed an attenuated signal it eats a bigger share of it: one -12 dBFS tone came back at
-     *   38.2 dB SNR at volume 1.00 but 25.8 dB at 0.25 - a bit depth that dropped by two bits
-     *   because somebody moved a slider that is not its own. Downstream: 38.2 dB at every volume.
-     * - Punch is a compressor with a fixed threshold, so quieter input simply stopped reaching it.
-     *
-     * With every effect neutral the two orders measure identically (82.6 dB SNR either way), so
-     * this is inaudible to anyone who leaves the effects off.
      */
     const gainNode = context.createGain();
     const effectChain = createAudioEffectChain({
@@ -96,14 +86,49 @@ export const buildPlaybackGraph = ({
     fadeNode.connect(analyser);
     analyser.connect(context.destination);
 
-    // Once per audio context. Printed rather than assumed because the ORDER is the fix: if this
-    // ever reads "volume" before "effects" again, the vinyl noise has stopped answering the
-    // volume control and the bit crush has gone back to tracking it.
+    let dspBypassed = false;
+    const setDspBypass = (nextBypassed: boolean) => {
+        if (dspBypassed === nextBypassed) return;
+        dspBypassed = nextBypassed;
+        const eqHead = equalizerNodesRef.current[0];
+        const eqTail = equalizerNodesRef.current[equalizerNodesRef.current.length - 1];
+        if (dspBypassed) {
+            if (eqHead) {
+                try { mixNode.disconnect(eqHead); } catch { /* ignore */ }
+            }
+            if (eqTail) {
+                try { eqTail.disconnect(equalizerOutput); } catch { /* ignore */ }
+            }
+            effectChain.setBypassed(true);
+            mixNode.connect(gainNode);
+        } else {
+            try { mixNode.disconnect(gainNode); } catch { /* ignore */ }
+            if (eqHead) {
+                mixNode.connect(eqHead);
+            }
+            if (eqTail) {
+                eqTail.connect(equalizerOutput);
+            }
+            effectChain.setBypassed(false);
+        }
+    };
+
+    if (bypassDsp) {
+        setDspBypass(true);
+    }
+
     console.log(
         '[AudioContext] graph: decks -> mix -> equaliser -> effects -> volume -> fade -> analyser -> out'
-        + ` (equaliser ${settings.enabled ? 'on' : 'flat'},`
+        + ` (equaliser ${settings.enabled ? 'on' : 'flat'}, dspBypass ${dspBypassed ? 'on' : 'off'},`
         + ` noise ${settings.effects.noise}, crush ${settings.effects.crush}, punch ${settings.effects.punch})`,
     );
 
-    return { gainNode, fadeNode, effectChain, decksConnected };
+    return {
+        gainNode,
+        fadeNode,
+        effectChain,
+        decksConnected,
+        setDspBypass,
+        isDspBypassed: () => dspBypassed,
+    };
 };

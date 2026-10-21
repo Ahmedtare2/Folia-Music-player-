@@ -1330,6 +1330,8 @@ export default function App() {
         syncOutputGain,
         getTargetPlaybackVolume,
         getCoverUrl,
+        automixEnabled: automixEnabled && !isNowPlayingStageActive,
+        stemSeparationEnabled: automixEnabled && transitionMode === 'automix' && transitionPerformance && canUseTransitionPerformance(),
     });
 
     const handleTranscodeFallback = useTranscodeFallback({

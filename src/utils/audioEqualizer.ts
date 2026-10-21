@@ -1,6 +1,7 @@
 import {
     areAudioEffectsEqual,
     createNeutralAudioEffects,
+    isNeutralAudioEffects,
     normalizeAudioEffects,
     type AudioEffectSettings,
 } from './audioEffects';
@@ -18,6 +19,15 @@ export type AudioEqualizerSettings = {
     effects: AudioEffectSettings;
     customSlots: AudioEqualizerCustomSlot[];
 };
+
+export interface WebAudioDspBypassOptions {
+    equalizerSettings?: (Partial<Pick<AudioEqualizerSettings, 'enabled' | 'gains' | 'effects'>> & {
+        chorusEnabled?: boolean;
+    }) | null;
+    chorusEnabled?: boolean;
+    automixEnabled?: boolean;
+    stemSeparationEnabled?: boolean;
+}
 
 // src/utils/audioEqualizer.ts
 // Defines the persisted ten-band equalizer model shared by UI and Web Audio runtime.
@@ -93,6 +103,40 @@ export const isAudioEqualizerFlat = (settings: Pick<AudioEqualizerSettings, 'gai
     && settings.gains.every(gain => Math.abs(gain) < 1e-4)
     && areAudioEffectsEqual(settings.effects, createNeutralAudioEffects())
 );
+
+/**
+ * Returns true if the 10-band EQ or any post-EQ audio effect (Chorus/Wow/Stereo Width/Reverb/Drive/Crush/Noise)
+ * is actively enabled and non-neutral.
+ */
+export const hasActiveAudioEqualizerOrEffects = (
+    settings?: (Partial<Pick<AudioEqualizerSettings, 'enabled' | 'gains' | 'effects'>> & {
+        chorusEnabled?: boolean;
+    }) | null,
+): boolean => {
+    if (!settings) return false;
+    if (settings.chorusEnabled === true) return true;
+    if (!settings.enabled) return false;
+    const hasNonZeroGain = Array.isArray(settings.gains)
+        && settings.gains.some(gain => Math.abs(Number(gain) || 0) >= 1e-4);
+    const normalizedEffects = normalizeAudioEffects(settings.effects);
+    const hasActiveEffect = !isNeutralAudioEffects(normalizedEffects);
+    // Keep EQ graph active whenever user explicitly turns `enabled: true`, even if currently on flat preset,
+    // so live slider drags immediately audition without re-wiring.
+    return Boolean(settings.enabled || hasNonZeroGain || hasActiveEffect);
+};
+
+/**
+ * Determines whether the WebAudio AudioContext DSP graph (10-band BiquadFilter EQ, Chorus/Wow/Reverb/WaveShaper
+ * effect chain, Automix crossfade decks, and Stem Separation) should be bypassed so the Android hardware
+ * audio decoder handles playback directly with minimal CPU usage.
+ */
+export const shouldBypassWebAudioDspGraph = (options: WebAudioDspBypassOptions = {}): boolean => {
+    const eqOrEffectsActive = hasActiveAudioEqualizerOrEffects(options.equalizerSettings);
+    const chorusActive = Boolean(options.chorusEnabled || options.equalizerSettings?.chorusEnabled);
+    const automixActive = Boolean(options.automixEnabled);
+    const stemSeparationActive = Boolean(options.stemSeparationEnabled);
+    return !eqOrEffectsActive && !chorusActive && !automixActive && !stemSeparationActive;
+};
 
 export const resetAudioEqualizerToFlat = (current: AudioEqualizerSettings): AudioEqualizerSettings => {
     const flatGains = [...AUDIO_SOUND_PRESETS.flat.gains];

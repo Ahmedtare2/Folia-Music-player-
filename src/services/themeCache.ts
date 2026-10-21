@@ -4,6 +4,8 @@ import { createSongSyncFingerprintCandidates } from './sync/syncFingerprint';
 import { readThemeSyncRegistry, registerThemeSyncRecordForSongIfMissing } from './sync/themeSyncRegistry';
 import { sanitizeDualTheme, sanitizeTheme, FALLBACK_AI_DUAL_THEME } from './themeSanitizer';
 import { getPlaybackSongKey } from '../utils/appPlaybackGuards';
+import { readAndroidDiskCacheJson } from './android/foliaAndroidBridge';
+import { readCachedCoverPalette } from './persistentDiskCacheService';
 
 export type ThemeCacheSongKey = string | number;
 
@@ -16,6 +18,20 @@ export async function getCachedThemeState(songKey: ThemeCacheSongKey): Promise<C
     const dualTheme = await getFromCache<DualTheme>(`dual_theme_${songKey}`);
     if (dualTheme) {
         return { kind: 'dual', theme: sanitizeDualTheme(dualTheme) };
+    }
+
+    const diskDualJson = await readAndroidDiskCacheJson('palettes', `dual_theme_${songKey}`);
+    if (diskDualJson) {
+        try {
+            const parsed = JSON.parse(diskDualJson) as DualTheme;
+            if (parsed && typeof parsed === 'object' && parsed.light && parsed.dark) {
+                const sanitized = sanitizeDualTheme(parsed);
+                void saveToCache(`dual_theme_${songKey}`, sanitized);
+                return { kind: 'dual', theme: sanitized };
+            }
+        } catch {
+            // Fall through on malformed JSON.
+        }
     }
 
     const legacyTheme = await getFromCache<Theme>(`theme_${songKey}`);
@@ -60,6 +76,15 @@ export async function getCachedThemeStateForSong(song: SongResult | null): Promi
         await saveToCache(`theme_${sourceAwareSongKey}`, legacyThemeState.theme);
     }
     if (legacyThemeState.kind !== 'none') return legacyThemeState;
+
+    const coverKey = (song as { localCoverAssetId?: string }).localCoverAssetId || song.coverUrl;
+    if (coverKey) {
+        const cachedCoverPalette = await readCachedCoverPalette(coverKey);
+        if (cachedCoverPalette?.dualTheme) {
+            const sanitized = sanitizeDualTheme(cachedCoverPalette.dualTheme);
+            return { kind: 'dual', theme: sanitized };
+        }
+    }
 
     return { kind: 'none' };
 }
