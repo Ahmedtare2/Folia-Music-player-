@@ -2,7 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import type { MotionValue } from 'framer-motion';
 import * as twgl from 'twgl.js';
 import { Theme } from '../../../../types';
-import { AMBIENT_BACKGROUND_DPR_SCALE, AMBIENT_BACKGROUND_MAX_DIMENSION_PX } from '../../../../utils/mobileVisualizerBudget';
+import { AMBIENT_BACKGROUND_DPR_SCALE, AMBIENT_BACKGROUND_MAX_DIMENSION_PX, isMobileGpuConstrained } from '../../../../utils/mobileVisualizerBudget';
 import { isAppForegroundVisible, subscribeAppForegroundVisibility } from '../../../../utils/visualizerVisibilityGate';
 import { parseColorChannels } from '../../colorMix';
 import { useBlendedColors } from '../useBlendedColors';
@@ -159,6 +159,10 @@ const SoraBackground: React.FC<SoraBackgroundProps> = ({ theme, isDaylight, paus
     const bufferInfo = twgl.createBufferInfoFromArrays(gl, arrays);
 
     let lastTimestamp: number | null = null;
+    // The particle field sits behind the lyrics and is soft, so phones draw it at 30 fps; its motion is
+    // driven by elapsed time, so it moves at the same speed.
+    const minFrameIntervalMs = isMobileGpuConstrained() ? 1000 / 30 - 2 : 0;
+    let lastDrawAt: number | null = null;
 
     // While paused, render only when inputs or dimensions change.
     const invalidate = () => {
@@ -172,8 +176,14 @@ const SoraBackground: React.FC<SoraBackgroundProps> = ({ theme, isDaylight, paus
       animationRef.current = null;
       if (!isAppForegroundVisible()) {
         lastTimestamp = null;
+        lastDrawAt = null;
         return;
       }
+      if (minFrameIntervalMs > 0 && !pausedRef.current && lastDrawAt !== null && now - lastDrawAt < minFrameIntervalMs) {
+        invalidate();
+        return;
+      }
+      lastDrawAt = now;
       if (!pausedRef.current && lastTimestamp !== null) {
         const delta = (now - lastTimestamp) / 1000;
         timeRef.current += delta;
