@@ -1553,17 +1553,17 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                 onPointerDown={(e) => {
                                     isScrubbingRef.current = true;
                                     try {
-                                        e.currentTarget.setPointerCapture?.(e.pointerId);
+                                        e?.currentTarget?.setPointerCapture?.(e.pointerId);
                                     } catch {
                                         // Ignore in synthetic test events
                                     }
-                                    if (typeof e.clientX === 'number') {
+                                    if (typeof e?.clientX === 'number') {
                                         const val = resolveSeekValueFromEvent(e.currentTarget, e.clientX);
                                         updateScrubberDOM(val, true);
                                     }
                                 }}
                                 onPointerMove={(e) => {
-                                    if (!isScrubbingRef.current || typeof e.clientX !== 'number') return;
+                                    if (!isScrubbingRef.current || typeof e?.clientX !== 'number') return;
                                     const val = resolveSeekValueFromEvent(e.currentTarget, e.clientX);
                                     updateScrubberDOM(val, true);
                                     const indices = Array.from(computeActiveLyricLineIndices(lyricLines, currentLineIndex, val)).sort((a, b) => a - b);
@@ -1572,17 +1572,17 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                 }}
                                 onTouchStart={(e) => {
                                     isScrubbingRef.current = true;
-                                    const touchX = e.touches?.[0]?.clientX;
+                                    const touchX = e?.touches?.[0]?.clientX;
                                     if (typeof touchX === 'number') {
-                                        const val = resolveSeekValueFromEvent(e.currentTarget, touchX);
+                                        const val = resolveSeekValueFromEvent(e?.currentTarget, touchX);
                                         updateScrubberDOM(val, true);
                                     }
                                 }}
                                 onTouchMove={(e) => {
                                     if (!isScrubbingRef.current) return;
-                                    const touchX = e.touches?.[0]?.clientX;
+                                    const touchX = e?.touches?.[0]?.clientX;
                                     if (typeof touchX === 'number') {
-                                        const val = resolveSeekValueFromEvent(e.currentTarget, touchX);
+                                        const val = resolveSeekValueFromEvent(e?.currentTarget, touchX);
                                         updateScrubberDOM(val, true);
                                         const indices = Array.from(computeActiveLyricLineIndices(lyricLines, currentLineIndex, val)).sort((a, b) => a - b);
                                         const key = indices.join(',');
@@ -1590,21 +1590,21 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                     }
                                 }}
                                 onInput={(e) => {
-                                    const val = Number(e.currentTarget.value);
+                                    const val = Number(e?.currentTarget?.value);
                                     updateScrubberDOM(val, true);
                                     const indices = Array.from(computeActiveLyricLineIndices(lyricLines, currentLineIndex, val)).sort((a, b) => a - b);
                                     const key = indices.join(',');
                                     setActiveLineSetKey(prev => (prev === key ? prev : key));
                                 }}
                                 onPointerUp={(e) => {
-                                    const val = resolveSeekValueFromEvent(e.currentTarget, e.clientX);
+                                    const val = resolveSeekValueFromEvent(e?.currentTarget, e?.clientX);
                                     isScrubbingRef.current = false;
                                     commitSeekOnce(val);
                                 }}
                                 onTouchEnd={(e) => {
                                     if (!isScrubbingRef.current) return;
-                                    const touchX = e.changedTouches?.[0]?.clientX;
-                                    const val = resolveSeekValueFromEvent(e.currentTarget, touchX);
+                                    const touchX = e?.changedTouches?.[0]?.clientX;
+                                    const val = resolveSeekValueFromEvent(e?.currentTarget, touchX);
                                     isScrubbingRef.current = false;
                                     commitSeekOnce(val);
                                 }}
