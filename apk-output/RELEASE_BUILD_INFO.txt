@@ -3,7 +3,7 @@ Folia Android Signed Release APK Build Summary
 Version: 0.7.21
 Build Variant: release (R8 minified, shrinkResources enabled, signed)
 Branch: main
-Commit: e31dad974f6aa56d4bca0cefaf69f462569620bc
+Commit: b2d8138627250dceae7aa6e12669a268c143e569
 APK File: Folia-0.7.21-android-release.apk
-Size: 12M (12166612 bytes)
-SHA-256: 31c4fe904973b0a1b67f9217d7d86d8af43c56807737104262ed9b8b33848237
+Size: 12M (12181659 bytes)
+SHA-256: 533bd2fc2a3849977fe3031b6d1f2d6d18545c8b010d8d3489f3081e378d30fe
