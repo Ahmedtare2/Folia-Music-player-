@@ -56,6 +56,9 @@ export interface FoliaAndroidExtractedMetadata {
     cover?: Blob;
     coverAssetId?: string;
     hasEmbeddedCover?: boolean;
+    hasEmbeddedLyrics?: boolean;
+    lyrics?: string;
+    translationLyrics?: string;
 }
 
 export type FoliaAndroidMediaActionType =
@@ -131,6 +134,9 @@ export interface FoliaNativeBridgePluginContract {
         coverMimeType?: string;
         coverAssetId?: string;
         hasEmbeddedCover?: boolean;
+        hasEmbeddedLyrics?: boolean;
+        lyrics?: string;
+        translationLyrics?: string;
     }>;
     syncPlaybackState?: (payload: FoliaAndroidPlaybackMetadataPayload) => Promise<void>;
     stopPlaybackService?: () => Promise<void>;
@@ -489,6 +495,9 @@ export const extractAndroidAudioMetadata = async (
             cover,
             coverAssetId: res.coverAssetId,
             hasEmbeddedCover,
+            hasEmbeddedLyrics: typeof res.hasEmbeddedLyrics === "boolean" ? res.hasEmbeddedLyrics : Boolean(res.lyrics),
+            lyrics: typeof res.lyrics === "string" && res.lyrics.trim() ? res.lyrics : undefined,
+            translationLyrics: typeof res.translationLyrics === "string" && res.translationLyrics.trim() ? res.translationLyrics : undefined,
         };
     } catch {
         return null;

@@ -801,6 +801,22 @@ public class FoliaNativeBridgePlugin extends Plugin {
                     }
                 }
 
+                try {
+                    FoliaEmbeddedLyricsExtractor.ExtractedLyrics extractedLyrics =
+                        FoliaEmbeddedLyricsExtractor.extract(context.getContentResolver(), uri);
+                    if (extractedLyrics != null && extractedLyrics.lyrics != null && !extractedLyrics.lyrics.isEmpty()) {
+                        res.put("hasEmbeddedLyrics", true);
+                        res.put("lyrics", extractedLyrics.lyrics);
+                        if (extractedLyrics.translationLyrics != null && !extractedLyrics.translationLyrics.isEmpty()) {
+                            res.put("translationLyrics", extractedLyrics.translationLyrics);
+                        }
+                    } else {
+                        res.put("hasEmbeddedLyrics", false);
+                    }
+                } catch (Exception ignored) {
+                    // Ignore lyric extraction error and resolve basic metadata.
+                }
+
                 call.resolve(res);
             } catch (Exception e) {
                 call.resolve(res);

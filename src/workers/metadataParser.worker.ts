@@ -75,19 +75,29 @@ function syncTextToLrc(syncText: ParsedLyricLine[] | undefined, timeStampFormat?
     return lines.length > 0 ? `${lines.join('\n')}\n` : undefined;
 }
 
+function isTtmlLyricText(text: string): boolean {
+    return /<tt(?:\s|>)/i.test(text) && (/<(?:p|body|div|span)(?:\s|>)/i.test(text) || /\bbegin\s*=/i.test(text));
+}
+
 function hasTimelineMarkers(text: string): boolean {
-    return /\[\d{1,2}:\d{2}(?:\.\d{1,3})?\]/.test(text);
+    return isTtmlLyricText(text)
+        || /\[\d{1,2}:\d{2}(?:[.:]\d{1,3})?\]/.test(text)
+        || /<\d{1,2}:\d{2}[.:]\d{2,3}>/.test(text)
+        || /(?:^|\n)\s*(?:\d{2}:)?\d{2}:\d{2}\.\d{3}\s*-->/m.test(text);
 }
 
 function normalizeLyricCandidateText(text: string): string {
     return text
+        .replace(/^\uFEFF/, '')
+        .replace(/\u0000/g, '')
         .replace(/\r\n/g, '\n')
         .replace(/\r/g, '\n')
         .trim();
 }
 
 function hasEnhancedWordTimeline(text: string): boolean {
-    return /<\d{2}:\d{2}[.:]\d{2,3}>/.test(text)
+    return isTtmlLyricText(text)
+        || /<\d{2}:\d{2}[.:]\d{2,3}>/.test(text)
         || /(?:^|\n)\s*\[\d{2}:\d{2}[.:]\d{2,3}\][^\[\]\n]+(?:\[\d{2}:\d{2}[.:]\d{2,3}\][^\[\]\n]*)+/m.test(text);
 }
 
@@ -113,7 +123,11 @@ function isTranslationLyricTag(tag: ParsedLyricTag): boolean {
         id.includes('trans');
 }
 
-function extractLyricText(tag: ParsedLyricTag): { text?: string; hasTimeline: boolean } {
+function extractLyricText(tag: ParsedLyricTag | string): { text?: string; hasTimeline: boolean } {
+    if (typeof tag === 'string') {
+        const trimmed = tag.trim();
+        return trimmed ? { text: trimmed, hasTimeline: hasTimelineMarkers(trimmed) } : { text: undefined, hasTimeline: false };
+    }
     const directSyncText = syncTextToLrc(tag.syncText, tag.timeStampFormat);
     if (directSyncText) {
         return { text: directSyncText, hasTimeline: true };
@@ -185,7 +199,7 @@ async function extractEmbeddedMetadata(file: File, includeCover = false): Promis
         for (const tags of Object.values(parsed.native || {})) {
             (tags as ParsedLyricTag[]).forEach(tag => {
                 const id = tag.id?.toLowerCase() || '';
-                if (id.includes('lyric') || id.includes('uslt') || id.includes('sylt')) {
+                if (id.includes('lyric') || id.includes('lyr') || id.includes('uslt') || id.includes('sylt') || id.includes('ttml')) {
                     nativeLyricTags.push(tag);
                 }
             });

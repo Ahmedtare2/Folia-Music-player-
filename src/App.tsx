@@ -2048,7 +2048,10 @@ export default function App() {
                 recoveredOnce: false,
             };
             element.currentTime = targetTime;
-            if (element.paused || wasPlaying) {
+            if (wasPlaying) {
+                setPlayerState(PlayerState.PLAYING);
+            }
+            if (element.paused && (wasPlaying || shouldAutoPlay.current)) {
                 setPlayerState(PlayerState.PLAYING);
                 const playPromise = element.play();
                 if (playPromise !== undefined) {

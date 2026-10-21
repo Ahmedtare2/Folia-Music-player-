@@ -12,7 +12,7 @@ import android.system.OsConstants;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import java.io.FileDescriptor;
-import java.io.FilterInputStream;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.channels.FileChannel;
@@ -23,8 +23,8 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Serves Storage Access Framework (SAF) content:// URIs over same-origin https://localhost/__folia_saf/stream
  * with full HTTP 206 Partial Content byte-range support and O(1) kernel descriptor seeking so large
- * lossless audio files (FLAC/WAV/MP3/M4A/OGG/OPUS) stream and seek instantaneously without blocking
- * the WebView network thread or loading entire files into the JavaScript heap.
+ * audio and album video files stream and seek instantaneously without double-seeking or failing
+ * Chromium's InputStreamReader::VerifyRequestedRange / SkipToRequestedRange checks.
  */
 public final class FoliaSafStreamHandler {
     public static final String STREAM_PATH = "/__folia_saf/stream";
@@ -72,15 +72,15 @@ public final class FoliaSafStreamHandler {
         }
 
         AssetFileDescriptor afd = null;
-        FileInputStreamWithAfd baseStream = null;
+        SafSeekableInputStream seekableStream = null;
         try {
             afd = resolver.openAssetFileDescriptor(contentUri, "r");
             if (afd == null) {
                 return new WebResourceResponse("text/plain", "UTF-8", 404, "Not Found", headers, null);
             }
 
-            baseStream = new FileInputStreamWithAfd(afd);
-            long totalLength = resolveTotalLength(resolver, contentUri, rawUri, afd, baseStream, sizeParam);
+            FileInputStream rawFis = new FileInputStream(afd.getFileDescriptor());
+            long totalLength = resolveTotalLength(resolver, contentUri, rawUri, afd, rawFis, sizeParam);
 
             String rangeHeader = null;
             if (request.getRequestHeaders() != null) {
@@ -123,7 +123,8 @@ public final class FoliaSafStreamHandler {
                     }
 
                     if (start < 0L || start >= totalLength || start > end) {
-                        closeQuietly(baseStream);
+                        closeQuietly(rawFis);
+                        closeAfdQuietly(afd);
                         headers.put("Content-Range", "bytes */" + totalLength);
                         return new WebResourceResponse("text/plain", "UTF-8", 416, "Range Not Satisfiable", headers, null);
                     }
@@ -133,21 +134,26 @@ public final class FoliaSafStreamHandler {
                     headers.put("Content-Length", String.valueOf(contentLength));
 
                     if ("HEAD".equals(method)) {
-                        closeQuietly(baseStream);
+                        closeQuietly(rawFis);
+                        closeAfdQuietly(afd);
                         return new WebResourceResponse(mimeType, null, 206, "Partial Content", headers, null);
                     }
 
-                    if (start > 0L) {
-                        baseStream.seekTo(start);
-                    }
-                    InputStream boundedStream = new BoundedInputStream(baseStream, contentLength);
+                    // IMPORTANT: Do NOT pre-seek before returning WebResourceResponse!
+                    // Chromium's AndroidStreamReaderURLLoader / InputStreamReader::Seek calls:
+                    //   1) stream.available() to verify range bounds against total file size
+                    //   2) stream.skip(start) to seek to the requested byte offset.
+                    // SafSeekableInputStream starts at logical offset 0, reports totalLength in available(),
+                    // and executes skip(start) in O(1) via Os.lseek. If a non-WebView caller calls read()
+                    // directly without calling skip(start) first, SafSeekableInputStream seeks to start on first read.
+                    seekableStream = new SafSeekableInputStream(afd, rawFis, totalLength, start, end);
                     return new WebResourceResponse(
                         mimeType,
                         null,
                         206,
                         "Partial Content",
                         headers,
-                        boundedStream
+                        seekableStream
                     );
                 }
             }
@@ -156,15 +162,21 @@ public final class FoliaSafStreamHandler {
                 headers.put("Content-Length", String.valueOf(totalLength));
             }
             if ("HEAD".equals(method)) {
-                closeQuietly(baseStream);
+                closeQuietly(rawFis);
+                closeAfdQuietly(afd);
                 return new WebResourceResponse(mimeType, null, 200, "OK", headers, null);
             }
-            InputStream responseStream = totalLength > 0L
-                ? new BoundedInputStream(baseStream, totalLength)
-                : baseStream;
-            return new WebResourceResponse(mimeType, null, 200, "OK", headers, responseStream);
+            seekableStream = new SafSeekableInputStream(
+                afd,
+                rawFis,
+                totalLength,
+                0L,
+                totalLength > 0L ? (totalLength - 1L) : Long.MAX_VALUE - 1L
+            );
+            return new WebResourceResponse(mimeType, null, 200, "OK", headers, seekableStream);
         } catch (Exception e) {
-            closeQuietly(baseStream);
+            closeQuietly(seekableStream);
+            closeAfdQuietly(afd);
             return new WebResourceResponse("text/plain", "UTF-8", 404, "Not Found", headers, null);
         }
     }
@@ -182,7 +194,7 @@ public final class FoliaSafStreamHandler {
         Uri contentUri,
         String rawUri,
         AssetFileDescriptor afd,
-        FileInputStreamWithAfd baseStream,
+        FileInputStream rawFis,
         String sizeParam
     ) {
         long declared = afd.getLength();
@@ -205,7 +217,7 @@ public final class FoliaSafStreamHandler {
         }
 
         try {
-            FileChannel channel = baseStream.getChannel();
+            FileChannel channel = rawFis.getChannel();
             if (channel != null) {
                 long channelSize = channel.size();
                 long startOffset = Math.max(0L, afd.getStartOffset());
@@ -260,30 +272,68 @@ public final class FoliaSafStreamHandler {
         }
     }
 
-    private static final class FileInputStreamWithAfd extends java.io.FileInputStream {
+    private static void closeAfdQuietly(AssetFileDescriptor afd) {
+        if (afd == null) return;
+        try {
+            afd.close();
+        } catch (IOException ignored) {
+            // Ignore close error.
+        }
+    }
+
+    /**
+     * InputStream tailored to Chromium's AndroidStreamReaderURLLoader + InputStreamReader contract:
+     * - Starts at logical offset 0 so InputStreamReader::VerifyRequestedRange sees the full file length
+     *   in available() and InputStreamReader::SkipToRequestedRange can call skip(rangeStart).
+     * - Executes skip(n) in O(1) via Os.lseek(SEEK_SET) on the underlying kernel file descriptor.
+     * - If read() is invoked directly without a prior skip(rangeStart), automatically seeks to rangeStart
+     *   before reading the first byte.
+     */
+    private static final class SafSeekableInputStream extends InputStream {
         private final AssetFileDescriptor afd;
+        private final FileInputStream fis;
+        private final long baseOffset;
+        private final long totalLength;
+        private final long rangeStart;
+        private final long rangeEndInclusive;
+        private long currentOffset = 0L;
+        private boolean hasSkippedOrRead = false;
         private boolean closed = false;
 
-        FileInputStreamWithAfd(AssetFileDescriptor afd) throws IOException {
-            super(afd.getFileDescriptor());
+        SafSeekableInputStream(
+            AssetFileDescriptor afd,
+            FileInputStream fis,
+            long totalLength,
+            long rangeStart,
+            long rangeEndInclusive
+        ) throws IOException {
             this.afd = afd;
-            long startOffset = afd.getStartOffset();
-            if (startOffset > 0L) {
-                seekInternal(startOffset);
+            this.fis = fis;
+            this.baseOffset = Math.max(0L, afd.getStartOffset());
+            this.totalLength = totalLength;
+            this.rangeStart = Math.max(0L, rangeStart);
+            this.rangeEndInclusive = rangeEndInclusive;
+            if (this.baseOffset > 0L) {
+                seekKernelDescriptor(this.baseOffset);
             }
         }
 
-        void seekTo(long offset) throws IOException {
-            long baseOffset = Math.max(0L, afd.getStartOffset());
-            seekInternal(baseOffset + offset);
+        private void ensurePositionedForRead() throws IOException {
+            if (!hasSkippedOrRead) {
+                hasSkippedOrRead = true;
+                if (currentOffset < rangeStart) {
+                    seekKernelDescriptor(baseOffset + rangeStart);
+                    currentOffset = rangeStart;
+                }
+            }
         }
 
-        private void seekInternal(long targetPosition) throws IOException {
+        private void seekKernelDescriptor(long targetPhysicalPosition) throws IOException {
             try {
                 FileDescriptor fd = afd.getFileDescriptor();
                 if (fd != null && fd.valid()) {
-                    long positioned = Os.lseek(fd, targetPosition, OsConstants.SEEK_SET);
-                    if (positioned == targetPosition) {
+                    long positioned = Os.lseek(fd, targetPhysicalPosition, OsConstants.SEEK_SET);
+                    if (positioned == targetPhysicalPosition) {
                         return;
                     }
                 }
@@ -291,29 +341,69 @@ public final class FoliaSafStreamHandler {
                 // Fall back to FileChannel.position().
             }
             try {
-                FileChannel channel = getChannel();
+                FileChannel channel = fis.getChannel();
                 if (channel != null) {
-                    channel.position(targetPosition);
+                    channel.position(targetPhysicalPosition);
                     return;
                 }
             } catch (IOException ignored) {
                 // Pipe-backed descriptor: fall back to stream skip.
             }
-            long remainingToSkip = targetPosition;
-            byte[] skipBuffer = new byte[16384];
-            while (remainingToSkip > 0L) {
-                long skipped = super.skip(remainingToSkip);
-                if (skipped > 0L) {
-                    remainingToSkip -= skipped;
-                    continue;
-                }
-                int toRead = (int) Math.min((long) skipBuffer.length, remainingToSkip);
-                int read = super.read(skipBuffer, 0, toRead);
-                if (read < 0) {
-                    break;
-                }
-                remainingToSkip -= read;
+        }
+
+        @Override
+        public long skip(long n) throws IOException {
+            if (closed || n <= 0L) return 0L;
+            hasSkippedOrRead = true;
+            long maxOffsetExclusive = totalLength > 0L
+                ? Math.min(totalLength, rangeEndInclusive + 1L)
+                : Long.MAX_VALUE;
+            long maxSkip = Math.max(0L, maxOffsetExclusive - currentOffset);
+            long toSkip = Math.min(n, maxSkip);
+            if (toSkip <= 0L) return 0L;
+
+            long targetOffset = currentOffset + toSkip;
+            seekKernelDescriptor(baseOffset + targetOffset);
+            currentOffset = targetOffset;
+            return toSkip;
+        }
+
+        @Override
+        public int read() throws IOException {
+            if (closed) return -1;
+            ensurePositionedForRead();
+            if (currentOffset > rangeEndInclusive) return -1;
+            int b = fis.read();
+            if (b != -1) {
+                currentOffset += 1L;
             }
+            return b;
+        }
+
+        @Override
+        public int read(byte[] b, int off, int len) throws IOException {
+            if (closed) return -1;
+            if (len == 0) return 0;
+            ensurePositionedForRead();
+            long remainingInRange = (rangeEndInclusive - currentOffset) + 1L;
+            if (remainingInRange <= 0L) return -1;
+
+            int toRead = (int) Math.min((long) len, remainingInRange);
+            int count = fis.read(b, off, toRead);
+            if (count > 0) {
+                currentOffset += count;
+            }
+            return count;
+        }
+
+        @Override
+        public int available() throws IOException {
+            if (closed) return 0;
+            if (totalLength > 0L) {
+                long remaining = Math.max(0L, (rangeEndInclusive + 1L) - currentOffset);
+                return (int) Math.min(remaining, (long) Integer.MAX_VALUE);
+            }
+            return fis.available();
         }
 
         @Override
@@ -321,68 +411,10 @@ public final class FoliaSafStreamHandler {
             if (closed) return;
             closed = true;
             try {
-                super.close();
+                fis.close();
             } finally {
-                try {
-                    afd.close();
-                } catch (IOException ignored) {
-                    // Ignore duplicate AFD close.
-                }
+                closeAfdQuietly(afd);
             }
-        }
-    }
-
-    private static final class BoundedInputStream extends FilterInputStream {
-        private long remaining;
-
-        BoundedInputStream(InputStream in, long maxBytes) {
-            super(in);
-            this.remaining = Math.max(0L, maxBytes);
-        }
-
-        @Override
-        public int read() throws IOException {
-            if (remaining <= 0L) return -1;
-            int result = super.read();
-            if (result != -1) {
-                remaining -= 1L;
-            }
-            return result;
-        }
-
-        @Override
-        public int read(byte[] b, int off, int len) throws IOException {
-            if (remaining <= 0L) return -1;
-            int toRead = (int) Math.min((long) len, remaining);
-            int count = super.read(b, off, toRead);
-            if (count > 0) {
-                remaining -= count;
-            }
-            return count;
-        }
-
-        @Override
-        public long skip(long n) throws IOException {
-            if (remaining <= 0L || n <= 0L) return 0L;
-            long toSkip = Math.min(n, remaining);
-            long skipped = super.skip(toSkip);
-            if (skipped > 0L) {
-                remaining -= skipped;
-            }
-            return skipped;
-        }
-
-        @Override
-        public int available() throws IOException {
-            if (remaining <= 0L) return 0;
-            int underlying = super.available();
-            return (int) Math.min((long) underlying, Math.min(remaining, (long) Integer.MAX_VALUE));
-        }
-
-        @Override
-        public void close() throws IOException {
-            remaining = 0L;
-            super.close();
         }
     }
 }

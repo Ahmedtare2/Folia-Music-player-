@@ -36,6 +36,14 @@ export function normalizeEmbeddedLrcText(
         return { mainText: '', translationText: '' };
     }
 
+    // Preserve embedded TTML XML documents verbatim without running LRC line splitting on them.
+    if (/<tt(?:\s|>)/i.test(textContent)) {
+        return {
+            mainText: textContent.replace(/^\uFEFF/, '').trim(),
+            translationText: translationContent?.trim() || '',
+        };
+    }
+
     // 正文自己就可能是「原文/译文共用同一时间戳」的合并时间轴，这和标签里另有没有翻译无关。
     // 先无条件拆正文，再决定副轨用谁；否则译文行会留在主轨里，被当成一行行独立歌词渲染。
     // 保留独立定时译文的优先级，避免正文中不完整的译文覆盖整轨；仅纯文本标签使用拆轨结果兜底。

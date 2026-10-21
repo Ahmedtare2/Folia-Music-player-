@@ -1,5 +1,6 @@
 import type { ActiveLocalLyricsSource, LocalLyricsPriority, LocalSong, LyricData } from '../../types';
 import { LyricParserFactory } from './LyricParserFactory';
+import { hasKnownGoodWordByWordLocalLyric } from './lyricAutoMatchState';
 
 // src/utils/lyrics/localSongLyrics.ts
 // Resolves the lyric payload and its actual source from one local-song snapshot, caching parsed
@@ -63,9 +64,31 @@ export const selectLocalSongLyricsSource = (
 
     // 用户标记的纯音乐：没有显式选本地 / 内嵌时一律按纯音乐（空歌词），「不使用在线数据」等把来源清回自动也不例外。
     if (song.markedPureMusic) return 'online';
-    if (priority === 'online' && song.matchedLyrics) return 'online';
-    if (song.hasLocalLyrics && song.localLyricsContent) return 'local';
-    if (song.hasEmbeddedLyrics && song.embeddedLyricsContent) return 'embedded';
+
+    const hasLocal = Boolean(song.hasLocalLyrics && song.localLyricsContent);
+    const hasEmbedded = Boolean(song.hasEmbeddedLyrics && song.embeddedLyricsContent);
+    const hasWordByWordLocalOrEmbedded = hasKnownGoodWordByWordLocalLyric(song);
+
+    // 1. Always prefer local or embedded TTML / word-by-word lyrics first.
+    if (hasWordByWordLocalOrEmbedded) {
+        if (hasLocal) return 'local';
+        if (hasEmbedded) return 'embedded';
+    }
+
+    // 2. When the song has local or embedded LRC lyrics, show them first and only upgrade to
+    // online matchedLyrics if a better TTML / word-by-word lyric was matched (or priority === 'online').
+    if (hasLocal || hasEmbedded) {
+        const onlineIsBetterTtmlOrWord = Boolean(
+            song.matchedLyrics
+            && (song.matchedLyrics.isWordByWord || song.matchedLyrics.ttml)
+        );
+        if (onlineIsBetterTtmlOrWord || (priority === 'online' && song.matchedLyrics)) {
+            return 'online';
+        }
+        if (hasLocal) return 'local';
+        if (hasEmbedded) return 'embedded';
+    }
+
     if (song.matchedLyrics) return 'online';
     return null;
 };

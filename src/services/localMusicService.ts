@@ -54,7 +54,7 @@ import { isAlbumVideoFileName, reconcileVideosForRootFolder, type VideoSnapshotF
 
 type EmbeddedMetadata = EmbeddedMetadataResult;
 
-export const EMBEDDED_METADATA_VERSION = 7;
+export const EMBEDDED_METADATA_VERSION = 8;
 
 interface ImportPreparationMetrics {
     getFileMs: number;
@@ -585,6 +585,8 @@ async function extractSafHandleEmbeddedMetadata(
         bitrate: workerMeta.bitrate || nativeMeta?.bitrate,
         trackNumber: workerMeta.trackNumber ?? nativeMeta?.trackNumber,
         discNumber: workerMeta.discNumber ?? nativeMeta?.discNumber,
+        lyrics: workerMeta.lyrics || nativeMeta?.lyrics,
+        translationLyrics: workerMeta.translationLyrics || nativeMeta?.translationLyrics,
         cover: resolvedCover,
         coverAssetId: resolvedCoverAssetId,
         hasEmbeddedCover: includeCover ? Boolean(resolvedCover && resolvedCoverAssetId) : undefined,
@@ -1925,14 +1927,21 @@ export async function matchLyrics(
             (song.hasLocalLyrics && song.localLyricsContent)
             || (song.hasEmbeddedLyrics && song.embeddedLyricsContent)
         );
+        const hasWordByWordLocalOrEmbedded = hasKnownGoodWordByWordLocalLyric(song);
+        const hasLrcOnlyLocalOrEmbedded = hasLocalOrEmbeddedLyrics && !hasWordByWordLocalOrEmbedded;
         const settingsLyricSettings = useLyricSettingsStore.getState();
         const onlineFirst = settingsLyricSettings.localLyricsPriority === 'online';
 
+        // If the song already has embedded or local TTML / word-by-word lyrics and cover, skip online lookup completely unless forced.
+        if (hasWordByWordLocalOrEmbedded && !options.forceRefresh && hasLocalSongCover(song)) {
+            return null;
+        }
+
         console.log(`[LocalMusic] Searching lyrics for: "${searchQuery}"`);
 
-        // A selected GridView metadata identity is authoritative and must not be replaced by lyric fallback metadata.
-        if (!hasLocalOrEmbeddedLyrics || onlineFirst || options.forceRefresh) {
-            const shouldUseBestLyric = settingsLyricSettings.autoUseBestLyric || Boolean(options.forceRefresh);
+        // For songs with no lyrics, or songs with embedded/local LRC seeking a better TTML/word-by-word upgrade:
+        if (!hasWordByWordLocalOrEmbedded || onlineFirst || options.forceRefresh) {
+            const shouldUseBestLyric = settingsLyricSettings.autoUseBestLyric || hasLrcOnlyLocalOrEmbedded || Boolean(options.forceRefresh);
             if (shouldUseBestLyric || matchContext.metadataCandidate) {
                 const bestMatch = await autoMatchBestLyric(
                     matchContext.title,
@@ -1947,6 +1956,10 @@ export async function matchLyrics(
                 );
 
                 if (bestMatch && 'isPureMusic' in bestMatch) {
+                    if (hasLocalOrEmbeddedLyrics && !options.forceRefresh) {
+                        await recordAutomaticLyricMatchFailure(song);
+                        return null;
+                    }
                     song.matchedIsPureMusic = true;
                     song.matchedLyrics = undefined;
                     song.matchedLyricsSongId = bestMatch.id ?? matchContext.metadataCandidate?.songId;
@@ -1957,14 +1970,14 @@ export async function matchLyrics(
                 }
 
                 if (bestMatch && 'lyrics' in bestMatch) {
-                    // Never silently replace a known-good local word-by-word/TTML lyric with an inferior line-by-line online match.
+                    const isOnlineWordOrTtml = Boolean(bestMatch.lyrics.isWordByWord || bestMatch.lyrics.ttml);
+                    // When the song already has local/embedded lyrics (e.g. LRC), only accept a better TTML/word-by-word match!
                     if (
                         !options.forceRefresh
                         && hasLocalOrEmbeddedLyrics
-                        && hasKnownGoodWordByWordLocalLyric(song)
-                        && !bestMatch.lyrics.isWordByWord
+                        && !isOnlineWordOrTtml
                     ) {
-                        await recordAutomaticLyricMatchSuccess(song);
+                        await recordAutomaticLyricMatchFailure(song);
                         return null;
                     }
                     song.matchedLyricsSongId = bestMatch.id;
@@ -2009,6 +2022,12 @@ export async function matchLyrics(
                 }
             }
         } else if (matchContext.metadataCandidate) {
+            return null;
+        }
+
+        // If the song already has local/embedded lyrics (TTML or LRC) and already has a cover, do not fall back to plain-LRC NetEase search.
+        if (hasLocalOrEmbeddedLyrics && !options.forceRefresh && hasLocalSongCover(song)) {
+            await recordAutomaticLyricMatchFailure(song);
             return null;
         }
 
@@ -2322,28 +2341,46 @@ export async function getLocalSongArrayBuffer(song: LocalSong): Promise<ArrayBuf
     }
 }
 
-// Extracts and persists one song's embedded cover after an explicit playback-time request.
+// Extracts and persists one song's embedded cover (and any unhydrated embedded TTML/LRC lyrics) on playback.
 async function extractAndPersistSongCover(
     song: LocalSong,
     fileHandle: FileSystemFileHandle,
 ): Promise<LocalSong> {
     let metadata: EmbeddedMetadata;
     let fileRevision: string;
+    const needsEmbeddedLyrics = !song.hasLocalLyrics && !song.hasEmbeddedLyrics && song.embeddedMetadataVersion !== EMBEDDED_METADATA_VERSION;
     if (isAndroidSafFileHandle(fileHandle)) {
         const stat = fileHandle.getStatMetadata();
         fileRevision = `${stat.size}:${stat.lastModified}`;
-        if (songsWithoutEmbeddedCover.get(song.id) === fileRevision) return song;
+        if (!needsEmbeddedLyrics && songsWithoutEmbeddedCover.get(song.id) === fileRevision) return song;
         const extracted = await extractSafHandleEmbeddedMetadata(fileHandle, true);
         metadata = extracted.metadata;
     } else {
         const file = await fileHandle.getFile();
         fileRevision = `${file.size}:${file.lastModified}`;
-        if (songsWithoutEmbeddedCover.get(song.id) === fileRevision) return song;
+        if (!needsEmbeddedLyrics && songsWithoutEmbeddedCover.get(song.id) === fileRevision) return song;
         metadata = await extractEmbeddedMetadata(file, true);
     }
+    const foundLyrics = Boolean(metadata.lyrics && metadata.lyrics.trim());
+    const foundTranslationLyrics = Boolean(metadata.translationLyrics && metadata.translationLyrics.trim());
     if (!metadata.cover || !metadata.coverAssetId) {
         songsWithoutEmbeddedCover.set(song.id, fileRevision);
         song.hasNoEmbeddedCover = true;
+        if (foundLyrics || foundTranslationLyrics || needsEmbeddedLyrics) {
+            const updatedNoCoverSong: LocalSong = {
+                ...song,
+                hasNoEmbeddedCover: true,
+                hasEmbeddedLyrics: foundLyrics || Boolean(song.hasEmbeddedLyrics),
+                embeddedLyricsContent: foundLyrics ? metadata.lyrics : song.embeddedLyricsContent,
+                hasEmbeddedTranslationLyrics: foundTranslationLyrics || Boolean(song.hasEmbeddedTranslationLyrics),
+                embeddedTranslationLyricsContent: foundTranslationLyrics ? metadata.translationLyrics : song.embeddedTranslationLyricsContent,
+                embeddedMetadataVersion: EMBEDDED_METADATA_VERSION,
+                fileHandle,
+            };
+            Object.assign(song, updatedNoCoverSong);
+            await saveLocalSong(updatedNoCoverSong);
+            return updatedNoCoverSong;
+        }
         return song;
     }
     songsWithoutEmbeddedCover.delete(song.id);
@@ -2354,6 +2391,11 @@ async function extractAndPersistSongCover(
         localCoverAssetId: metadata.coverAssetId,
         localCoverSource: 'embedded',
         hasNoEmbeddedCover: false,
+        hasEmbeddedLyrics: foundLyrics || Boolean(song.hasEmbeddedLyrics),
+        embeddedLyricsContent: foundLyrics ? metadata.lyrics : song.embeddedLyricsContent,
+        hasEmbeddedTranslationLyrics: foundTranslationLyrics || Boolean(song.hasEmbeddedTranslationLyrics),
+        embeddedTranslationLyricsContent: foundTranslationLyrics ? metadata.translationLyrics : song.embeddedTranslationLyricsContent,
+        embeddedMetadataVersion: EMBEDDED_METADATA_VERSION,
         fileHandle,
     };
     Object.assign(song, updatedSong);
@@ -2362,9 +2404,17 @@ async function extractAndPersistSongCover(
 }
 
 export async function ensureLocalSongCoverAsset(song: LocalSong): Promise<LocalSong> {
-    if (song.localCoverAssetId && await hasLocalCoverBinary(song.localCoverAssetId)) return song;
-    if (song.localCoverSource === 'folder') return song;
-    if (song.hasNoEmbeddedCover && !song.localCoverNeedsAssetMigration) return song;
+    const needsEmbeddedLyricsHydration = Boolean(
+        !song.hasLocalLyrics
+        && !song.hasEmbeddedLyrics
+        && song.embeddedMetadataVersion !== EMBEDDED_METADATA_VERSION
+        && (song.fileHandle || song.safContentUri || fileHandleMap.has(song.id))
+    );
+    if (!needsEmbeddedLyricsHydration) {
+        if (song.localCoverAssetId && await hasLocalCoverBinary(song.localCoverAssetId)) return song;
+        if (song.localCoverSource === 'folder') return song;
+        if (song.hasNoEmbeddedCover && !song.localCoverNeedsAssetMigration) return song;
+    }
 
     if (!localCoverAssetRequestMap.has(song.id)) {
         localCoverAssetRequestMap.set(song.id, (async () => {

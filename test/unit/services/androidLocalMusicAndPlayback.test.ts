@@ -37,6 +37,7 @@ import {
     serializeDirHandlesForStorage,
 } from '@/services/android/androidSafDirectoryHandle';
 import { fetchThroughLyricRelay, requestLyricProxyOnDesktop } from '@/services/lyricProxy';
+import { selectLocalSongLyricsSource } from '@/utils/lyrics/localSongLyrics';
 import {
     getRegisteredAlbumVideos,
     resetLocalAlbumVideoCatalogForTests,
@@ -986,5 +987,53 @@ describe('Android SAF local music adapter & Media3 playback bridge', () => {
             'https://api.amll.dev/v1/lyrics/search?q=Habaytak',
         ]);
         expect(bridge.scanDirectoryTree).not.toHaveBeenCalled();
+
+        // 4. Verify album video is ONLY applied to songs with that exact album name ("Golden Classics"), never to another album
+        const differentAlbumVideo = await resolveAlbumVideoForTrack({
+            albumName: 'Tamally Maak',
+            artistName: 'Fairuz',
+            folderName: 'Music/Fairuz',
+        });
+        expect(differentAlbumVideo.video).toBeNull();
+        expect(differentAlbumVideo.streamUrl).toBeNull();
+
+        // 5. Verify embedded TTML takes priority immediately, while embedded LRC stays embedded unless upgraded to word-by-word/TTML
+        const songWithEmbeddedTtml: LocalSong = {
+            ...persistedSongsStore[0]!,
+            hasLocalLyrics: false,
+            localLyricsContent: undefined,
+            hasEmbeddedLyrics: true,
+            embeddedLyricsContent: TTML_SAMPLE,
+            matchedLyrics: {
+                lines: [{ startTime: 0, endTime: 5, fullText: 'Plain online line', words: [] }],
+                isWordByWord: false,
+            },
+        };
+        expect(selectLocalSongLyricsSource(songWithEmbeddedTtml, 'local')).toBe('embedded');
+
+        const songWithEmbeddedLrc: LocalSong = {
+            ...persistedSongsStore[0]!,
+            hasLocalLyrics: false,
+            localLyricsContent: undefined,
+            hasEmbeddedLyrics: true,
+            embeddedLyricsContent: '[00:01.00]قلبي اتمناه',
+            matchedLyrics: {
+                lines: [{ startTime: 0, endTime: 5, fullText: 'Plain online line', words: [] }],
+                isWordByWord: false,
+            },
+        };
+        // Inferior line-by-line online match does NOT replace embedded LRC
+        expect(selectLocalSongLyricsSource(songWithEmbeddedLrc, 'local')).toBe('embedded');
+
+        // Better TTML / word-by-word online match upgrades embedded LRC
+        const songWithUpgradedTtml: LocalSong = {
+            ...songWithEmbeddedLrc,
+            matchedLyrics: {
+                lines: [{ startTime: 0, endTime: 5, fullText: 'قلبي اتمناه', words: [{ text: 'قلبي', startTime: 0, endTime: 2 }] }],
+                isWordByWord: true,
+                ttml: { timingMode: 'Word' },
+            },
+        };
+        expect(selectLocalSongLyricsSource(songWithUpgradedTtml, 'local')).toBe('online');
     });
 });

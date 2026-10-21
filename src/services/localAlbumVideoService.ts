@@ -395,11 +395,14 @@ export interface ScoredAlbumVideoCandidate {
 export const scoreAlbumVideoCandidates = (
     albumName: string,
     artistName?: string,
-    trackFolderName?: string,
+    _trackFolderName?: string,
     videos: readonly LocalAlbumVideoEntry[] = Array.from(videoEntriesById.values()),
 ): ScoredAlbumVideoCandidate[] => {
     const normAlbum = buildNormalizedAlbumKey(albumName);
-    const strippedAlbum = stripAlbumVideoTagsAndNormalize(albumName);
+    const strippedAlbum = normAlbum ? stripAlbumVideoTagsAndNormalize(albumName) : '';
+    if (!normAlbum && !strippedAlbum) {
+        return [];
+    }
     const normArtist = normalizeAlbumVideoText(artistName);
     const strippedArtist = stripAlbumVideoTagsAndNormalize(artistName);
 
@@ -407,6 +410,9 @@ export const scoreAlbumVideoCandidates = (
     const albumPlusArtist = normArtist && normAlbum ? normalizeAlbumVideoText(`${albumName} ${artistName}`) : '';
     const strippedArtistPlusAlbum = strippedArtist && strippedAlbum
         ? normalizeAlbumVideoText(`${strippedArtist} ${strippedAlbum}`)
+        : '';
+    const strippedAlbumPlusArtist = strippedArtist && strippedAlbum
+        ? normalizeAlbumVideoText(`${strippedAlbum} ${strippedArtist}`)
         : '';
 
     const scored: ScoredAlbumVideoCandidate[] = [];
@@ -420,45 +426,24 @@ export const scoreAlbumVideoCandidates = (
         if (!vNorm) continue;
 
         let score = 0;
-        let reason: ScoredAlbumVideoCandidate['reason'] = 'partial-album';
+        let reason: ScoredAlbumVideoCandidate['reason'] = 'exact-album';
 
+        // Strictly match videos whose filename matches the album name (or Artist - Album for that exact album)
         if (normAlbum && vNorm === normAlbum) {
             score = 100;
             reason = 'exact-album';
-        } else if (artistPlusAlbum && (vNorm === artistPlusAlbum || vNorm === albumPlusArtist)) {
-            score = 98;
-            reason = 'exact-artist-album';
-        } else if (
-            trackFolderName
-            && video.folderName === trackFolderName
-            && (FOLDER_COVER_VIDEO_STEMS.has(vNorm) || (normAlbum && vNorm === normAlbum))
-        ) {
-            score = 96;
-            reason = 'folder-cover';
         } else if (strippedAlbum && strippedAlbum.length >= 2 && vStripped === strippedAlbum) {
-            score = 92;
+            score = 96;
             reason = 'stripped-album';
-        } else if (strippedArtistPlusAlbum && vStripped === strippedArtistPlusAlbum) {
-            score = 91;
+        } else if (artistPlusAlbum && (vNorm === artistPlusAlbum || vNorm === albumPlusArtist)) {
+            score = 94;
             reason = 'exact-artist-album';
         } else if (
-            strippedAlbum
-            && strippedAlbum.length >= 3
-            && strippedArtist
-            && strippedArtist.length >= 2
-            && vStripped.includes(strippedAlbum)
-            && vStripped.includes(strippedArtist)
+            strippedArtistPlusAlbum
+            && (vStripped === strippedArtistPlusAlbum || vStripped === strippedAlbumPlusArtist)
         ) {
-            score = 86;
-            reason = 'artist-album-tokens';
-        } else if (
-            strippedAlbum
-            && strippedAlbum.length >= 4
-            && (vStripped.startsWith(`${strippedAlbum} `) || vStripped.endsWith(` ${strippedAlbum}`))
-            && (strippedAlbum.length / Math.max(1, vStripped.length)) >= 0.55
-        ) {
-            score = 80;
-            reason = 'partial-album';
+            score = 92;
+            reason = 'exact-artist-album';
         }
 
         if (score > 0) {
@@ -609,12 +594,16 @@ const recoverVideoHandleFromPersistedDirs = async (
  */
 export const resolveAlbumVideoForTrack = async (params: {
     albumName?: string | null;
+    fallbackAlbumName?: string | null;
     artistName?: string | null;
     folderName?: string | null;
 }): Promise<AlbumVideoResolutionResult> => {
     await ensureLocalAlbumVideoCatalogHydrated();
-    const albumKey = buildNormalizedAlbumKey(params.albumName);
-    if (!albumKey && !params.folderName) {
+    const primaryAlbumKey = buildNormalizedAlbumKey(params.albumName);
+    const fallbackAlbumKey = buildNormalizedAlbumKey(params.fallbackAlbumName);
+    let effectiveAlbumName = primaryAlbumKey ? (params.albumName || '') : (params.fallbackAlbumName || '');
+    let effectiveKey = primaryAlbumKey || fallbackAlbumKey;
+    if (!effectiveKey) {
         return {
             albumKey: '',
             video: null,
@@ -624,7 +613,21 @@ export const resolveAlbumVideoForTrack = async (params: {
         };
     }
 
-    const effectiveKey = albumKey || `folder:${normalizeAlbumVideoText(params.folderName)}`;
+    if (
+        primaryAlbumKey
+        && fallbackAlbumKey
+        && primaryAlbumKey !== fallbackAlbumKey
+        && !associationsByAlbumKey.has(primaryAlbumKey)
+        && scoreAlbumVideoCandidates(params.albumName || '', params.artistName || undefined).length === 0
+        && (
+            associationsByAlbumKey.has(fallbackAlbumKey)
+            || scoreAlbumVideoCandidates(params.fallbackAlbumName || '', params.artistName || undefined).length > 0
+        )
+    ) {
+        effectiveKey = fallbackAlbumKey;
+        effectiveAlbumName = params.fallbackAlbumName || '';
+    }
+
     const existingAssoc = associationsByAlbumKey.get(effectiveKey);
 
     if (existingAssoc) {
@@ -725,10 +728,10 @@ export const assignVideoToAlbum = async (
     albumName: string,
     videoId: string | null,
     artistName?: string,
-    folderName?: string,
+    _folderName?: string,
 ): Promise<LocalAlbumVideoAssociation | null> => {
     await ensureLocalAlbumVideoCatalogHydrated();
-    const albumKey = buildNormalizedAlbumKey(albumName) || (folderName ? `folder:${normalizeAlbumVideoText(folderName)}` : '');
+    const albumKey = buildNormalizedAlbumKey(albumName);
     if (!albumKey) return null;
 
     const video = videoId ? videoEntriesById.get(videoId) : null;
@@ -752,10 +755,10 @@ export const assignVideoToAlbum = async (
  */
 export const resetAlbumVideoAssociation = async (
     albumName: string,
-    folderName?: string,
+    _folderName?: string,
 ): Promise<void> => {
     await ensureLocalAlbumVideoCatalogHydrated();
-    const albumKey = buildNormalizedAlbumKey(albumName) || (folderName ? `folder:${normalizeAlbumVideoText(folderName)}` : '');
+    const albumKey = buildNormalizedAlbumKey(albumName);
     if (!albumKey) return;
     if (associationsByAlbumKey.delete(albumKey)) {
         await persistVideoCatalogAndLinks();
@@ -889,10 +892,21 @@ export const importAlbumVideoFolder = async (expectedRootName?: string): Promise
  */
 export const resyncAlbumVideoFolders = async (): Promise<LocalAlbumVideoEntry[]> => {
     await ensureLocalAlbumVideoCatalogHydrated();
-    const persistedHandles = await getPersistedVideoDirHandles();
-    const roots = Object.keys(persistedHandles);
-    for (const rootName of roots) {
+    const [persistedVideoHandles, persistedMusicHandles] = await Promise.all([
+        getPersistedVideoDirHandles(),
+        getDirHandles(),
+    ]);
+    for (const rootName of Object.keys(persistedVideoHandles)) {
         await importAlbumVideoFolder(rootName);
+    }
+    for (const [rootName, musicDirHandle] of Object.entries(persistedMusicHandles)) {
+        if (persistedVideoHandles[rootName] || !musicDirHandle) continue;
+        try {
+            const discovered = await scanVideoFilesFromDirectoryHandle(musicDirHandle, rootName);
+            await reconcileVideosForRootFolder(rootName, discovered);
+        } catch (err) {
+            console.warn(`[AlbumVideo] Failed to scan music folder "${rootName}" for album videos:`, err);
+        }
     }
     return getRegisteredAlbumVideos();
 };
@@ -924,16 +938,19 @@ export const registerStandaloneAlbumVideoFile = async (
         activeVideoBlobUrls.set(entry.id, { url: blobUrl, signature: entry.fileSignature });
     }
     videoEntriesById.set(entry.id, entry);
-    if (assignToAlbum) {
-        const albumKey = buildNormalizedAlbumKey(assignToAlbum.albumName)
-            || (assignToAlbum.folderName ? `folder:${normalizeAlbumVideoText(assignToAlbum.folderName)}` : '');
-        if (albumKey) {
+    // Match the imported video strictly to the album matching its filename; only create a manual
+    // override for assignToAlbum.albumName if the video filename matches that album name.
+    if (assignToAlbum?.albumName) {
+        const albumKey = buildNormalizedAlbumKey(assignToAlbum.albumName);
+        const matchesTargetAlbum = albumKey
+            && scoreAlbumVideoCandidates(assignToAlbum.albumName, assignToAlbum.artistName, undefined, [entry]).length > 0;
+        if (albumKey && matchesTargetAlbum) {
             associationsByAlbumKey.set(albumKey, {
                 albumKey,
                 albumName: assignToAlbum.albumName,
                 artistName: assignToAlbum.artistName,
                 videoId: entry.id,
-                origin: 'manual',
+                origin: 'auto',
                 videoSignature: entry.fileSignature,
                 updatedAt: Date.now(),
             });

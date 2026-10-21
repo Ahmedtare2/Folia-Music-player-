@@ -135,6 +135,7 @@ interface MobileNowPlayingSheetProps {
     currentSong: SongResult | null;
     artistName: string;
     albumName: string;
+    localAlbumName?: string;
     folderName?: string;
     coverUrl: string | null;
     albumVideoUrl?: string | null;
@@ -380,6 +381,7 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
     currentSong,
     artistName,
     albumName,
+    localAlbumName,
     folderName,
     coverUrl,
     albumVideoUrl: explicitAlbumVideoUrl,
@@ -459,6 +461,8 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
     const currentTimeTextRef = useRef<HTMLSpanElement>(null);
     const rangeInputRef = useRef<HTMLInputElement>(null);
     const isScrubbingRef = useRef(false);
+    const lastSeekCommitRef = useRef<{ timeMs: number; value: number }>({ timeMs: 0, value: -1 });
+
     const lastDisplayedSecRef = useRef<number>(-1);
     const lyricsListRef = useRef<HTMLDivElement>(null);
     const lyricFileInputRef = useRef<HTMLInputElement>(null);
@@ -569,6 +573,7 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
         let cancelled = false;
         void resolveAlbumVideoForTrack({
             albumName,
+            fallbackAlbumName: localAlbumName,
             artistName,
             folderName,
         }).then((res) => {
@@ -586,7 +591,7 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
         return () => {
             cancelled = true;
         };
-    }, [albumName, artistName, explicitAlbumVideoId, explicitAlbumVideoUrl, folderName, videoCatalogTick]);
+    }, [albumName, artistName, explicitAlbumVideoId, explicitAlbumVideoUrl, folderName, localAlbumName, videoCatalogTick]);
 
     useEffect(() => {
         setCoverLoadError(false);
@@ -672,6 +677,41 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
             }
         }
     }, [duration]);
+
+    const resolveSeekValueFromEvent = useCallback((
+        input: HTMLInputElement | null | undefined,
+        clientX?: number,
+    ): number => {
+        if (!input) return currentTime.get();
+        const maxVal = duration > 0 ? duration : 100;
+        if (typeof clientX === 'number' && Number.isFinite(clientX) && typeof input.getBoundingClientRect === 'function') {
+            const rect = input.getBoundingClientRect();
+            if (rect && rect.width > 0) {
+                const rawRatio = (clientX - rect.left) / rect.width;
+                const clampedRatio = Math.max(0, Math.min(1, rawRatio));
+                const computed = Math.round(clampedRatio * maxVal * 10) / 10;
+                input.value = String(computed);
+                return computed;
+            }
+        }
+        const parsed = Number(input.value);
+        return Number.isFinite(parsed) ? parsed : currentTime.get();
+    }, [currentTime, duration]);
+
+    const commitSeekOnce = useCallback((val: number) => {
+        const now = Date.now();
+        if (
+            now - lastSeekCommitRef.current.timeMs < 80
+            && Math.abs(val - lastSeekCommitRef.current.value) < 0.05
+        ) {
+            return;
+        }
+        lastSeekCommitRef.current = { timeMs: now, value: val };
+        userScrollingLyricsUntilRef.current = 0;
+        updateScrubberDOM(val, true);
+        onSeek(val);
+    }, [onSeek, updateScrubberDOM]);
+
 
     useEffect(() => {
         if (isOpen) {
@@ -818,17 +858,21 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
             <input
                 ref={albumVideoFileInputRef}
                 type="file"
+                multiple
                 accept=".mp4,.webm,.mkv,.m4v,.mov,.3gp,video/*"
                 className="hidden"
                 onChange={async (e) => {
-                    const file = e.target.files?.[0];
+                    const files = Array.from(e.target.files ?? []);
                     e.target.value = '';
-                    if (!file) return;
-                    await registerStandaloneAlbumVideoFile(file, {
-                        albumName: albumName || currentSong.album?.name || currentSong.name,
-                        artistName,
-                        folderName,
-                    });
+                    if (files.length === 0) return;
+                    const targetAlbum = albumName || localAlbumName || currentSong.album?.name || '';
+                    for (const file of files) {
+                        await registerStandaloneAlbumVideoFile(file, targetAlbum ? {
+                            albumName: targetAlbum,
+                            artistName,
+                            folderName,
+                        } : undefined);
+                    }
                     setVideoCatalogTick(t => t + 1);
                 }}
             />
@@ -1467,7 +1511,7 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
 
                     {/* Touch-Safe Progress Scrubber with Artwork-Derived Gradient & Readable Time Labels */}
                     <div className="space-y-1 touch-none">
-                        <div className="relative flex h-7 landscape:h-6 items-center touch-none">
+                        <div dir="ltr" className="relative flex h-7 landscape:h-6 items-center touch-pan-x">
                             <div
                                 className="relative h-1.5 w-full overflow-hidden rounded-full"
                                 style={{
@@ -1509,13 +1553,41 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                 onPointerDown={(e) => {
                                     isScrubbingRef.current = true;
                                     try {
-                                        e.currentTarget.setPointerCapture(e.pointerId);
+                                        e.currentTarget.setPointerCapture?.(e.pointerId);
                                     } catch {
                                         // Ignore in synthetic test events
                                     }
+                                    if (typeof e.clientX === 'number') {
+                                        const val = resolveSeekValueFromEvent(e.currentTarget, e.clientX);
+                                        updateScrubberDOM(val, true);
+                                    }
                                 }}
-                                onTouchStart={() => {
+                                onPointerMove={(e) => {
+                                    if (!isScrubbingRef.current || typeof e.clientX !== 'number') return;
+                                    const val = resolveSeekValueFromEvent(e.currentTarget, e.clientX);
+                                    updateScrubberDOM(val, true);
+                                    const indices = Array.from(computeActiveLyricLineIndices(lyricLines, currentLineIndex, val)).sort((a, b) => a - b);
+                                    const key = indices.join(',');
+                                    setActiveLineSetKey(prev => (prev === key ? prev : key));
+                                }}
+                                onTouchStart={(e) => {
                                     isScrubbingRef.current = true;
+                                    const touchX = e.touches?.[0]?.clientX;
+                                    if (typeof touchX === 'number') {
+                                        const val = resolveSeekValueFromEvent(e.currentTarget, touchX);
+                                        updateScrubberDOM(val, true);
+                                    }
+                                }}
+                                onTouchMove={(e) => {
+                                    if (!isScrubbingRef.current) return;
+                                    const touchX = e.touches?.[0]?.clientX;
+                                    if (typeof touchX === 'number') {
+                                        const val = resolveSeekValueFromEvent(e.currentTarget, touchX);
+                                        updateScrubberDOM(val, true);
+                                        const indices = Array.from(computeActiveLyricLineIndices(lyricLines, currentLineIndex, val)).sort((a, b) => a - b);
+                                        const key = indices.join(',');
+                                        setActiveLineSetKey(prev => (prev === key ? prev : key));
+                                    }
                                 }}
                                 onInput={(e) => {
                                     const val = Number(e.currentTarget.value);
@@ -1525,19 +1597,16 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                     setActiveLineSetKey(prev => (prev === key ? prev : key));
                                 }}
                                 onPointerUp={(e) => {
-                                    const val = Number(e.currentTarget.value);
+                                    const val = resolveSeekValueFromEvent(e.currentTarget, e.clientX);
                                     isScrubbingRef.current = false;
-                                    userScrollingLyricsUntilRef.current = 0;
-                                    updateScrubberDOM(val, true);
-                                    onSeek(val);
+                                    commitSeekOnce(val);
                                 }}
                                 onTouchEnd={(e) => {
                                     if (!isScrubbingRef.current) return;
-                                    const val = Number(e.currentTarget.value);
+                                    const touchX = e.changedTouches?.[0]?.clientX;
+                                    const val = resolveSeekValueFromEvent(e.currentTarget, touchX);
                                     isScrubbingRef.current = false;
-                                    userScrollingLyricsUntilRef.current = 0;
-                                    updateScrubberDOM(val, true);
-                                    onSeek(val);
+                                    commitSeekOnce(val);
                                 }}
                                 onPointerCancel={() => {
                                     isScrubbingRef.current = false;
@@ -1556,12 +1625,10 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                 onChange={(e) => {
                                     if (!isScrubbingRef.current) {
                                         const val = Number(e.currentTarget.value);
-                                        userScrollingLyricsUntilRef.current = 0;
-                                        updateScrubberDOM(val, true);
-                                        onSeek(val);
+                                        commitSeekOnce(val);
                                     }
                                 }}
-                                className="absolute inset-0 h-full w-full cursor-pointer opacity-0 touch-none"
+                                className="absolute inset-0 h-full w-full cursor-pointer opacity-0 touch-pan-x"
                             />
                         </div>
                         <div className="flex items-center justify-between text-[11px] font-mono font-medium text-zinc-200/90">

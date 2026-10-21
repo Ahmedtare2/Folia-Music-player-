@@ -49,7 +49,7 @@ import { isSharedLocalCoverObjectUrl } from '../../../../services/localCoverRunt
 import { applyMatchedMetadata } from '../../../../services/localLibraryCatalogService';
 import { setLocalSongPureMusicMark } from '../../../../services/localSongMatchSelectionService';
 import { buildLocalSongLyricMatchContext, shouldRefreshLocalSongLyricsFromMetadata, shouldRunLocalSongAutomaticMatch } from '../../../../utils/lyrics/localSongMatchContext';
-import { clearNegativeLyricMatchRecord, recordAutomaticLyricMatchSuccess } from '../../../../utils/lyrics/lyricAutoMatchState';
+import { clearNegativeLyricMatchRecord, hasKnownGoodWordByWordLocalLyric, recordAutomaticLyricMatchSuccess } from '../../../../utils/lyrics/lyricAutoMatchState';
 import { getLocalLibraryCatalogSnapshot } from '../../../../services/localLibraryEntityRepository';
 import { setStatusMessage as setStatusMsg } from '../../../../stores/useStatusMessageStore';
 import { useLyricSettingsStore } from '../../../../stores/useLyricSettingsStore';
@@ -468,8 +468,16 @@ export function useLibraryPlaybackController({
         let updatedLocalSong = localSong;
         let matchedSongResult: SongResult | null = null;
         const onlineFirst = useLyricSettingsStore.getState().localLyricsPriority === 'online';
+        const hasWordByWordLocalOrEmbedded = hasKnownGoodWordByWordLocalLyric(localSong);
+        const hasAnyLocalOrEmbeddedContent = Boolean(
+            (localSong.hasLocalLyrics && localSong.localLyricsContent)
+            || (localSong.hasEmbeddedLyrics && localSong.embeddedLyricsContent)
+        );
+        // Songs that already have embedded/local TTML do not need online lyric fetching;
+        // songs that only have LRC (or no lyrics) check online for a better TTML/word-by-word match.
         const needsLyricsMatch = (
-            (onlineFirst || (!localSong.hasLocalLyrics && !localSong.hasEmbeddedLyrics))
+            !hasWordByWordLocalOrEmbedded
+            && (onlineFirst || !hasAnyLocalOrEmbeddedContent || !localSong.matchedLyrics)
             && (!localSong.matchedLyrics && !localSong.matchedIsPureMusic
                 || shouldRefreshLocalSongLyricsFromMetadata(localSong))
         );

@@ -24,6 +24,8 @@ export function detectTimedLyricFormat(content?: string): TimedLyricFormat {
             || normalized.includes('itunes:timing=')
             || normalized.includes('ttm:agent=')
             || normalized.includes('ttm:role=')
+            || /<(?:p|body|div|span)(?:\s|>)/i.test(normalized)
+            || /\bbegin\s*=\s*["']/i.test(normalized)
         )
     ) {
         return 'ttml';

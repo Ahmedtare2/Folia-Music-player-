@@ -568,8 +568,18 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
     const [albumVideoCount, setAlbumVideoCount] = useState<number>(() => getRegisteredAlbumVideos().length);
     useEffect(() => {
         let mounted = true;
-        void ensureLocalAlbumVideoCatalogHydrated().then(() => {
-            if (mounted) setAlbumVideoCount(getRegisteredAlbumVideos().length);
+        void ensureLocalAlbumVideoCatalogHydrated().then(async () => {
+            if (!mounted) return;
+            const currentCount = getRegisteredAlbumVideos().length;
+            setAlbumVideoCount(currentCount);
+            if (currentCount === 0 && localSongs.length > 0) {
+                try {
+                    const refreshed = await resyncAlbumVideoFolders();
+                    if (mounted) setAlbumVideoCount(refreshed.length);
+                } catch {
+                    // Ignore background video discovery errors
+                }
+            }
         });
         if (typeof window === 'undefined') return undefined;
         const onUpdated = () => setAlbumVideoCount(getRegisteredAlbumVideos().length);
@@ -1814,7 +1824,8 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                 onClose={() => setNavState(prev => ({ ...prev, playerSheet: 'collapsed', subDrawer: 'none' }))}
                 currentSong={currentSong}
                 artistName={artistName}
-                albumName={albumName}
+                albumName={albumName || matchedPlayingLocalSong?.importedMetadata?.albumName || ''}
+                localAlbumName={matchedPlayingLocalSong?.importedMetadata?.albumName}
                 folderName={matchedPlayingLocalSong?.folderName}
                 coverUrl={effectiveCoverUrl}
                 playerState={playerState}
