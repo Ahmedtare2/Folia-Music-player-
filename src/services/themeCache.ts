@@ -77,7 +77,8 @@ export async function getCachedThemeStateForSong(song: SongResult | null): Promi
     }
     if (legacyThemeState.kind !== 'none') return legacyThemeState;
 
-    const coverKey = (song as { localCoverAssetId?: string }).localCoverAssetId || song.coverUrl;
+    const coverSong = song as { localCoverAssetId?: string; coverUrl?: string | null };
+    const coverKey = coverSong.localCoverAssetId || coverSong.coverUrl;
     if (coverKey) {
         const cachedCoverPalette = await readCachedCoverPalette(coverKey);
         if (cachedCoverPalette?.dualTheme) {

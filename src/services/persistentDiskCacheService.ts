@@ -84,6 +84,15 @@ export const computeParsedLyricsContentDigest = (lyrics: LyricData | null | unde
     return `ld_${fnv1a64Hex(signature)}`;
 };
 
+const readLyricSourceField = (source: object, ...names: string[]): string => {
+    const record = source as Record<string, unknown>;
+    for (const name of names) {
+        const value = record[name];
+        if (typeof value === 'string' && value) return value;
+    }
+    return '';
+};
+
 export const computeLyricSourceCacheKey = (source: RawLyricSource, optionsSignature = ''): string => {
     let rawPayload = '';
     switch (source.type) {
@@ -91,17 +100,26 @@ export const computeLyricSourceCacheKey = (source: RawLyricSource, optionsSignat
             rawPayload = `embedded|${source.textContent || ''}|${source.translationContent || ''}`;
             break;
         case 'local':
-            rawPayload = `local|${source.formatHint || ''}|${source.lrcContent || ''}|${source.tLrcContent || ''}|${source.yrcContent || ''}`;
+            rawPayload = `local|${source.formatHint || ''}|${source.lrcContent || ''}|${source.tLrcContent || ''}|${readLyricSourceField(source, 'yrcContent', 'yrc')}`;
             break;
         case 'netease':
-            rawPayload = `netease|${source.lrc || ''}|${source.tLrc || ''}|${source.yrc || ''}|${source.romaLrc || ''}|${source.ttml || ''}`;
+            rawPayload = `netease|${source.lrc || ''}|${readLyricSourceField(source, 'tLrc', 'tlyric')}|${source.yrc || ''}|${readLyricSourceField(source, 'romaLrc', 'romalrc')}|${readLyricSourceField(source, 'ttml')}`;
             break;
-        case 'qrc':
-            rawPayload = `qrc|${source.qrc || ''}|${source.tLrc || ''}|${source.romaLrc || ''}`;
+        case 'qrc': {
+            const qrcPayload = `${readLyricSourceField(source, 'qrc')}|${readLyricSourceField(source, 'tLrc', 'tlyric')}|${readLyricSourceField(source, 'romaLrc', 'romalrc')}`;
+            // Fall back to the full serialized source when none of the known fields are present, so distinct sources never share a key.
+            rawPayload = qrcPayload === '||' ? `qrc|${JSON.stringify(source)}` : `qrc|${qrcPayload}`;
             break;
-        case 'navidrome':
-            rawPayload = `navidrome|${JSON.stringify(source.structured ?? null)}|${source.rawText || ''}`;
+        }
+        case 'navidrome': {
+            const record = source as unknown as Record<string, unknown>;
+            const rawText = readLyricSourceField(source, 'rawText');
+            const structured = record.structured ?? null;
+            rawPayload = structured === null && !rawText
+                ? `navidrome|${JSON.stringify(source)}`
+                : `navidrome|${JSON.stringify(structured)}|${rawText}`;
             break;
+        }
         default:
             rawPayload = JSON.stringify(source);
             break;

@@ -96,8 +96,8 @@ export function usePlaybackVisualizerBridge({
     const lyricsRef = useRef(lyrics);
     lyricsRef.current = lyrics;
     // Reuse a single typed array for FFT frequency reads instead of allocating on every frame.
-    const fftBufferRef = useRef<Uint8Array | null>(null);
-    const emptySpectrumRef = useRef<Uint8Array>(new Uint8Array(0));
+    const fftBufferRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
+    const emptySpectrumRef = useRef<Uint8Array<ArrayBuffer>>(new Uint8Array(0));
     // 智能动感模式: loads the track's beats while it is on; the clock is stepped below. A ref, so
     // switching it does not rebuild the frame loop.
     const beatFxWantedRef = useRef(false);

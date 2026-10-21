@@ -213,7 +213,7 @@ export const getBrowserCacheUsageByCategory = async (): Promise<CacheUsage> => {
   const usage = emptyCacheUsage();
   await Promise.all(CACHE_TABLE_NAMES.map(async name => {
     await getTable(name).each(item => {
-      countCacheEntry(usage, item.key, item.data);
+      countCacheEntry(usage, item);
     });
   }));
   return usage;

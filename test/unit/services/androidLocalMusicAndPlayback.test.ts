@@ -1179,7 +1179,7 @@ describe('Android SAF local music adapter & Media3 playback bridge', () => {
                 return {
                     ok: true,
                     stagedCount: uris.length,
-                    stagedPaths: uris.map((_, idx) => `/data/user/0/top.izuna.foliamajor/cache/saf_audio_stage/stage_${idx}.bin`),
+                    stagedPaths: uris.map((_: string, idx: number) => `/data/user/0/top.izuna.foliamajor/cache/saf_audio_stage/stage_${idx}.bin`),
                     cacheDir: '/data/user/0/top.izuna.foliamajor/cache/saf_audio_stage',
                 };
             }),
