@@ -2288,6 +2288,8 @@ export default {
     "dynamicAlbumArtworkIntensity": "Intensitas Gerakan Sampul Dinamis",
     "dynamicAlbumArtworkIntensityLow": "Rendah",
     "dynamicAlbumArtworkIntensityNormal": "Normal",
+    "albumVideoCovers": "Sampul Video Album Lokal Layar Penuh",
+    "albumVideoCoversDesc": "Putar file video album lokal yang cocok sebagai visual album layar penuh dengan kontrol pemutar yang menyatu secara alami.",
     "displayAndImmersiveMode": "Display and Immersive Mode",
     "hideStatusBar": "Hide status bar",
     "hideStatusBarDesc": "Sembunyikan bilah status atas di seluruh aplikasi. Geser dari tepi atas untuk menampilkannya sementara.",

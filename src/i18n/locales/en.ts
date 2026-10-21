@@ -2288,6 +2288,8 @@ export default {
     "dynamicAlbumArtworkIntensity": "Dynamic Artwork Motion Intensity",
     "dynamicAlbumArtworkIntensityLow": "Low",
     "dynamicAlbumArtworkIntensityNormal": "Normal",
+    "albumVideoCovers": "Full-Screen Local Album Video Covers",
+    "albumVideoCoversDesc": "Play matching local album video files as a full-screen animated album visual on the player screen, with controls and track metadata layered over a smooth lower-edge gradient. Falls back to album artwork when disabled or unavailable.",
     "displayAndImmersiveMode": "Display and Immersive Mode",
     "hideStatusBar": "Hide status bar",
     "hideStatusBarDesc": "Hide the top Android status bar across the application. Swipe from the top edge to reveal it temporarily.",

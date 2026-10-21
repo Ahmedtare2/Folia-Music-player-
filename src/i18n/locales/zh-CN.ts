@@ -2288,6 +2288,8 @@ export default {
     "dynamicAlbumArtworkIntensity": "动态封面运动强度",
     "dynamicAlbumArtworkIntensityLow": "低",
     "dynamicAlbumArtworkIntensityNormal": "标准",
+    "albumVideoCovers": "全屏本地专辑视频封面",
+    "albumVideoCoversDesc": "播放与专辑名称匹配的本地视频文件作为全屏动态背景，底部控制栏与曲目信息自然融合；无匹配或关闭时回退至专辑封面。",
     "displayAndImmersiveMode": "显示与沉浸模式",
     "hideStatusBar": "隐藏状态栏",
     "hideStatusBarDesc": "在应用内隐藏顶部系统状态栏，从屏幕顶部边缘下滑可临时唤出。",
