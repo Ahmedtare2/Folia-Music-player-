@@ -761,8 +761,8 @@ describe('Android SAF local music adapter & Media3 playback bridge', () => {
 
         // Simulate app restart (fileHandle stripped) and switch tracks:
         // getAudioFromLocalSong must reconstruct the handle in O(1) from safContentUri without calling resolveRelativeFile or saveLocalSong!
-        vi.mocked(bridge.resolveRelativeFile).mockClear();
-        vi.mocked(bridge.scanDirectoryTree).mockClear();
+        vi.mocked(bridge.resolveRelativeFile!).mockClear();
+        vi.mocked(bridge.scanDirectoryTree!).mockClear();
         vi.mocked(saveLocalSong).mockClear();
 
         const restartedSong: LocalSong = { ...habaytak, fileHandle: undefined };

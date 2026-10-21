@@ -1342,6 +1342,10 @@ export interface LocalSong {
   localCoverNeedsAssetMigration?: boolean; // Retries local cover hashing/persistence during the next rescan
   hasNoEmbeddedCover?: boolean; // True when the audio file was inspected and confirmed to have no embedded cover art
   albumVideoUri?: string; // Optional reusable motion/video reference associated with the album or track
+  matchedLyricsFetchedAt?: number;
+  matchedLyricsQuerySignature?: string;
+  lastAutoMatchFailedAt?: number;
+  lastAutoMatchFailedQuerySignature?: string;
   replayGain?: number; // ReplayGain track gain in dB
   replayGainTrackGain?: number; // ReplayGain track gain in dB
   replayGainTrackPeak?: number; // ReplayGain track peak ratio
