@@ -4,5 +4,5 @@ Version: 0.7.21
 Branch: main
 Commit: 993fcb280e6b38c59f679ba20bc83cf3c810897e
 APK File: Folia-0.7.21-android-debug.apk
-Size: 19M (18994102 bytes)
-SHA-256: 6a165f811e5b9c4893bf6108ecbfcaa5757a4e0a382b13aee9a863ff3ad3b1e9
+Size: 19M (18997214 bytes)
+SHA-256: 5d30d24512d4304700e40d199c516ddf34556ca6f016e762dfbc9ce1431b7a4c
