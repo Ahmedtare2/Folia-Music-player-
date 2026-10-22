@@ -54,6 +54,7 @@ type VisualizerRendererModelDeps = {
     shouldPauseVisualizerBackground: boolean;
     /** Suspends per-frame WebGL/Canvas animation loops when the screen is off or hidden behind mobile views. */
     suspendAnimation?: boolean;
+    isMobileVisualizerActive?: boolean;
     hideTranslationSubtitle: boolean;
     isPlayerPageTransparent: boolean;
     onLyricLineSeek: (index: number) => void;
@@ -67,6 +68,7 @@ export const useVisualizerRendererModel = ({
     isObsBrowserSourceRendering,
     shouldPauseVisualizerBackground,
     suspendAnimation = false,
+    isMobileVisualizerActive = false,
     hideTranslationSubtitle,
     isPlayerPageTransparent,
     onLyricLineSeek,
@@ -153,7 +155,7 @@ export const useVisualizerRendererModel = ({
         songArtist,
         songAlbum,
         coverUrl: displayCoverUrl,
-        showText: resolveVisualizerShowText({ currentView, isSettingsModalOpen, isPanelOpen, backdropLyrics }),
+        showText: resolveVisualizerShowText({ currentView, isSettingsModalOpen, isPanelOpen, backdropLyrics, isMobileVisualizerActive }),
         seed,
         songHandoff,
         staticMode,

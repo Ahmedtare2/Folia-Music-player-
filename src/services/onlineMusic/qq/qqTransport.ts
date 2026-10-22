@@ -1,5 +1,6 @@
 import { OnlineProviderError } from '../../../types/onlineMusic';
 import { readProviderSessionValue, removeProviderSessionValue, writeProviderSessionValue } from '../providerStorage';
+import { getStoredRuntimeApiBase } from '../runtimeApiConfig';
 import { withLoginRequestLimit } from '../login/loginRequestLimit';
 import { withOnlineRequestLimit } from '../failure/onlineRequestLimit';
 
@@ -106,6 +107,8 @@ export const QQ_ONLINE_REQUEST_LIMIT_MS = 70_000;
 const QR_CONFIRMED_CODE = 803;
 
 const getWebApiBase = (): string => {
+    const runtimeBase = getStoredRuntimeApiBase('qq');
+    if (runtimeBase) return runtimeBase;
     const viteValue = typeof import.meta !== 'undefined' && import.meta.env?.MODE !== 'test'
         ? String((import.meta as ImportMeta & { env?: Record<string, string> }).env?.VITE_QQ_API_BASE || '')
         : '';

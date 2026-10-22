@@ -81,6 +81,7 @@ const VisualizerCladdagh: React.FC<VisualizerSharedProps> = (props) => {
         if (!lineEl) return;
 
         let frameId = 0;
+        let lastGlowFrameMs = 0;
 
         const updateColors = () => {
             const bassPower = paused ? 0 : normalizePower(smoothedBass.get());

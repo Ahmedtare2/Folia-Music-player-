@@ -45,7 +45,7 @@ import { getCachedLocalCoverObjectUrl, resolveLocalCoverObjectUrl } from '../../
 import { isLocalCoverAssetUrl } from '../../services/localCoverAssetUrl';
 import { detectTextDirection } from '../../utils/lyrics/arabicText';
 import { VISUALIZER_REGISTRY, getVisualizerModeLabel } from '../visualizer/registry';
-import { ANDROID_VISIBILITY_EVENT, minimizeAndroidApp } from '../../services/android/foliaAndroidBridge';
+import { ANDROID_VISIBILITY_EVENT, hasAndroidNativeVisualizerBridge, minimizeAndroidApp } from '../../services/android/foliaAndroidBridge';
 import type { NavidromeSong } from '../../types/navidrome';
 import { AUDIO_EQUALIZER_PRESET_LABELS } from '../../utils/audioEqualizer';
 import { useAudioSettingsStore } from '../../stores/useAudioSettingsStore';
