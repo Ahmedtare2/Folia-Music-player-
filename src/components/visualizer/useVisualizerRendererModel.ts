@@ -31,6 +31,7 @@ import { useShownTheme } from './useShownTheme';
 import { NO_LYRIC_LINES } from '../../utils/lyrics/noLyricLines';
 import { selectLibraryPlayerBackdrop, useLibraryPlayerOcclusionStore } from '../../stores/useLibraryPlayerOcclusionStore';
 import { resolveVisualizerShowText } from '../app/presentation/playerVisualizerBackdrop';
+import { hasAndroidNativeVisualizerBridge } from '../../services/android/foliaAndroidBridge';
 
 // src/components/visualizer/useVisualizerRendererModel.ts
 //
@@ -53,8 +54,6 @@ type VisualizerRendererModelDeps = {
     shouldPauseVisualizerBackground: boolean;
     /** Suspends per-frame WebGL/Canvas animation loops when the screen is off or hidden behind mobile views. */
     suspendAnimation?: boolean;
-    /** True when the mobile Now Playing sheet is expanded in Visualizer/Lyrics mode. */
-    isMobileVisualizerActive?: boolean;
     hideTranslationSubtitle: boolean;
     isPlayerPageTransparent: boolean;
     onLyricLineSeek: (index: number) => void;
@@ -68,7 +67,6 @@ export const useVisualizerRendererModel = ({
     isObsBrowserSourceRendering,
     shouldPauseVisualizerBackground,
     suspendAnimation = false,
-    isMobileVisualizerActive = false,
     hideTranslationSubtitle,
     isPlayerPageTransparent,
     onLyricLineSeek,
@@ -129,7 +127,7 @@ export const useVisualizerRendererModel = ({
 
     const background = useMemo<VisualizerBackgroundConfig>(() => ({
         ...backgroundConfig,
-        transparent: isPlayerPageTransparent,
+        transparent: isPlayerPageTransparent || hasAndroidNativeVisualizerBridge(),
         common: {
             ...backgroundConfig.common,
             // A settings subview covers the geometry anyway, and drawing it under an opaque panel
@@ -155,23 +153,16 @@ export const useVisualizerRendererModel = ({
         songArtist,
         songAlbum,
         coverUrl: displayCoverUrl,
-        showText: resolveVisualizerShowText({
-            currentView,
-            isSettingsModalOpen,
-            isPanelOpen,
-            backdropLyrics,
-            isMobileVisualizerActive,
-        }),
+        showText: resolveVisualizerShowText({ currentView, isSettingsModalOpen, isPanelOpen, backdropLyrics }),
         seed,
         songHandoff,
         staticMode,
-        backgroundStaticMode: (shouldPauseVisualizerBackground && !isMobileVisualizerActive)
+        backgroundStaticMode: shouldPauseVisualizerBackground
             || suspendAnimation
             || (
                 background.mode === 'latent'
                 && background.latent?.tuning?.dynamicOnlyInPlayer
                 && currentView !== 'player'
-                && !isMobileVisualizerActive
             ),
         paused: displayPlayerState !== PlayerState.PLAYING || suspendAnimation,
         visualizerOpacity,

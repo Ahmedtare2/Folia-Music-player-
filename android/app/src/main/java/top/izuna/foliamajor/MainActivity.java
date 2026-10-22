@@ -1,9 +1,18 @@
 package top.izuna.foliamajor;
 
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.graphics.Color;
+import android.hardware.display.DisplayManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.view.Display;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
 import android.webkit.WebResourceRequest;
@@ -11,6 +20,7 @@ import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import androidx.activity.OnBackPressedCallback;
+import androidx.annotation.Nullable;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
@@ -21,8 +31,104 @@ import com.getcapacitor.BridgeWebViewClient;
 import java.util.Locale;
 
 public class MainActivity extends BridgeActivity {
+    private static volatile boolean mainActivityForegroundVisible = true;
     private volatile boolean hideStatusBarRequested = false;
     private volatile boolean hideNavigationBarRequested = false;
+
+    public static boolean isMainActivityForegroundVisible() {
+        return mainActivityForegroundVisible;
+    }
+    private volatile float currentDisplayRefreshRate = 60.0f;
+    @Nullable
+    private FoliaBackgroundSurfaceView backgroundSurfaceView = null;
+    @Nullable
+    private BroadcastReceiver screenStateReceiver = null;
+    @Nullable
+    private DisplayManager displayManager = null;
+    @Nullable
+    private DisplayManager.DisplayListener displayListener = null;
+
+    @Nullable
+    public FoliaBackgroundSurfaceView getBackgroundSurfaceView() {
+        return this.backgroundSurfaceView;
+    }
+
+    public float getDisplayRefreshRate() {
+        return this.currentDisplayRefreshRate;
+    }
+
+    /**
+     * Reads the active display refresh rate (60Hz, 90Hz, 120Hz, etc.) via Display / WindowManager /
+     * DisplayManager and notifies FoliaBackgroundSurfaceView, FoliaNativeBridgePlugin, and the WebView.
+     */
+    @SuppressWarnings("deprecation")
+    public float queryAndSyncDisplayRefreshRate(boolean forceBroadcast) {
+        float detectedHz = 60.0f;
+        try {
+            Display display = null;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                try {
+                    display = getDisplay();
+                } catch (Exception ignored) {
+                    display = null;
+                }
+            }
+            if (display == null && this.displayManager != null) {
+                display = this.displayManager.getDisplay(Display.DEFAULT_DISPLAY);
+            }
+            if (display == null) {
+                WindowManager wm = getWindowManager();
+                if (wm != null) {
+                    display = wm.getDefaultDisplay();
+                }
+            }
+            if (display != null) {
+                float raw = display.getRefreshRate();
+                if (!Float.isNaN(raw) && !Float.isInfinite(raw) && raw >= 30.0f && raw <= 240.0f) {
+                    detectedHz = raw;
+                }
+            }
+        } catch (Exception ignored) {
+            detectedHz = 60.0f;
+        }
+
+        boolean changed = Math.abs(detectedHz - this.currentDisplayRefreshRate) >= 0.5f;
+        this.currentDisplayRefreshRate = detectedHz;
+
+        if (this.backgroundSurfaceView != null) {
+            this.backgroundSurfaceView.onDisplayRefreshRateChanged(detectedHz);
+        }
+
+        if (changed || forceBroadcast) {
+            dispatchDisplayRefreshRateToWebView(detectedHz);
+            FoliaNativeBridgePlugin.dispatchDisplayRefreshRateChanged(detectedHz);
+        }
+
+        return detectedHz;
+    }
+
+    private void dispatchDisplayRefreshRateToWebView(final float refreshRateHz) {
+        if (this.bridge == null || this.bridge.getWebView() == null) {
+            return;
+        }
+        final int roundedHz = Math.max(30, Math.min(240, Math.round(refreshRateHz)));
+        final float vsyncIntervalMs = 1000.0f / Math.max(30.0f, refreshRateHz);
+        final WebView webView = this.bridge.getWebView();
+        final String script = String.format(
+            Locale.ROOT,
+            "(function(){try{window.__FOLIA_DISPLAY_REFRESH_RATE__=%d;"
+                + "window.__FOLIA_DISPLAY_RAW_REFRESH_RATE__=%.2f;"
+                + "window.dispatchEvent(new CustomEvent('folia:display-refresh-rate',{detail:{"
+                + "refreshRate:%d,rawRefreshRate:%.2f,vsyncIntervalMs:%.3f"
+                + "}}));}catch(e){}})();",
+            roundedHz,
+            refreshRateHz,
+            roundedHz,
+            refreshRateHz,
+            vsyncIntervalMs
+        );
+        webView.post(() -> webView.evaluateJavascript(script, null));
+    }
 
     private void dispatchWindowEvent(String eventName, String detailJson) {
         if (this.bridge == null || this.bridge.getWebView() == null) {
@@ -38,6 +144,8 @@ public class MainActivity extends BridgeActivity {
     }
 
     private void dispatchNativeVisibility(final boolean visible) {
+        mainActivityForegroundVisible = visible;
+        FoliaPlaybackService.onMainActivityVisibilityChanged(visible);
         if (this.bridge == null || this.bridge.getWebView() == null) {
             return;
         }
@@ -171,8 +279,8 @@ public class MainActivity extends BridgeActivity {
         Window window = getWindow();
         if (window != null) {
             WindowCompat.setDecorFitsSystemWindows(window, false);
-            window.setStatusBarColor(Color.parseColor("#09090B"));
-            window.setNavigationBarColor(Color.parseColor("#09090B"));
+            window.setStatusBarColor(Color.TRANSPARENT);
+            window.setNavigationBarColor(Color.TRANSPARENT);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 WindowManager.LayoutParams lp = window.getAttributes();
                 lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
@@ -188,6 +296,7 @@ public class MainActivity extends BridgeActivity {
                 insetsController.setAppearanceLightNavigationBars(false);
             }
             if (decorView != null) {
+                decorView.setBackgroundColor(Color.parseColor("#09090B"));
                 ViewCompat.setOnApplyWindowInsetsListener(decorView, (view, windowInsets) -> {
                     syncInsetsToWebView(windowInsets);
                     return WindowInsetsCompat.CONSUMED;
@@ -197,7 +306,26 @@ public class MainActivity extends BridgeActivity {
 
         if (this.bridge != null && this.bridge.getWebView() != null) {
             WebView webView = this.bridge.getWebView();
-            webView.setBackgroundColor(0xFF09090B);
+            // Layer FoliaBackgroundSurfaceView behind the transparent hardware-accelerated WebView
+            // so the native 180x400 OpenGL ES mesh visualizer shines through while the WebView is
+            // dedicated strictly to VSync-paced GPU-composited lyrics and UI.
+            webView.setBackgroundColor(Color.TRANSPARENT);
+            webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
+
+            this.backgroundSurfaceView = new FoliaBackgroundSurfaceView(this);
+            if (webView.getParent() instanceof ViewGroup) {
+                ViewGroup rootContainer = (ViewGroup) webView.getParent();
+                rootContainer.setBackgroundColor(Color.parseColor("#09090B"));
+                rootContainer.addView(
+                    this.backgroundSurfaceView,
+                    0,
+                    new ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
+                );
+            }
+
             WebSettings settings = webView.getSettings();
             settings.setMediaPlaybackRequiresUserGesture(false);
 
@@ -217,6 +345,57 @@ public class MainActivity extends BridgeActivity {
                 }
             });
         }
+
+        // Register DisplayManager.DisplayListener to track live screen refresh rate changes
+        // (60Hz / 90Hz / 120Hz, MIUI/HyperOS dynamic refresh rate, or Battery Saver mode).
+        this.displayManager = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
+        if (this.displayManager != null) {
+            this.displayListener = new DisplayManager.DisplayListener() {
+                @Override
+                public void onDisplayAdded(int displayId) {
+                    queryAndSyncDisplayRefreshRate(false);
+                }
+
+                @Override
+                public void onDisplayRemoved(int displayId) {
+                    queryAndSyncDisplayRefreshRate(false);
+                }
+
+                @Override
+                public void onDisplayChanged(int displayId) {
+                    queryAndSyncDisplayRefreshRate(false);
+                }
+            };
+            this.displayManager.registerDisplayListener(
+                this.displayListener,
+                new Handler(Looper.getMainLooper())
+            );
+        }
+        queryAndSyncDisplayRefreshRate(true);
+
+        this.screenStateReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (intent == null || intent.getAction() == null) return;
+                String action = intent.getAction();
+                if (Intent.ACTION_SCREEN_OFF.equals(action)) {
+                    if (MainActivity.this.backgroundSurfaceView != null) {
+                        MainActivity.this.backgroundSurfaceView.onHostPause();
+                    }
+                    dispatchNativeVisibility(false);
+                } else if (Intent.ACTION_SCREEN_ON.equals(action)) {
+                    queryAndSyncDisplayRefreshRate(false);
+                    if (MainActivity.this.backgroundSurfaceView != null) {
+                        MainActivity.this.backgroundSurfaceView.onHostResume();
+                    }
+                    dispatchNativeVisibility(true);
+                }
+            }
+        };
+        IntentFilter screenFilter = new IntentFilter();
+        screenFilter.addAction(Intent.ACTION_SCREEN_OFF);
+        screenFilter.addAction(Intent.ACTION_SCREEN_ON);
+        registerReceiver(this.screenStateReceiver, screenFilter);
 
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override
@@ -246,26 +425,40 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        if (hasFocus && (this.hideStatusBarRequested || this.hideNavigationBarRequested)) {
-            applySystemBarsConfig(this.hideStatusBarRequested, this.hideNavigationBarRequested);
+        if (this.backgroundSurfaceView != null) {
+            this.backgroundSurfaceView.onHostWindowFocusChanged(hasFocus);
+        }
+        if (hasFocus) {
+            queryAndSyncDisplayRefreshRate(false);
+            if (this.hideStatusBarRequested || this.hideNavigationBarRequested) {
+                applySystemBarsConfig(this.hideStatusBarRequested, this.hideNavigationBarRequested);
+            }
         }
     }
 
     @Override
     public void onResume() {
         super.onResume();
+        queryAndSyncDisplayRefreshRate(true);
+        if (this.backgroundSurfaceView != null) {
+            this.backgroundSurfaceView.onHostResume();
+        }
         applySystemBarsConfig(this.hideStatusBarRequested, this.hideNavigationBarRequested);
         dispatchNativeVisibility(true);
     }
 
     @Override
     public void onPause() {
+        if (this.backgroundSurfaceView != null) {
+            this.backgroundSurfaceView.onHostPause();
+        }
         dispatchNativeVisibility(false);
         super.onPause();
         // Keep the single Web Audio + HTMLAudioElement playback clock running when the screen locks
         // or the user switches apps while FoliaPlaybackService is actively playing a track, while
-        // window.__FOLIA_NATIVE_VISIBLE__ = false strictly freezes all WebGL/Canvas/rAF visualizers.
-        if (FoliaPlaybackService.isPlaybackActive() && this.bridge != null && this.bridge.getWebView() != null) {
+        // window.__FOLIA_NATIVE_VISIBLE__ = false and backgroundSurfaceView.onHostPause() strictly
+        // freeze all native OpenGL and WebView visualizers at 0% GPU.
+        if (!FoliaPlaybackService.isNativeExoModeActive() && FoliaPlaybackService.isPlaybackActive() && this.bridge != null && this.bridge.getWebView() != null) {
             WebView webView = this.bridge.getWebView();
             webView.onResume();
             webView.resumeTimers();
@@ -274,12 +467,36 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     public void onStop() {
+        if (this.backgroundSurfaceView != null) {
+            this.backgroundSurfaceView.onHostPause();
+        }
         dispatchNativeVisibility(false);
         super.onStop();
-        if (FoliaPlaybackService.isPlaybackActive() && this.bridge != null && this.bridge.getWebView() != null) {
+        if (!FoliaPlaybackService.isNativeExoModeActive() && FoliaPlaybackService.isPlaybackActive() && this.bridge != null && this.bridge.getWebView() != null) {
             WebView webView = this.bridge.getWebView();
             webView.onResume();
             webView.resumeTimers();
         }
+    }
+
+    @Override
+    public void onDestroy() {
+        if (this.displayManager != null && this.displayListener != null) {
+            try {
+                this.displayManager.unregisterDisplayListener(this.displayListener);
+            } catch (Exception ignored) {
+                // Ignore if already unregistered
+            }
+            this.displayListener = null;
+        }
+        if (this.screenStateReceiver != null) {
+            try {
+                unregisterReceiver(this.screenStateReceiver);
+            } catch (Exception ignored) {
+                // Ignore if already unregistered
+            }
+            this.screenStateReceiver = null;
+        }
+        super.onDestroy();
     }
 }

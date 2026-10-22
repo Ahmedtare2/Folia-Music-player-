@@ -910,7 +910,7 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
             data-hide-navigation-bar={effectiveSystemBars.hideNavigationBar ? 'true' : 'false'}
             className={`fixed inset-0 z-40 flex flex-col overflow-hidden text-zinc-100 select-none ${
                 isPlayerExpanded
-                    ? ((navState.playerDisplayMode === 'stage' || navState.playerDisplayMode === 'lyrics') ? 'bg-transparent' : 'bg-[#060609]')
+                    ? ((hasAndroidNativeVisualizerBridge() || navState.playerDisplayMode === 'stage' || navState.playerDisplayMode === 'lyrics') ? 'bg-transparent' : 'bg-[#060609]')
                     : 'bg-[#060609]'
             }`}
             style={{

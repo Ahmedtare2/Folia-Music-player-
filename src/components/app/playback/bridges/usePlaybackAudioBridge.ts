@@ -12,7 +12,14 @@ import { buildPlaybackGraph } from '../../../../services/playbackGraph';
 import { cachePlayedTrackAssets } from '../../../../services/playedTrackCache';
 import { markProgrammaticPause, registerPlaybackFadeGraph } from '../../../../services/playbackFade';
 import { rampGain, type AutomixDeckChain } from '../../../../services/automix/crossfadeGraph';
-import { isAndroidSafStreamUrl } from '../../../../services/android/foliaAndroidBridge';
+import {
+    bindAudioElementToNativeExoPlayer,
+    isAndroidSafStreamUrl,
+    loadAndroidNativeTrack,
+    setAndroidNativeExoPlayerActive,
+    shouldRouteToAndroidNativeExoPlayer,
+} from '../../../../services/android/foliaAndroidBridge';
+import { getSongAlbumLabel, getSongArtistLabel } from '../../../../services/onlineMusic/songMetadata';
 import { setStatusMessage as setStatusMsg } from '../../../../stores/useStatusMessageStore';
 import { useAudioSettingsStore } from '../../../../stores/useAudioSettingsStore';
 import { setPlayerState } from '../../../../stores/usePlaybackStore';
@@ -92,6 +99,26 @@ export function usePlaybackAudioBridge({
         automixEnabled,
         stemSeparationEnabled,
     });
+    const useNativeExoPlayer = shouldRouteToAndroidNativeExoPlayer({
+        audioSrc,
+        automixEnabled,
+        stemSeparationEnabled,
+        equalizerEnabled: !shouldBypassDsp,
+    });
+    const lastLoadedExoSrcRef = useRef<string | null>(null);
+
+    useEffect(() => {
+        setAndroidNativeExoPlayerActive(useNativeExoPlayer);
+        bindAudioElementToNativeExoPlayer(audioRef.current, useNativeExoPlayer);
+        if (!useNativeExoPlayer) {
+            lastLoadedExoSrcRef.current = null;
+        }
+        return () => {
+            if (!useNativeExoPlayer && audioRef.current) {
+                bindAudioElementToNativeExoPlayer(audioRef.current, false);
+            }
+        };
+    }, [audioRef, useNativeExoPlayer]);
 
     // Recalculates source-specific gain after the audio graph or playback settings become ready.
     const applyReplayGain = useCallback(() => {
@@ -283,6 +310,38 @@ export function usePlaybackAudioBridge({
 
     useEffect(() => {
         if (audioSrc && audioRef.current) {
+            if (useNativeExoPlayer) {
+                bindAudioElementToNativeExoPlayer(audioRef.current, true);
+                const autoPlayWanted = Boolean(shouldAutoPlayRef.current && !isAutoplayHeld && !suppressAutoplayRef.current);
+                if (lastLoadedExoSrcRef.current !== audioSrc) {
+                    lastLoadedExoSrcRef.current = audioSrc;
+                    if (suppressAutoplayRef.current) {
+                        suppressAutoplayRef.current = false;
+                        shouldAutoPlayRef.current = false;
+                        setPlayerState(PlayerState.PAUSED);
+                    } else if (shouldAutoPlayRef.current) {
+                        shouldAutoPlayRef.current = false;
+                        setPlayerState(PlayerState.PLAYING);
+                    }
+                    void loadAndroidNativeTrack({
+                        url: audioSrc,
+                        trackId: currentSong ? String(currentSong.id) : '',
+                        title: currentSong?.name || 'Folia',
+                        artist: currentSong ? (getSongArtistLabel(currentSong) || '') : '',
+                        album: currentSong ? (getSongAlbumLabel(currentSong) || '') : '',
+                        artworkUrl: getCoverUrl(),
+                        autoPlay: autoPlayWanted,
+                        startPositionMs: 0,
+                        volume: getTargetPlaybackVolume(),
+                        playbackSpeed: 1.0,
+                    });
+                } else if (autoPlayWanted) {
+                    shouldAutoPlayRef.current = false;
+                    setPlayerState(PlayerState.PLAYING);
+                    void audioRef.current.play();
+                }
+                return;
+            }
             if (audioRef.current.getAttribute('src') !== audioSrc) return;
             if (audioRef.current.error) return;
 
@@ -339,7 +398,7 @@ export function usePlaybackAudioBridge({
                 }
             }
         }
-    }, [audioContextRef, audioRef, audioSrc, currentSong, getTargetPlaybackVolume, isAutoplayHeld, isLyricsLoading, setPlayerState, setStatusMsg, setupAudioAnalyzer, shouldAutoPlayRef, suppressAutoplayRef, syncOutputGain, t]);
+    }, [audioContextRef, audioRef, audioSrc, currentSong, getCoverUrl, getTargetPlaybackVolume, isAutoplayHeld, isLyricsLoading, setPlayerState, setStatusMsg, setupAudioAnalyzer, shouldAutoPlayRef, suppressAutoplayRef, syncOutputGain, t, useNativeExoPlayer]);
 
     const adoptActiveDeckSource = useCallback((src: string) => {
         previousAudioSrcRef.current = src;

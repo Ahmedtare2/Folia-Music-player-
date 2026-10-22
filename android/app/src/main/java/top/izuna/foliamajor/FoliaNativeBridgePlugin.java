@@ -6,7 +6,10 @@ import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.UriPermission;
+import android.content.ContentValues;
 import android.database.Cursor;
+import android.database.sqlite.SQLiteDatabase;
+import android.database.sqlite.SQLiteOpenHelper;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
@@ -75,11 +78,14 @@ public class FoliaNativeBridgePlugin extends Plugin {
     private final ExecutorService playbackExecutor = Executors.newFixedThreadPool(2);
     private final ExecutorService ioExecutor = Executors.newFixedThreadPool(4);
 
-    public static final String MEDIA_CACHE_ROOT_DIR = "media_cache";
+    public static final String MEDIA_CACHE_ROOT_DIR = "folia_media_cache";
+    public static final String LEGACY_MEDIA_CACHE_ROOT_DIR = "media_cache";
     public static final String CACHE_NAMESPACE_COVERS = "covers";
     public static final String CACHE_NAMESPACE_LYRICS = "lyrics";
     public static final String CACHE_NAMESPACE_PALETTES = "palettes";
     public static final String CACHE_NAMESPACE_INDEX = "index";
+    @Nullable
+    private static volatile PaletteIndexSqliteHelper paletteDbHelper = null;
 
     private static final String[] TREE_PROJECTION = new String[] {
         DocumentsContract.Document.COLUMN_DOCUMENT_ID,
@@ -106,6 +112,22 @@ public class FoliaNativeBridgePlugin extends Plugin {
         new File(root, CACHE_NAMESPACE_LYRICS).mkdirs();
         new File(root, CACHE_NAMESPACE_PALETTES).mkdirs();
         new File(root, CACHE_NAMESPACE_INDEX).mkdirs();
+        getPaletteDbHelper(context);
+    }
+
+    @Nullable
+    private static PaletteIndexSqliteHelper getPaletteDbHelper(@Nullable Context context) {
+        if (context == null) return null;
+        if (paletteDbHelper == null) {
+            synchronized (FoliaNativeBridgePlugin.class) {
+                if (paletteDbHelper == null) {
+                    File indexDir = getMediaCacheNamespaceDir(context.getApplicationContext(), CACHE_NAMESPACE_INDEX);
+                    File dbFile = new File(indexDir, "palette_cache.db");
+                    paletteDbHelper = new PaletteIndexSqliteHelper(context.getApplicationContext(), dbFile.getAbsolutePath());
+                }
+            }
+        }
+        return paletteDbHelper;
     }
 
     public static File getMediaCacheNamespaceDir(Context context, String namespace) {
@@ -134,6 +156,40 @@ public class FoliaNativeBridgePlugin extends Plugin {
             data.put("seekTimeMs", seekTimeMs);
         }
         instance.notifyListeners("mediaAction", data, true);
+    }
+
+    public static void dispatchPlaybackClockAnchor(FoliaPlaybackService.PlaybackClockSnapshot snapshot) {
+        if (snapshot == null || !MainActivity.isMainActivityForegroundVisible()) {
+            return;
+        }
+        FoliaNativeBridgePlugin instance = activeInstanceRef.get();
+        if (instance == null) return;
+        JSObject data = new JSObject();
+        data.put("trackId", snapshot.trackId);
+        data.put("positionMs", snapshot.positionMs);
+        data.put("durationMs", snapshot.durationMs);
+        data.put("bufferedPositionMs", snapshot.bufferedPositionMs);
+        data.put("elapsedRealtimeMs", snapshot.elapsedRealtimeMs);
+        data.put("isPlaying", snapshot.isPlaying);
+        data.put("playbackSpeed", snapshot.playbackSpeed);
+        data.put("playbackState", snapshot.playbackState);
+        data.put("ended", snapshot.ended);
+        data.put("reason", snapshot.reason);
+        instance.notifyListeners("playbackClockAnchor", data, true);
+    }
+
+    public static void dispatchDisplayRefreshRateChanged(float refreshRateHz) {
+        FoliaNativeBridgePlugin instance = activeInstanceRef.get();
+        if (instance == null) return;
+        float safeHz = (Float.isNaN(refreshRateHz) || Float.isInfinite(refreshRateHz) || refreshRateHz < 30.0f)
+            ? 60.0f
+            : Math.min(240.0f, refreshRateHz);
+        int roundedHz = Math.round(safeHz);
+        JSObject data = new JSObject();
+        data.put("refreshRate", roundedHz);
+        data.put("rawRefreshRate", safeHz);
+        data.put("vsyncIntervalMs", 1000.0f / safeHz);
+        instance.notifyListeners("displayRefreshRateChanged", data, true);
     }
 
     private static boolean isAllowedLyricProxyHost(@Nullable String hostname) {
@@ -416,21 +472,76 @@ public class FoliaNativeBridgePlugin extends Plugin {
      * representative color palettes in context.getFilesDir()/media_cache/palettes/<digest>.json.
      */
     @PluginMethod
+    public void getCachedTrackPalette(PluginCall call) {
+        final String trackId = call.getString("trackId", "");
+        final String albumId = call.getString("albumId", "");
+        final String contentUri = call.getString("contentUri", "");
+        final String assetId = call.getString("assetId", "");
+        final boolean applyToVisualizer = Boolean.TRUE.equals(call.getBoolean("applyToVisualizer", false));
+        final Integer transitionParam = call.getInt("transitionMs", 900);
+        final int transitionMs = transitionParam != null ? Math.max(0, Math.min(5000, transitionParam)) : 900;
+        final Context context = getContext();
+
+        ioExecutor.execute(() -> {
+            CoverMipmapAndPaletteResult hit = lookupPaletteAndCoversByKeys(
+                context,
+                contentUri,
+                trackId,
+                albumId,
+                assetId
+            );
+            if (hit == null) {
+                JSObject miss = new JSObject();
+                miss.put("ok", false);
+                miss.put("hit", false);
+                call.resolve(miss);
+                return;
+            }
+            if (applyToVisualizer) {
+                FoliaBackgroundSurfaceView surfaceView = resolveBackgroundSurfaceView();
+                if (surfaceView != null && !hit.vibrantColors.isEmpty()) {
+                    List<String> combined = new ArrayList<>(hit.vibrantColors);
+                    for (String rep : hit.representativeColors) {
+                        if (combined.size() >= 6) break;
+                        if (!combined.contains(rep)) combined.add(rep);
+                    }
+                    surfaceView.setVisualizerPalette(combined.toArray(new String[0]), transitionMs);
+                }
+            }
+            JSObject out = hit.toJSObject();
+            out.put("hit", true);
+            call.resolve(out);
+        });
+    }
+
+    @PluginMethod
     public void cacheCoverAndExtractPalette(PluginCall call) {
         final String assetIdParam = call.getString("assetId", "");
+        final String trackIdParam = call.getString("trackId", "");
+        final String albumIdParam = call.getString("albumId", "");
         final String dataBase64 = call.getString("dataBase64", "");
         final String contentUriStr = call.getString("contentUri", "");
         final Context context = getContext();
 
         ioExecutor.execute(() -> {
             try {
-                String existingDigest = extractHexDigest(assetIdParam);
-                if (existingDigest != null && (dataBase64 == null || dataBase64.isEmpty()) && (contentUriStr == null || contentUriStr.isEmpty())) {
-                    CoverMipmapAndPaletteResult cached = readExistingCoverMipmapsAndPalette(context, existingDigest);
-                    if (cached != null) {
-                        call.resolve(cached.toJSObject());
-                        return;
-                    }
+                CoverMipmapAndPaletteResult existingByKey = lookupPaletteAndCoversByKeys(
+                    context,
+                    contentUriStr,
+                    trackIdParam,
+                    albumIdParam,
+                    assetIdParam
+                );
+                if (existingByKey != null) {
+                    indexPaletteAndCoversForKeys(
+                        context,
+                        existingByKey,
+                        contentUriStr,
+                        trackIdParam,
+                        albumIdParam
+                    );
+                    call.resolve(existingByKey.toJSObject());
+                    return;
                 }
 
                 byte[] rawBytes = null;
@@ -464,6 +575,13 @@ public class FoliaNativeBridgePlugin extends Plugin {
                     : sha256AssetId(rawBytes);
                 CoverMipmapAndPaletteResult result = ensureCoverMipmapsAndPaletteOnDisk(context, assetId, rawBytes);
                 if (result != null) {
+                    indexPaletteAndCoversForKeys(
+                        context,
+                        result,
+                        contentUriStr,
+                        trackIdParam,
+                        albumIdParam
+                    );
                     call.resolve(result.toJSObject());
                 } else {
                     JSObject empty = new JSObject();
@@ -1025,6 +1143,8 @@ public class FoliaNativeBridgePlugin extends Plugin {
     @PluginMethod
     public void extractAudioMetadata(PluginCall call) {
         final String rawContentUri = call.getString("contentUri", "");
+        final String trackIdParam = call.getString("trackId", "");
+        final String albumIdParam = call.getString("albumId", "");
         final boolean includeCover = Boolean.TRUE.equals(call.getBoolean("includeCover", false));
         final int maxCoverDimension = Math.max(128, call.getInt("maxCoverDimension", 512));
 
@@ -1081,36 +1201,73 @@ public class FoliaNativeBridgePlugin extends Plugin {
                 int year = (int) parseLeadingLong(yearStr, 0L);
                 if (year > 0) res.put("year", year);
 
-                if (includeCover) {
-                    byte[] rawArt = retriever.getEmbeddedPicture();
-                    if (rawArt != null && rawArt.length > 0) {
-                        res.put("hasEmbeddedCover", true);
-                        EncodedCoverResult coverResult = downscaleCoverIfNeeded(rawArt, maxCoverDimension);
-                        if (coverResult != null) {
-                            String coverAssetId = sha256AssetId(coverResult.bytes);
-                            res.put("coverBase64", Base64.encodeToString(coverResult.bytes, Base64.NO_WRAP));
-                            res.put("coverMimeType", coverResult.mimeType);
-                            res.put("coverAssetId", coverAssetId);
+                String resolvedAlbumLookupKey = (albumIdParam != null && !albumIdParam.trim().isEmpty())
+                    ? albumIdParam.trim()
+                    : ((album != null && !album.trim().isEmpty())
+                        ? ("album:" + (albumArtist != null && !albumArtist.trim().isEmpty() ? albumArtist.trim() : (artist != null ? artist.trim() : "")) + "::" + album.trim()).toLowerCase(Locale.ROOT)
+                        : "");
 
-                            // Extract and persist 256x256 WebP (grids/Bravais walls) + 1024x1024 WebP (player)
-                            // and Monet/palette colors on disk once so runtime never decodes images on CPU.
-                            CoverMipmapAndPaletteResult mipmapResult =
-                                ensureCoverMipmapsAndPaletteOnDisk(context, coverAssetId, rawArt);
-                            if (mipmapResult != null) {
-                                JSArray vibrantArr = new JSArray();
-                                for (String hex : mipmapResult.vibrantColors) {
-                                    vibrantArr.put(hex);
-                                }
-                                JSArray repArr = new JSArray();
-                                for (String hex : mipmapResult.representativeColors) {
-                                    repArr.put(hex);
-                                }
-                                res.put("vibrantColors", vibrantArr);
-                                res.put("representativeColors", repArr);
-                            }
-                        }
+                if (includeCover) {
+                    // Check persistent SQLite/JSON index in folia_media_cache first so previously scanned
+                    // tracks or albums return 256x256 + 1024x1024 WebP paths and RGB palettes with zero CPU bitmap decoding.
+                    CoverMipmapAndPaletteResult cachedByLookup = lookupPaletteAndCoversByKeys(
+                        context,
+                        rawContentUri,
+                        trackIdParam,
+                        resolvedAlbumLookupKey,
+                        null
+                    );
+                    if (cachedByLookup != null) {
+                        res.put("hasEmbeddedCover", true);
+                        res.put("coverAssetId", cachedByLookup.assetId);
+                        res.put("cover256Path", cachedByLookup.cover256Path);
+                        res.put("cover1024Path", cachedByLookup.cover1024Path);
+                        JSArray vibrantArr = new JSArray();
+                        for (String hex : cachedByLookup.vibrantColors) vibrantArr.put(hex);
+                        JSArray repArr = new JSArray();
+                        for (String hex : cachedByLookup.representativeColors) repArr.put(hex);
+                        res.put("vibrantColors", vibrantArr);
+                        res.put("representativeColors", repArr);
                     } else {
-                        res.put("hasEmbeddedCover", false);
+                        byte[] rawArt = retriever.getEmbeddedPicture();
+                        if (rawArt != null && rawArt.length > 0) {
+                            res.put("hasEmbeddedCover", true);
+                            EncodedCoverResult coverResult = downscaleCoverIfNeeded(rawArt, maxCoverDimension);
+                            if (coverResult != null) {
+                                String coverAssetId = sha256AssetId(coverResult.bytes);
+                                res.put("coverBase64", Base64.encodeToString(coverResult.bytes, Base64.NO_WRAP));
+                                res.put("coverMimeType", coverResult.mimeType);
+                                res.put("coverAssetId", coverAssetId);
+
+                                // Extract and persist 256x256 WebP (lists/Bravais grids) + 1024x1024 WebP (player)
+                                // and RGB palette colors in folia_media_cache (SQLite + JSON) once on background thread.
+                                CoverMipmapAndPaletteResult mipmapResult =
+                                    ensureCoverMipmapsAndPaletteOnDisk(context, coverAssetId, rawArt);
+                                if (mipmapResult != null) {
+                                    indexPaletteAndCoversForKeys(
+                                        context,
+                                        mipmapResult,
+                                        rawContentUri,
+                                        trackIdParam,
+                                        resolvedAlbumLookupKey
+                                    );
+                                    res.put("cover256Path", mipmapResult.cover256Path);
+                                    res.put("cover1024Path", mipmapResult.cover1024Path);
+                                    JSArray vibrantArr = new JSArray();
+                                    for (String hex : mipmapResult.vibrantColors) {
+                                        vibrantArr.put(hex);
+                                    }
+                                    JSArray repArr = new JSArray();
+                                    for (String hex : mipmapResult.representativeColors) {
+                                        repArr.put(hex);
+                                    }
+                                    res.put("vibrantColors", vibrantArr);
+                                    res.put("representativeColors", repArr);
+                                }
+                            }
+                        } else {
+                            res.put("hasEmbeddedCover", false);
+                        }
                     }
                 }
 
@@ -1189,6 +1346,254 @@ public class FoliaNativeBridgePlugin extends Plugin {
             // Service may not be running yet.
         }
         call.resolve();
+    }
+
+    @PluginMethod
+    public void loadTrack(PluginCall call) {
+        Context context = getContext();
+        String uri = call.getString("url", call.getString("uri", ""));
+        if (uri == null || uri.trim().isEmpty()) {
+            call.reject("Missing url/uri for loadTrack");
+            return;
+        }
+        String trackId = call.getString("trackId", "");
+        String title = call.getString("title", "Folia");
+        String artist = call.getString("artist", "");
+        String album = call.getString("album", "");
+        String artworkUrl = call.getString("artworkUrl", "");
+        boolean autoPlay = Boolean.TRUE.equals(call.getBoolean("autoPlay", true));
+        Long startPosParam = call.getLong("startPositionMs", 0L);
+        Float volumeParam = call.getFloat("volume", 1.0f);
+        Float speedParam = call.getFloat("playbackSpeed", 1.0f);
+
+        long startPositionMs = startPosParam != null ? Math.max(0L, startPosParam) : 0L;
+        float volume = volumeParam != null ? Math.max(0f, Math.min(1f, volumeParam)) : 1.0f;
+        float playbackSpeed = speedParam != null && speedParam > 0f ? speedParam : 1.0f;
+
+        FoliaPlaybackService.commandLoadTrack(
+            context,
+            uri.trim(),
+            trackId,
+            title,
+            artist,
+            album,
+            artworkUrl,
+            autoPlay,
+            startPositionMs,
+            volume,
+            playbackSpeed
+        );
+
+        JSObject res = new JSObject();
+        res.put("ok", true);
+        res.put("trackId", trackId != null ? trackId : "");
+        res.put("positionMs", startPositionMs);
+        res.put("elapsedRealtimeMs", android.os.SystemClock.elapsedRealtime());
+        res.put("isPlaying", autoPlay);
+        res.put("playbackSpeed", playbackSpeed);
+        call.resolve(res);
+    }
+
+    @PluginMethod
+    public void play(PluginCall call) {
+        FoliaPlaybackService.commandPlay(getContext());
+        FoliaPlaybackService.PlaybackClockSnapshot snap = FoliaPlaybackService.getPlaybackClockSnapshot();
+        JSObject res = new JSObject();
+        res.put("ok", true);
+        res.put("positionMs", snap.positionMs);
+        res.put("durationMs", snap.durationMs);
+        res.put("elapsedRealtimeMs", android.os.SystemClock.elapsedRealtime());
+        res.put("isPlaying", true);
+        res.put("playbackSpeed", snap.playbackSpeed);
+        call.resolve(res);
+    }
+
+    @PluginMethod
+    public void pause(PluginCall call) {
+        FoliaPlaybackService.commandPause(getContext());
+        FoliaPlaybackService.PlaybackClockSnapshot snap = FoliaPlaybackService.getPlaybackClockSnapshot();
+        JSObject res = new JSObject();
+        res.put("ok", true);
+        res.put("positionMs", snap.positionMs);
+        res.put("durationMs", snap.durationMs);
+        res.put("elapsedRealtimeMs", android.os.SystemClock.elapsedRealtime());
+        res.put("isPlaying", false);
+        res.put("playbackSpeed", snap.playbackSpeed);
+        call.resolve(res);
+    }
+
+    @PluginMethod
+    public void seekTo(PluginCall call) {
+        Long posParam = call.getLong("positionMs", 0L);
+        long positionMs = posParam != null ? Math.max(0L, posParam) : 0L;
+        FoliaPlaybackService.commandSeekTo(getContext(), positionMs);
+        FoliaPlaybackService.PlaybackClockSnapshot snap = FoliaPlaybackService.getPlaybackClockSnapshot();
+        JSObject res = new JSObject();
+        res.put("ok", true);
+        res.put("positionMs", positionMs);
+        res.put("durationMs", snap.durationMs);
+        res.put("elapsedRealtimeMs", android.os.SystemClock.elapsedRealtime());
+        res.put("isPlaying", snap.isPlaying);
+        res.put("playbackSpeed", snap.playbackSpeed);
+        call.resolve(res);
+    }
+
+    @PluginMethod
+    public void setVolume(PluginCall call) {
+        Float volParam = call.getFloat("volume", 1.0f);
+        float volume = volParam != null ? Math.max(0f, Math.min(1f, volParam)) : 1.0f;
+        FoliaPlaybackService.commandSetVolume(volume);
+        JSObject res = new JSObject();
+        res.put("ok", true);
+        res.put("volume", volume);
+        call.resolve(res);
+    }
+
+    @PluginMethod
+    public void setPlaybackSpeed(PluginCall call) {
+        Float speedParam = call.getFloat("playbackSpeed", call.getFloat("speed", 1.0f));
+        float speed = speedParam != null && speedParam > 0f ? Math.max(0.25f, Math.min(4.0f, speedParam)) : 1.0f;
+        FoliaPlaybackService.commandSetPlaybackSpeed(speed);
+        FoliaPlaybackService.PlaybackClockSnapshot snap = FoliaPlaybackService.getPlaybackClockSnapshot();
+        JSObject res = new JSObject();
+        res.put("ok", true);
+        res.put("positionMs", snap.positionMs);
+        res.put("durationMs", snap.durationMs);
+        res.put("elapsedRealtimeMs", android.os.SystemClock.elapsedRealtime());
+        res.put("isPlaying", snap.isPlaying);
+        res.put("playbackSpeed", speed);
+        call.resolve(res);
+    }
+
+    @PluginMethod
+    public void getPlaybackPosition(PluginCall call) {
+        FoliaPlaybackService.PlaybackClockSnapshot snap = FoliaPlaybackService.getPlaybackClockSnapshot();
+        JSObject res = new JSObject();
+        res.put("ok", true);
+        res.put("trackId", snap.trackId);
+        res.put("positionMs", snap.positionMs);
+        res.put("durationMs", snap.durationMs);
+        res.put("bufferedPositionMs", snap.bufferedPositionMs);
+        res.put("elapsedRealtimeMs", snap.elapsedRealtimeMs);
+        res.put("isPlaying", snap.isPlaying);
+        res.put("playbackSpeed", snap.playbackSpeed);
+        res.put("playbackState", snap.playbackState);
+        res.put("ended", snap.ended);
+        call.resolve(res);
+    }
+
+    @Nullable
+    private FoliaBackgroundSurfaceView resolveBackgroundSurfaceView() {
+        Activity activity = getActivity();
+        if (activity instanceof MainActivity) {
+            return ((MainActivity) activity).getBackgroundSurfaceView();
+        }
+        return null;
+    }
+
+    @PluginMethod
+    public void getDisplayRefreshRate(PluginCall call) {
+        float detectedHz = 60.0f;
+        Activity activity = getActivity();
+        if (activity instanceof MainActivity) {
+            detectedHz = ((MainActivity) activity).queryAndSyncDisplayRefreshRate(false);
+        }
+        int roundedHz = Math.max(30, Math.min(240, Math.round(detectedHz)));
+        JSObject res = new JSObject();
+        res.put("refreshRate", roundedHz);
+        res.put("rawRefreshRate", detectedHz);
+        res.put("vsyncIntervalMs", 1000.0f / Math.max(30.0f, detectedHz));
+        call.resolve(res);
+    }
+
+    @PluginMethod
+    public void setNativeVisualizerState(PluginCall call) {
+        boolean enabled = Boolean.TRUE.equals(call.getBoolean("enabled", true));
+        boolean visible = Boolean.TRUE.equals(call.getBoolean("visible", true));
+        Integer fpsParam = call.getInt("fps", 0);
+        Integer dividerParam = call.getInt("vsyncDivider", 0);
+        Float dimParam = call.getFloat("dim", 0.28f);
+        int fps = fpsParam != null ? Math.max(0, Math.min(240, fpsParam)) : 0;
+        int vsyncDivider = dividerParam != null ? Math.max(0, Math.min(2, dividerParam)) : 0;
+        float dim = dimParam != null ? Math.max(0.0f, Math.min(0.92f, dimParam)) : 0.28f;
+
+        FoliaBackgroundSurfaceView surfaceView = resolveBackgroundSurfaceView();
+        float refreshRateHz = 60.0f;
+        Activity activity = getActivity();
+        if (activity instanceof MainActivity) {
+            refreshRateHz = ((MainActivity) activity).getDisplayRefreshRate();
+        }
+        if (surfaceView != null) {
+            surfaceView.onDisplayRefreshRateChanged(refreshRateHz);
+            surfaceView.setVisualizerState(enabled, visible, fps, dim, vsyncDivider);
+        }
+
+        int effectiveDivider = surfaceView != null
+            ? surfaceView.getEffectiveVsyncDivider()
+            : (vsyncDivider == 1 ? 1 : 2);
+        int effectiveFps = (enabled && visible)
+            ? Math.max(15, Math.round(refreshRateHz / (float) effectiveDivider))
+            : 0;
+
+        JSObject res = new JSObject();
+        res.put("ok", surfaceView != null);
+        res.put("enabled", enabled);
+        res.put("visible", visible);
+        res.put("fps", fps > 0 ? fps : effectiveFps);
+        res.put("vsyncDivider", effectiveDivider);
+        res.put("refreshRate", Math.round(refreshRateHz));
+        res.put("dim", dim);
+        call.resolve(res);
+    }
+
+    @PluginMethod
+    public void setNativeVisualizerPalette(PluginCall call) {
+        JSArray colorsArr = call.getArray("colors");
+        Integer transitionParam = call.getInt("transitionMs", 900);
+        int transitionMs = transitionParam != null ? Math.max(0, Math.min(5000, transitionParam)) : 900;
+
+        List<String> colorList = new ArrayList<>();
+        if (colorsArr != null) {
+            for (int i = 0; i < colorsArr.length(); i++) {
+                String c = colorsArr.optString(i, null);
+                if (c != null && !c.trim().isEmpty()) {
+                    colorList.add(c.trim());
+                }
+            }
+        }
+        String[] hexColors = colorList.toArray(new String[0]);
+
+        FoliaBackgroundSurfaceView surfaceView = resolveBackgroundSurfaceView();
+        if (surfaceView != null && hexColors.length > 0) {
+            surfaceView.setVisualizerPalette(hexColors, transitionMs);
+        }
+
+        JSObject res = new JSObject();
+        res.put("ok", surfaceView != null && hexColors.length > 0);
+        res.put("colorCount", hexColors.length);
+        res.put("transitionMs", transitionMs);
+        call.resolve(res);
+    }
+
+    @PluginMethod
+    public void setNativeVisualizerEnergy(PluginCall call) {
+        Float bassParam = call.getFloat("bass", 0.0f);
+        Float midParam = call.getFloat("mid", 0.0f);
+        Float highParam = call.getFloat("high", 0.0f);
+        boolean isPlaying = Boolean.TRUE.equals(call.getBoolean("isPlaying", false));
+
+        float bass = bassParam != null ? bassParam : 0.0f;
+        float mid = midParam != null ? midParam : 0.0f;
+        float high = highParam != null ? highParam : 0.0f;
+
+        FoliaBackgroundSurfaceView surfaceView = resolveBackgroundSurfaceView();
+        if (surfaceView != null) {
+            surfaceView.setVisualizerEnergy(bass, mid, high, isPlaying);
+        }
+
+        JSObject res = new JSObject();
+        res.put("ok", surfaceView != null);
+        call.resolve(res);
     }
 
     private static long parseLeadingLong(@Nullable String raw, long fallback) {
@@ -1648,6 +2053,149 @@ public class FoliaNativeBridgePlugin extends Plugin {
             }
         }
         return list;
+    }
+
+    @Nullable
+    private static CoverMipmapAndPaletteResult lookupPaletteAndCoversByKeys(
+        @Nullable Context context,
+        @Nullable String contentUri,
+        @Nullable String trackId,
+        @Nullable String albumId,
+        @Nullable String assetId
+    ) {
+        if (context == null) return null;
+        if (assetId != null && !assetId.isEmpty()) {
+            String digest = extractHexDigest(assetId);
+            if (digest != null) {
+                CoverMipmapAndPaletteResult direct = readExistingCoverMipmapsAndPalette(context, digest);
+                if (direct != null) return direct;
+            }
+        }
+        PaletteIndexSqliteHelper dbHelper = getPaletteDbHelper(context);
+        if (dbHelper == null) return null;
+        String[] candidates = new String[] {
+            trackId != null && !trackId.trim().isEmpty() ? "track:" + trackId.trim() : null,
+            contentUri != null && !contentUri.trim().isEmpty() ? "uri:" + contentUri.trim() : null,
+            albumId != null && !albumId.trim().isEmpty() ? "album:" + albumId.trim() : null,
+            assetId != null && !assetId.trim().isEmpty() ? "asset:" + assetId.trim() : null
+        };
+        for (String key : candidates) {
+            if (key == null) continue;
+            CoverMipmapAndPaletteResult hit = dbHelper.queryByLookupKey(key);
+            if (hit != null) {
+                return hit;
+            }
+        }
+        return null;
+    }
+
+    private static void indexPaletteAndCoversForKeys(
+        @Nullable Context context,
+        @Nullable CoverMipmapAndPaletteResult result,
+        @Nullable String contentUri,
+        @Nullable String trackId,
+        @Nullable String albumId
+    ) {
+        if (context == null || result == null) return;
+        PaletteIndexSqliteHelper dbHelper = getPaletteDbHelper(context);
+        if (dbHelper == null) return;
+        if (result.assetId != null && !result.assetId.isEmpty()) {
+            dbHelper.upsertLookupKey("asset:" + result.assetId, result);
+        }
+        if (trackId != null && !trackId.trim().isEmpty()) {
+            dbHelper.upsertLookupKey("track:" + trackId.trim(), result);
+        }
+        if (contentUri != null && !contentUri.trim().isEmpty()) {
+            dbHelper.upsertLookupKey("uri:" + contentUri.trim(), result);
+        }
+        if (albumId != null && !albumId.trim().isEmpty()) {
+            dbHelper.upsertLookupKey("album:" + albumId.trim(), result);
+        }
+    }
+
+    private static final class PaletteIndexSqliteHelper extends SQLiteOpenHelper {
+        private static final int DB_VERSION = 1;
+        private static final String TABLE_NAME = "palette_index";
+
+        PaletteIndexSqliteHelper(Context context, String dbPath) {
+            super(context, dbPath, null, DB_VERSION);
+        }
+
+        @Override
+        public void onCreate(SQLiteDatabase db) {
+            db.execSQL(
+                "CREATE TABLE IF NOT EXISTS " + TABLE_NAME + " ("
+                    + "lookup_key TEXT PRIMARY KEY,"
+                    + "asset_id TEXT NOT NULL,"
+                    + "cover_256_path TEXT NOT NULL,"
+                    + "cover_1024_path TEXT NOT NULL,"
+                    + "vibrant_json TEXT NOT NULL,"
+                    + "representative_json TEXT NOT NULL,"
+                    + "updated_at INTEGER NOT NULL"
+                    + ")"
+            );
+        }
+
+        @Override
+        public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
+            onCreate(db);
+        }
+
+        synchronized void upsertLookupKey(String lookupKey, CoverMipmapAndPaletteResult record) {
+            if (lookupKey == null || lookupKey.isEmpty() || record == null) return;
+            try {
+                SQLiteDatabase db = getWritableDatabase();
+                ContentValues cv = new ContentValues();
+                cv.put("lookup_key", lookupKey);
+                cv.put("asset_id", record.assetId);
+                cv.put("cover_256_path", record.cover256Path);
+                cv.put("cover_1024_path", record.cover1024Path);
+                cv.put("vibrant_json", new JSONArray(record.vibrantColors).toString());
+                cv.put("representative_json", new JSONArray(record.representativeColors).toString());
+                cv.put("updated_at", System.currentTimeMillis());
+                db.insertWithOnConflict(TABLE_NAME, null, cv, SQLiteDatabase.CONFLICT_REPLACE);
+            } catch (Exception ignored) {
+                // Ignore SQLite write exception
+            }
+        }
+
+        @Nullable
+        synchronized CoverMipmapAndPaletteResult queryByLookupKey(String lookupKey) {
+            if (lookupKey == null || lookupKey.isEmpty()) return null;
+            try {
+                SQLiteDatabase db = getReadableDatabase();
+                try (Cursor c = db.query(
+                    TABLE_NAME,
+                    new String[] { "asset_id", "cover_256_path", "cover_1024_path", "vibrant_json", "representative_json" },
+                    "lookup_key = ?",
+                    new String[] { lookupKey },
+                    null,
+                    null,
+                    null,
+                    "1"
+                )) {
+                    if (c != null && c.moveToFirst()) {
+                        String assetId = c.getString(0);
+                        String cover256 = c.getString(1);
+                        String cover1024 = c.getString(2);
+                        String vibrantStr = c.getString(3);
+                        String repStr = c.getString(4);
+                        if (cover256 != null && cover1024 != null
+                            && new File(cover256).exists()
+                            && new File(cover1024).exists()) {
+                            List<String> vibrant = jsonArrayToStringList(new JSONArray(vibrantStr));
+                            List<String> rep = jsonArrayToStringList(new JSONArray(repStr));
+                            if (!vibrant.isEmpty() || !rep.isEmpty()) {
+                                return new CoverMipmapAndPaletteResult(assetId, cover256, cover1024, vibrant, rep);
+                            }
+                        }
+                    }
+                }
+            } catch (Exception ignored) {
+                // Fall through
+            }
+            return null;
+        }
     }
 
     private static final class CoverMipmapAndPaletteResult {

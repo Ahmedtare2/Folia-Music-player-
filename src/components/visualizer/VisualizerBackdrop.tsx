@@ -8,6 +8,7 @@ import VisualizerBackgroundTransition from './styleTransition/VisualizerBackgrou
 import type { LayerTransition } from './styleTransition/layerTransition';
 import { getSizedCoverUrl } from '../../utils/coverUrl';
 import { isMainAppSurface } from '../../utils/appSurface';
+import { hasAndroidNativeVisualizerBridge } from '../../services/android/foliaAndroidBridge';
 import { FoliumStageLayerSlot } from '../../mods/folium/registries/stageLayers';
 
 // src/components/visualizer/VisualizerBackdrop.tsx
@@ -67,6 +68,7 @@ export const VisualizerBackdropLayers: React.FC<VisualizerBackdropLayersProps> =
 }) => {
     const staticMode = sharedProps?.staticMode ?? false;
     const paused = sharedProps?.paused ?? false;
+    const disableWebViewBackgroundForNativeSurface = hasAndroidNativeVisualizerBridge() && !sharedProps?.isPreviewMode && isMainAppSurface;
 
     return (
         <>
@@ -84,7 +86,7 @@ export const VisualizerBackdropLayers: React.FC<VisualizerBackdropLayersProps> =
                     blendMs: transition ? (transition.enter.delay ?? 0) + transition.enter.duration : 0,
                     blendProgress: transition?.progress,
                 }}
-                drawn={renderBackground}
+                drawn={renderBackground && !disableWebViewBackgroundForNativeSurface}
                 transition={transition}
                 waits={waits}
                 render={inputs => <VisualizerBackgroundRenderer {...inputs} />}

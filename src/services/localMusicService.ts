@@ -539,6 +539,13 @@ async function extractSafHandleEmbeddedMetadata(
         } catch (err) {
             console.warn(`[LocalMusic] Failed to prepare native cover thumbnail for ${stat.name}:`, err);
         }
+    } else if (includeCover && nativeMeta?.coverAssetId && /^sha256:[a-f0-9]{64}$/i.test(nativeMeta.coverAssetId)) {
+        // Disk cache hit in context.getFilesDir()/folia_media_cache/: 256x256 and 1024x1024 WebP
+        // mipmaps already exist on disk and are served directly via /__folia_cover/{assetId}.
+        preparedNativeCover = {
+            assetId: nativeMeta.coverAssetId,
+            blob: new Blob([], { type: 'image/webp' }),
+        };
     }
 
     // When native MediaMetadataRetriever succeeded, it already inspected the embedded picture;

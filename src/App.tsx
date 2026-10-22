@@ -180,6 +180,15 @@ import { useFoliumHostActions } from './mods/runtime/hostActions';
 import { FoliumStageLayerSlot } from './mods/folium/registries/stageLayers';
 import { errorFields } from './utils/errorText';
 import { runsOnWindows, shouldUseAndroidMobileShell } from './utils/platform';
+import {
+    buildAndroidVisualizerPalette,
+    getAndroidDisplayRefreshRate,
+    getCurrentDisplayRefreshRateHz,
+    hasAndroidNativeVisualizerBridge,
+    setAndroidNativeVisualizerPalette,
+    setAndroidNativeVisualizerState,
+    subscribeAndroidDisplayRefreshRate,
+} from './services/android/foliaAndroidBridge';
 import { shouldSuspendVisualizerForVisibility } from './utils/mobileVisualizerBudget';
 import { useDocumentVisibility } from './hooks/useDocumentVisibility';
 import MobileAppContainer from './components/mobile/MobileAppContainer';
@@ -1537,8 +1546,14 @@ export default function App() {
 
     // Wallpaper mode removes normal window semantics (no minimize/maximize/close, no dragging, and
     // click-through is managed by the main process), so the whole custom titlebar strip stays off.
+    const isMobileShellActive = shouldUseAndroidMobileShell();
+    const [isMobileVisualizerActive, setIsMobileVisualizerActive] = useState(false);
     const usesCustomWindowChrome = isElectronWindow && !wallpaperMode;
-    const isPlayerPageTransparent = transparentPlayerBackground || enablePlayerPageNativeBlur;
+    const isAndroidNativeVisualizerActive = hasAndroidNativeVisualizerBridge()
+        && (isMobileShellActive ? isMobileVisualizerActive : currentView === 'player');
+    const isPlayerPageTransparent = transparentPlayerBackground
+        || enablePlayerPageNativeBlur
+        || isAndroidNativeVisualizerActive;
     const shouldUseTransparentAppBackground = isPlayerPageTransparent;
     const appStyle = useMemo(() => buildAppStyle({
         bgMode,
@@ -2122,8 +2137,7 @@ export default function App() {
         isLyricsLoading,
     });
 
-    const isMobileShellActive = shouldUseAndroidMobileShell();
-    const [isMobileVisualizerActive, setIsMobileVisualizerActive] = useState(false);
+
     useEffect(() => {
         if (isMobileShellActive) return;
         useSystemBarSettingsStore.getState().reapplySystemBars();
@@ -2140,6 +2154,39 @@ export default function App() {
         isMobileShellActive,
         isMobileVisualizerVisible: isMobileVisualizerActive,
     });
+
+    const [displayRefreshRateHz, setDisplayRefreshRateHz] = useState<number>(() => getCurrentDisplayRefreshRateHz());
+    useEffect(() => {
+        if (!hasAndroidNativeVisualizerBridge()) return undefined;
+        void getAndroidDisplayRefreshRate().then(info => setDisplayRefreshRateHz(info.refreshRate));
+        return subscribeAndroidDisplayRefreshRate(info => setDisplayRefreshRateHz(info.refreshRate));
+    }, []);
+
+    useEffect(() => {
+        if (isMobileShellActive || !hasAndroidNativeVisualizerBridge()) return;
+        const visible = Boolean(isActivityVisible && isDocumentVisible && currentView === 'player');
+        const isPlayingNow = playerState === PlayerState.PLAYING;
+        const vsyncDivider: 1 | 2 = 2;
+        void setAndroidNativeVisualizerState({
+            enabled: currentView === 'player',
+            visible,
+            fps: (visible && isPlayingNow) ? Math.max(15, Math.round(displayRefreshRateHz / vsyncDivider)) : 0,
+            vsyncDivider,
+            dim: 0.24,
+        });
+    }, [currentView, displayRefreshRateHz, isActivityVisible, isDocumentVisible, isMobileShellActive, playerState]);
+
+    useEffect(() => {
+        if (isMobileShellActive || !hasAndroidNativeVisualizerBridge() || !currentSong) return;
+        const colors = buildAndroidVisualizerPalette(
+            currentSong as SongResult & { vibrantColors?: string[]; representativeColors?: string[] },
+            visualizerTheme,
+        );
+        void setAndroidNativeVisualizerPalette({
+            colors,
+            transitionMs: 900,
+        });
+    }, [currentSong, isMobileShellActive, visualizerTheme]);
 
     const visualizerRendererModel = useVisualizerRendererModel({
         suspendAnimation: suspendVisualizerAnimation,

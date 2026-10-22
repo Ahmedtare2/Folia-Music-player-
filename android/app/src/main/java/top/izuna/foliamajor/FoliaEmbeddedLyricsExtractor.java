@@ -130,7 +130,7 @@ public final class FoliaEmbeddedLyricsExtractor {
     private static File resolveEmbeddedLyricCacheFile(@Nullable Context context, Uri uri, long baseOffset, long totalLength) {
         if (context == null) return null;
         try {
-            File dir = new File(new File(context.getFilesDir(), "media_cache"), "lyrics");
+            File dir = FoliaNativeBridgePlugin.getMediaCacheNamespaceDir(context, FoliaNativeBridgePlugin.CACHE_NAMESPACE_LYRICS);
             if (!dir.exists() && !dir.mkdirs()) return null;
             String rawKey = uri.toString() + "::" + baseOffset + "::" + totalLength;
             MessageDigest md = MessageDigest.getInstance("SHA-256");

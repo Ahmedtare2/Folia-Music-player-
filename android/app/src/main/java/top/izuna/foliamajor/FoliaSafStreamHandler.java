@@ -318,7 +318,7 @@ public final class FoliaSafStreamHandler {
                 }
             }
 
-            File coversDir = new File(new File(context.getFilesDir(), "media_cache"), "covers");
+            File coversDir = FoliaNativeBridgePlugin.getMediaCacheNamespaceDir(context, FoliaNativeBridgePlugin.CACHE_NAMESPACE_COVERS);
             File file256 = new File(coversDir, digest + "_256.webp");
             File file1024 = new File(coversDir, digest + "_1024.webp");
 

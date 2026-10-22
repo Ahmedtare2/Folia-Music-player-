@@ -57,6 +57,7 @@ export const GlowWord = <TConfig extends { id: string }>({
     const statusRef = useRef<'waiting' | 'active' | 'passed'>(status);
     statusRef.current = status;
     const wordDomRef = useRef<HTMLDivElement | null>(null);
+    const glowSpanRef = useRef<HTMLSpanElement | null>(null);
     const lastProgressRef = useRef<number>(-1);
     const rippleScale = useMemo(() => 1.5 + Math.random() * 2, []);
     const isCursiveWord = useMemo(() => hasCursiveJoiningScript(word.text), [word.text]);
@@ -74,6 +75,17 @@ export const GlowWord = <TConfig extends { id: string }>({
         if (Math.abs(nextProgress - lastProgressRef.current) >= 0.005) {
             lastProgressRef.current = nextProgress;
             el.style.setProperty('--word-progress', nextProgress.toFixed(3));
+            if (glowSpanRef.current) {
+                const arc = currentStatus === 'active' ? Math.sin(nextProgress * Math.PI) : 0;
+                const scale = (1 + arc * 0.025).toFixed(3);
+                const liftY = (-arc * 1.0).toFixed(2);
+                glowSpanRef.current.style.transform = `translate3d(0, ${liftY}px, 0) scale3d(${scale}, ${scale}, 1)`;
+                glowSpanRef.current.style.opacity = currentStatus === 'waiting'
+                    ? '0'
+                    : currentStatus === 'passed'
+                        ? '0.45'
+                        : (0.35 + arc * 0.65).toFixed(3);
+            }
         }
     }, [activeEndTime, word.startTime]);
 
@@ -129,7 +141,8 @@ export const GlowWord = <TConfig extends { id: string }>({
         >
             {/* Glow Layer - Handles Text Shadow - Absolute Position */}
             <span
-                className="absolute inset-0 select-none pointer-events-none block"
+                ref={glowSpanRef}
+                className="absolute inset-0 select-none pointer-events-none block will-change-transform"
                 aria-hidden="true"
             >
                 {!isCursiveWord && graphemeTimings.length > 1 ? (

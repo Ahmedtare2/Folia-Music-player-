@@ -18,6 +18,13 @@ import { useBeatFxTrack } from '../../../../hooks/useBeatFxTrack';
 import { NATIVE_VISIBILITY_EVENT } from '../../../../hooks/useDocumentVisibility';
 import { isAppForegroundVisible, subscribeAppForegroundVisibility } from '../../../../utils/visualizerVisibilityGate';
 import { readIncomingLyricClock } from './incomingLyricClock';
+import {
+    getCurrentDisplayRefreshRateHz,
+    getInterpolatedAndroidPlaybackPositionSec,
+    hasAndroidNativeVisualizerBridge,
+    isAndroidNativeExoPlayerActive,
+    setAndroidNativeVisualizerEnergy,
+} from '../../../../services/android/foliaAndroidBridge';
 
 // src/components/app/playback/bridges/usePlaybackVisualizerBridge.ts
 
@@ -97,6 +104,19 @@ export function usePlaybackVisualizerBridge({
     lyricsRef.current = lyrics;
     // Reuse a single typed array for FFT frequency reads instead of allocating on every frame.
     const fftBufferRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
+    const lastNativeEnergySyncMsRef = useRef<number>(0);
+    const lastNativePlayingStateRef = useRef<boolean>(false);
+    // High-resolution VSync clock anchor for frame-rate-independent audio time interpolation
+    // across 60Hz, 90Hz, and 120Hz displays.
+    const audioClockAnchorRef = useRef<{
+        element: HTMLAudioElement | null;
+        rawMediaTimeSec: number;
+        anchorPerfNowMs: number;
+    }>({
+        element: null,
+        rawMediaTimeSec: -1,
+        anchorPerfNowMs: 0,
+    });
     const emptySpectrumRef = useRef<Uint8Array<ArrayBuffer>>(new Uint8Array(new ArrayBuffer(0)));
     // 智能动感模式: loads the track's beats while it is on; the clock is stepped below. A ref, so
     // switching it does not rebuild the frame loop.
@@ -174,18 +194,26 @@ export function usePlaybackVisualizerBridge({
         setCurrentLineIndex(clock.lineIndex);
     }), [audioRef]);
 
-    const updateLoop = useCallback(() => {
-        // Strict Screen-Off & Background Freeze: never run 60/120fps FFT or lyric rAF updates
+    const updateLoop = useCallback((rafTimestampMs?: number) => {
+        // Strict Screen-Off & Background Freeze: never run FFT or lyric rAF updates
         // when the phone screen is turned off or the document is hidden.
         if (!isAppForegroundVisible()) {
             animationFrameRef.current = 0;
             return;
         }
+        const frameNowMs = typeof rafTimestampMs === 'number' && Number.isFinite(rafTimestampMs) && rafTimestampMs > 0
+            ? rafTimestampMs
+            : (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
         // Normally the active deck; the outgoing one for as long as a blend holds the picture on
         // the track it is finishing, so that clock and picture never describe different songs.
         const audioElement = getDisplayElement?.() ?? audioRef.current;
-        const isActuallyPlaying = Boolean(audioElement && !audioElement.paused && !audioElement.ended);
+        const nativeExoClock = isAndroidNativeExoPlayerActive()
+            ? getInterpolatedAndroidPlaybackPositionSec(frameNowMs)
+            : null;
+        const isActuallyPlaying = nativeExoClock
+            ? Boolean(nativeExoClock.isPlaying && !nativeExoClock.ended)
+            : Boolean(audioElement && !audioElement.paused && !audioElement.ended);
         // Mid-handover a deck can be loading while the other one is still sounding. The analyser
         // is downstream of both, so it has real signal: dropping to the idle breath here would put
         // a visible stutter at exactly the moment meant to be seamless.
@@ -222,12 +250,62 @@ export function usePlaybackVisualizerBridge({
                 return Math.pow(normalized, boost) * 255;
             };
 
+            const procBass = process(bass, 1.8);
+            const procLowMid = process(lowMid, 2);
+            const procMid = process(mid, 2);
+            const procVocal = process(vocal, 1.5);
+            const procTreble = process(treble, 2);
+
             audioPower.set(process((bass + lowMid) / 2, 3));
-            audioBands.bass.set(process(bass, 1.8));
-            audioBands.lowMid.set(process(lowMid, 2));
-            audioBands.mid.set(process(mid, 2));
-            audioBands.vocal.set(process(vocal, 1.5));
-            audioBands.treble.set(process(treble, 2));
+            audioBands.bass.set(procBass);
+            audioBands.lowMid.set(procLowMid);
+            audioBands.mid.set(procMid);
+            audioBands.vocal.set(procVocal);
+            audioBands.treble.set(procTreble);
+
+            if (hasAndroidNativeVisualizerBridge()) {
+                const nowMs = frameNowMs;
+                const minSyncIntervalMs = Math.max(30, Math.round(2000 / getCurrentDisplayRefreshRateHz()));
+                if (!lastNativePlayingStateRef.current || nowMs - lastNativeEnergySyncMsRef.current >= minSyncIntervalMs) {
+                    lastNativePlayingStateRef.current = true;
+                    lastNativeEnergySyncMsRef.current = nowMs;
+                    void setAndroidNativeVisualizerEnergy({
+                        bass: Math.min(1, procBass / 255),
+                        mid: Math.min(1, procMid / 255),
+                        high: Math.min(1, procTreble / 255),
+                        isPlaying: true,
+                    });
+                }
+            }
+        } else if (hasAudibleSignal) {
+            // Hardware offload path (WebAudio DSP bypassed when Equalizer is disabled):
+            // synthesize smooth rhythmic multi-band energy from playback clock for zero-CPU overhead.
+            const tSec = audioElement ? audioElement.currentTime : Date.now() / 1000;
+            const pulseBass = (Math.sin(tSec * 4.2) * 0.5 + 0.5) * 145 + 35;
+            const pulseMid = (Math.sin(tSec * 2.7 + 1.1) * 0.5 + 0.5) * 115 + 25;
+            const pulseHigh = (Math.cos(tSec * 5.3 + 2.4) * 0.5 + 0.5) * 95 + 20;
+            audioPower.set(pulseBass * 0.75);
+            audioBands.bass.set(pulseBass);
+            audioBands.lowMid.set((pulseBass + pulseMid) * 0.5);
+            audioBands.mid.set(pulseMid);
+            audioBands.vocal.set(pulseMid * 0.9);
+            audioBands.treble.set(pulseHigh);
+            audioBands.spectrum?.set(emptySpectrumRef.current);
+
+            if (hasAndroidNativeVisualizerBridge()) {
+                const nowMs = frameNowMs;
+                const minSyncIntervalMs = Math.max(30, Math.round(2000 / getCurrentDisplayRefreshRateHz()));
+                if (!lastNativePlayingStateRef.current || nowMs - lastNativeEnergySyncMsRef.current >= minSyncIntervalMs) {
+                    lastNativePlayingStateRef.current = true;
+                    lastNativeEnergySyncMsRef.current = nowMs;
+                    void setAndroidNativeVisualizerEnergy({
+                        bass: Math.min(1, pulseBass / 255),
+                        mid: Math.min(1, pulseMid / 255),
+                        high: Math.min(1, pulseHigh / 255),
+                        isPlaying: true,
+                    });
+                }
+            }
         } else {
             const time = Date.now() / 2000;
             const breath = (Math.sin(time) + 1) * 20;
@@ -238,12 +316,50 @@ export function usePlaybackVisualizerBridge({
             audioBands.vocal.set(breath);
             audioBands.treble.set(breath);
             audioBands.spectrum?.set(emptySpectrumRef.current);
+
+            if (hasAndroidNativeVisualizerBridge() && lastNativePlayingStateRef.current) {
+                lastNativePlayingStateRef.current = false;
+                lastNativeEnergySyncMsRef.current = performance.now();
+                void setAndroidNativeVisualizerEnergy({
+                    bass: 0,
+                    mid: 0,
+                    high: 0,
+                    isPlaying: false,
+                });
+            }
         }
 
-        if (isActuallyPlaying && audioElement) {
-            const time = audioElement.currentTime;
-            currentTime.set(time);
-            applyLyricClockAtTime(time);
+        if (isActuallyPlaying && nativeExoClock) {
+            // High-precision sub-millisecond interpolation from native AndroidX Media3 (ExoPlayer)
+            // clock anchor (positionMs + (frameNowMs - clientPerfNowMs) * playbackSpeed) without polling the bridge.
+            const smoothTime = nativeExoClock.positionSec;
+            currentTime.set(smoothTime);
+            applyLyricClockAtTime(smoothTime);
+        } else if (isActuallyPlaying && audioElement) {
+            const rawTime = audioElement.currentTime;
+            const anchor = audioClockAnchorRef.current;
+            const playbackRate = Number.isFinite(audioElement.playbackRate) && audioElement.playbackRate > 0
+                ? audioElement.playbackRate
+                : 1;
+            let smoothTime = rawTime;
+            if (
+                anchor.element !== audioElement
+                || Math.abs(rawTime - anchor.rawMediaTimeSec) > 0.0005
+                || frameNowMs < anchor.anchorPerfNowMs
+            ) {
+                anchor.element = audioElement;
+                anchor.rawMediaTimeSec = rawTime;
+                anchor.anchorPerfNowMs = frameNowMs;
+            } else {
+                // Frame-rate-independent VSync interpolation between HTMLAudioElement timeupdate ticks:
+                // advances smoothly by the exact elapsed frame delta whether display is 60Hz, 90Hz, or 120Hz.
+                const elapsedSec = Math.max(0, (frameNowMs - anchor.anchorPerfNowMs) / 1000) * playbackRate;
+                const maxLeadSec = 0.065 * playbackRate;
+                const interpolated = anchor.rawMediaTimeSec + Math.min(elapsedSec, maxLeadSec);
+                smoothTime = duration > 0 ? Math.min(duration, interpolated) : interpolated;
+            }
+            currentTime.set(smoothTime);
+            applyLyricClockAtTime(smoothTime);
         } else if (isNowPlayingStageActive) {
             const nextTime = getNowPlayingDisplayTime();
             const hasReachedEnd = playerState === PlayerState.PLAYING && duration > 0 && nextTime >= duration;

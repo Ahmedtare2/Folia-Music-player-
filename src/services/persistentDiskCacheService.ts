@@ -176,12 +176,24 @@ export const writePreParsedLyricsToDisk = async (
  * chorus markers, Pinyin/romanization, translations, and renderHints) to the persistent
  * disk cache so subsequent plays of the same track skip both parsing and word segmentation.
  */
+const preSegmentedLyricSet = new WeakSet<LyricData>();
+
+export const isPreSegmentedLyricsReady = (lyrics: LyricData | null | undefined): boolean => {
+    if (!lyrics || !Array.isArray(lyrics.lines) || lyrics.lines.length === 0) return false;
+    if (preSegmentedLyricSet.has(lyrics)) return true;
+    return lyrics.lines.some(
+        line => (Array.isArray(line.autoWordSegments) && line.autoWordSegments.length > 0) || typeof line.isChorus === 'boolean',
+    );
+};
+
 export const persistPreSegmentedLyricsToDisk = (
     lyrics: LyricData | null | undefined,
     songKey?: string | number | null,
 ): void => {
     if (!lyrics || !Array.isArray(lyrics.lines) || lyrics.lines.length === 0) return;
     const normalized = ensureLyricDataRenderHints(lyrics) ?? lyrics;
+    preSegmentedLyricSet.add(lyrics);
+    preSegmentedLyricSet.add(normalized);
     const directKey = lyricDataToCacheKey.get(lyrics) || lyricDataToCacheKey.get(normalized);
     const digest = computeParsedLyricsContentDigest(normalized);
     const resolvedCacheKey = directKey || (digest ? contentDigestToCacheKey.get(digest) : undefined);
@@ -191,7 +203,7 @@ export const persistPreSegmentedLyricsToDisk = (
         void writePreParsedLyricsToDisk(resolvedCacheKey, normalized);
     }
     if (songKey !== undefined && songKey !== null && String(songKey).trim().length > 0) {
-        const songCacheKey = `song_lyric_v1_${ fnv1a64Hex(String(songKey)) }`;
+        const songCacheKey = `song_lyric_v1_${fnv1a64Hex(String(songKey))}`;
         void writePreParsedLyricsToDisk(songCacheKey, normalized);
     }
 };
@@ -324,11 +336,19 @@ export const writeCachedCoverPalette = async (
 export const ensureCoverMipmapsAndPalettePersisted = async (
     assetId: string,
     blob?: Blob,
+    options?: {
+        trackId?: string;
+        albumId?: string;
+        contentUri?: string;
+    },
 ): Promise<CachedCoverPaletteRecord | null> => {
     const key = normalizePaletteCacheKey(assetId);
     if (!key) return null;
     const res = await cacheAndroidCoverAndExtractPalette({
         assetId: key,
+        trackId: options?.trackId,
+        albumId: options?.albumId,
+        contentUri: options?.contentUri,
         blob,
     });
     if (res?.ok && (res.vibrantColors?.length || res.representativeColors?.length)) {

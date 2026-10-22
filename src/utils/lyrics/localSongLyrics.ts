@@ -4,6 +4,7 @@ import { hasKnownGoodWordByWordLocalLyric } from './lyricAutoMatchState';
 import {
     clearPersistentDiskCacheForTests,
     computeParsedLyricsContentDigest,
+    isPreSegmentedLyricsReady,
     readPreParsedLyricsFromDisk,
     writePreParsedLyricsToDisk,
 } from '../../services/persistentDiskCacheService';
@@ -130,7 +131,7 @@ export const resolveLocalSongLyrics = async (
             song.localLyricsFormat,
         );
         const cached = readCachedParsedLyrics(cacheKey);
-        if (cached !== undefined) {
+        if (cached !== undefined && isPreSegmentedLyricsReady(cached)) {
             return { lyrics: cached, source };
         }
         const lyrics = await LyricParserFactory.parse({
@@ -150,7 +151,7 @@ export const resolveLocalSongLyrics = async (
             song.embeddedTranslationLyricsContent,
         );
         const cached = readCachedParsedLyrics(cacheKey);
-        if (cached !== undefined) {
+        if (cached !== undefined && isPreSegmentedLyricsReady(cached)) {
             return { lyrics: cached, source };
         }
         const lyrics = await LyricParserFactory.parse({

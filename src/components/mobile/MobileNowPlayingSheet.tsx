@@ -42,7 +42,18 @@ import { isLocalCoverAssetUrl } from '../../services/localCoverAssetUrl';
 import { VISUALIZER_REGISTRY, getVisualizerModeLabel } from '../visualizer/registry';
 import { useAudioSettingsStore } from '../../stores/useAudioSettingsStore';
 import { useDynamicAlbumArtworkStore } from '../../stores/useDynamicAlbumArtworkStore';
-import { ANDROID_VISIBILITY_EVENT } from '../../services/android/foliaAndroidBridge';
+import {
+    ANDROID_VISIBILITY_EVENT,
+    buildAndroidVisualizerPalette,
+    getAndroidDisplayRefreshRate,
+    getCachedAndroidTrackPalette,
+    getCurrentDisplayRefreshRateHz,
+    hasAndroidNativeVisualizerBridge,
+    setAndroidNativeVisualizerEnergy,
+    setAndroidNativeVisualizerPalette,
+    setAndroidNativeVisualizerState,
+    subscribeAndroidDisplayRefreshRate,
+} from '../../services/android/foliaAndroidBridge';
 import {
     detectPrefersReducedMotion,
     resolveAlbumVideoStageState,
@@ -319,24 +330,30 @@ const MobileTimedWord: React.FC<MobileTimedWordProps> = React.memo(({
     lineDirection,
 }) => {
     const spanRef = useRef<HTMLSpanElement>(null);
+    const baseLayerRef = useRef<HTMLSpanElement>(null);
+    const activeLayerRef = useRef<HTMLSpanElement>(null);
     const lastPhaseRef = useRef<'init' | 'waiting' | 'active' | 'passed'>('init');
     const lastPctRef = useRef<number>(-1);
     const wordDir = useMemo(() => resolveTokenDirection(word.text, lineDirection), [lineDirection, word.text]);
 
+    // Pure GPU Compositing on Mali-G77 (120Hz AMOLED):
+    // Per-frame updates strictly mutate only GPU-composited transform (translate3d / scale3d)
+    // and opacity via direct DOM refs without triggering CPU glyph re-rasterization or paint.
     const applyWordProgress = useCallback((timeSec: number) => {
         const el = spanRef.current;
-        if (!el) return;
+        const baseEl = baseLayerRef.current;
+        const activeEl = activeLayerRef.current;
+        if (!el || !baseEl || !activeEl) return;
+
         if (timeSec < word.startTime) {
             if (lastPhaseRef.current === 'waiting') return;
             lastPhaseRef.current = 'waiting';
             lastPctRef.current = 0;
             el.style.setProperty('--word-progress', '0%');
-            el.style.transform = 'translate3d(0, 0, 0)';
-            el.style.color = inactiveColor;
-            el.style.backgroundImage = '';
-            el.style.webkitBackgroundClip = '';
-            el.style.backgroundClip = '';
-            el.style.textShadow = 'none';
+            el.style.transform = 'translate3d(0, 0, 0) scale3d(1, 1, 1)';
+            baseEl.style.opacity = '1';
+            activeEl.style.opacity = '0';
+            activeEl.style.transform = 'translate3d(0, 0, 0) scale3d(0.98, 0.98, 1)';
             return;
         }
         if (timeSec >= word.endTime) {
@@ -344,34 +361,29 @@ const MobileTimedWord: React.FC<MobileTimedWordProps> = React.memo(({
             lastPhaseRef.current = 'passed';
             lastPctRef.current = 100;
             el.style.setProperty('--word-progress', '100%');
-            el.style.transform = 'translate3d(0, 0, 0)';
-            el.style.color = passedColor;
-            el.style.backgroundImage = '';
-            el.style.webkitBackgroundClip = '';
-            el.style.backgroundClip = '';
-            el.style.textShadow = 'none';
+            el.style.transform = 'translate3d(0, 0, 0) scale3d(1, 1, 1)';
+            baseEl.style.opacity = '0';
+            activeEl.style.opacity = '0.84';
+            activeEl.style.transform = 'translate3d(0, 0, 0) scale3d(1, 1, 1)';
             return;
         }
         const pct = computeTimedWordProgressPercent(word, timeSec);
         if (lastPhaseRef.current === 'active' && Math.abs(pct - lastPctRef.current) < 0.25) {
             return;
         }
-        const enteringActive = lastPhaseRef.current !== 'active';
         lastPhaseRef.current = 'active';
         lastPctRef.current = pct;
+        const ratio = Math.max(0, Math.min(1, pct / 100));
+        const arc = Math.sin(ratio * Math.PI);
         const pctStr = `${pct.toFixed(1)}%`;
-        const featherStr = `${Math.min(100, pct + 12).toFixed(1)}%`;
-        const angle = wordDir === 'rtl' ? '270deg' : '90deg';
+        const liftY = (-1.1 * arc).toFixed(2);
+        const scale = (1 + 0.03 * arc).toFixed(3);
         el.style.setProperty('--word-progress', pctStr);
-        el.style.backgroundImage = `linear-gradient(${angle}, ${activeColor} 0%, ${activeColor} ${pctStr}, ${inactiveColor} ${featherStr}, ${inactiveColor} 100%)`;
-        if (enteringActive) {
-            el.style.transform = 'translate3d(0, -0.5px, 0)';
-            el.style.color = 'transparent';
-            el.style.webkitBackgroundClip = 'text';
-            el.style.backgroundClip = 'text';
-            el.style.textShadow = `0 0 18px color-mix(in srgb, ${glowColor} 45%, transparent)`;
-        }
-    }, [activeColor, glowColor, inactiveColor, passedColor, word, wordDir]);
+        el.style.transform = `translate3d(0, ${liftY}px, 0) scale3d(${scale}, ${scale}, 1)`;
+        baseEl.style.opacity = (1 - ratio * 0.85).toFixed(3);
+        activeEl.style.opacity = (0.28 + ratio * 0.72).toFixed(3);
+        activeEl.style.transform = `translate3d(0, 0, 0) scale3d(${scale}, ${scale}, 1)`;
+    }, [word]);
 
     useEffect(() => {
         lastPhaseRef.current = 'init';
@@ -385,15 +397,36 @@ const MobileTimedWord: React.FC<MobileTimedWordProps> = React.memo(({
         <span
             ref={spanRef}
             dir={wordDir}
-            className="inline-block whitespace-pre-wrap will-change-transform"
+            className="relative inline-block whitespace-pre-wrap will-change-transform"
             style={{
-                color: inactiveColor,
-                transform: 'translate3d(0, 0, 0)',
+                transform: 'translate3d(0, 0, 0) scale3d(1, 1, 1)',
                 unicodeBidi: 'isolate',
                 letterSpacing: '0px',
             }}
         >
-            {word.text}
+            <span
+                ref={baseLayerRef}
+                className="block will-change-[opacity]"
+                style={{
+                    color: inactiveColor,
+                    opacity: 1,
+                }}
+            >
+                {word.text}
+            </span>
+            <span
+                ref={activeLayerRef}
+                aria-hidden="true"
+                className="pointer-events-none select-none absolute inset-0 block will-change-[transform,opacity]"
+                style={{
+                    color: activeColor || passedColor,
+                    opacity: 0,
+                    transform: 'translate3d(0, 0, 0) scale3d(0.98, 0.98, 1)',
+                    textShadow: `0 0 16px color-mix(in srgb, ${glowColor} 42%, transparent)`,
+                }}
+            >
+                {word.text}
+            </span>
         </span>
     );
 });
@@ -840,9 +873,96 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
         }
     }, [videoStageState.shouldPlayVideo, videoStageState.shouldShowVideo, videoStageState.videoKey]);
 
+    const songPaletteCandidate = currentSong as (SongResult & {
+        vibrantColors?: string[];
+        representativeColors?: string[];
+    }) | null;
+
+    useEffect(() => {
+        if (!hasAndroidNativeVisualizerBridge() || !currentSong) return;
+        const colors = buildAndroidVisualizerPalette(songPaletteCandidate, theme);
+        void setAndroidNativeVisualizerPalette({
+            colors,
+            transitionMs: 900,
+        });
+        if (!songPaletteCandidate?.vibrantColors?.length) {
+            void getCachedAndroidTrackPalette({
+                trackId: String(currentSong.id),
+                albumId: albumName || localAlbumName || currentSong.album?.name || undefined,
+                assetId: (currentSong as { localCoverAssetId?: string }).localCoverAssetId,
+                applyToVisualizer: true,
+                transitionMs: 900,
+            });
+        }
+    }, [
+        albumName,
+        localAlbumName,
+        currentSong,
+        songPaletteCandidate,
+        songPaletteCandidate?.id,
+        songPaletteCandidate?.vibrantColors,
+        songPaletteCandidate?.representativeColors,
+        theme,
+        theme.accentColor,
+        theme.backgroundColor,
+        theme.primaryColor,
+        theme.secondaryColor,
+    ]);
+
+    const [displayRefreshRateHz, setDisplayRefreshRateHz] = useState<number>(() => getCurrentDisplayRefreshRateHz());
+
+    useEffect(() => {
+        if (!hasAndroidNativeVisualizerBridge()) return undefined;
+        void getAndroidDisplayRefreshRate().then((info) => {
+            setDisplayRefreshRateHz(info.refreshRate);
+        });
+        return subscribeAndroidDisplayRefreshRate((info) => {
+            setDisplayRefreshRateHz(info.refreshRate);
+        });
+    }, []);
+
+    useEffect(() => {
+        if (!hasAndroidNativeVisualizerBridge()) return;
+        const isVideoCovering = displayMode === 'cover' && videoStageState.shouldShowVideo && Boolean(effectiveAlbumVideoUrl);
+        const enabled = Boolean(isOpen && currentSong && !isVideoCovering);
+        const visible = Boolean(enabled && isPageVisible);
+        const isPlayingNow = playerState === PlayerState.PLAYING;
+        const vsyncDivider: 1 | 2 = 2;
+        const targetFps = (visible && isPlayingNow)
+            ? Math.max(15, Math.round(displayRefreshRateHz / vsyncDivider))
+            : 0;
+        const dim = displayMode === 'lyrics' ? 0.34 : displayMode === 'stage' ? 0.14 : 0.26;
+        void setAndroidNativeVisualizerState({
+            enabled,
+            visible,
+            fps: targetFps,
+            vsyncDivider,
+            dim,
+        });
+        if (!isPlayingNow) {
+            void setAndroidNativeVisualizerEnergy({
+                bass: 0,
+                mid: 0,
+                high: 0,
+                isPlaying: false,
+            });
+        }
+    }, [
+        currentSong,
+        displayMode,
+        displayRefreshRateHz,
+        effectiveAlbumVideoUrl,
+        isOpen,
+        isPageVisible,
+        playerState,
+        videoStageState.shouldShowVideo,
+    ]);
+
     if (!isOpen || !currentSong) {
         return null;
     }
+
+    const isAndroidNativeVisualizerActive = hasAndroidNativeVisualizerBridge();
 
     const isPlaying = playerState === PlayerState.PLAYING;
     const accentColor = theme.accentColor || theme.primaryColor || '#f4f4f5';
@@ -884,7 +1004,7 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
             data-immersive-lyrics={effectiveSystemBars.isImmersiveLyricsActive ? 'true' : 'false'}
             className="fixed inset-0 z-[200] flex flex-col overflow-hidden select-none text-zinc-100"
             style={{
-                backgroundColor: displayMode === 'cover' ? '#060609' : 'transparent',
+                backgroundColor: (displayMode === 'cover' && !isAndroidNativeVisualizerActive) ? '#060609' : 'transparent',
                 paddingTop: topSafePadding,
                 paddingBottom: bottomSafePadding,
                 paddingLeft: leftSafePadding,
@@ -999,7 +1119,7 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                 - Rich multi-stop atmospheric blend in 'cover' mode that transitions seamlessly into the lower controls
                 - Semi-translucent scrim in 'lyrics' mode so the live VisualizerRenderer shines through while keeping lyrics readable
                 - Hidden in 'stage' mode so the full-screen Visualizer shines at 100% */}
-            {displayMode !== 'stage' && (
+            {displayMode !== 'stage' && !isAndroidNativeVisualizerActive && (
                 <div
                     aria-hidden="true"
                     className="pointer-events-none absolute inset-0 -z-10 transition-opacity duration-500"

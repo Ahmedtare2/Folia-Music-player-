@@ -21,6 +21,7 @@ export interface FoliaDiskCacheStats {
 
 export interface FoliaCachedCoverAndPaletteResult {
     ok: boolean;
+    hit?: boolean;
     assetId?: string;
     cover256Path?: string;
     cover1024Path?: string;
@@ -125,6 +126,61 @@ export interface FoliaAndroidLyricProxyResponse {
     bodyText: string;
 }
 
+export interface FoliaDisplayRefreshRateInfo {
+    refreshRate: number;
+    rawRefreshRate?: number;
+    vsyncIntervalMs: number;
+}
+
+export interface FoliaNativeVisualizerStateOptions {
+    enabled: boolean;
+    visible: boolean;
+    fps?: number;
+    vsyncDivider?: 1 | 2;
+    dim?: number;
+}
+
+export interface FoliaNativeVisualizerPaletteOptions {
+    colors: string[];
+    transitionMs?: number;
+}
+
+export interface FoliaNativeVisualizerEnergyOptions {
+    bass: number;
+    mid: number;
+    high: number;
+    isPlaying: boolean;
+}
+
+export interface FoliaNativeLoadTrackOptions {
+    url: string;
+    uri?: string;
+    trackId?: string;
+    title?: string;
+    artist?: string;
+    album?: string;
+    artworkUrl?: string | null;
+    autoPlay?: boolean;
+    startPositionMs?: number;
+    volume?: number;
+    playbackSpeed?: number;
+}
+
+export interface FoliaNativePlaybackClockAnchor {
+    trackId?: string;
+    positionMs: number;
+    durationMs?: number;
+    bufferedPositionMs?: number;
+    elapsedRealtimeMs: number;
+    clientPerfNowMs?: number;
+    isPlaying: boolean;
+    playbackSpeed: number;
+    playbackState?: 'idle' | 'buffering' | 'ready' | 'ended';
+    ended?: boolean;
+    reason?: string;
+}
+
+
 export interface FoliaNativeBridgePluginContract {
     pickDirectory?: () => Promise<FoliaSafPickedDirectory | { cancelled?: boolean }>;
     pickAudioFiles?: (options?: { mimeType?: string }) => Promise<FoliaSafPickedFilesResult | { cancelled?: boolean }>;
@@ -149,8 +205,18 @@ export interface FoliaNativeBridgePluginContract {
         key?: string;
     }) => Promise<{ ok: boolean }>;
     getDiskCacheStats?: () => Promise<FoliaDiskCacheStats>;
+    getCachedTrackPalette?: (options: {
+        trackId?: string;
+        albumId?: string;
+        contentUri?: string;
+        assetId?: string;
+        applyToVisualizer?: boolean;
+        transitionMs?: number;
+    }) => Promise<FoliaCachedCoverAndPaletteResult>;
     cacheCoverAndExtractPalette?: (options: {
         assetId?: string;
+        trackId?: string;
+        albumId?: string;
         dataBase64?: string;
         contentUri?: string;
     }) => Promise<FoliaCachedCoverAndPaletteResult>;
@@ -170,6 +236,8 @@ export interface FoliaNativeBridgePluginContract {
     }) => Promise<{ data: string; mimeType?: string; size?: number; lastModified?: number }>;
     extractAudioMetadata?: (options: {
         contentUri: string;
+        trackId?: string;
+        albumId?: string;
         includeCover?: boolean;
         maxCoverDimension?: number;
     }) => Promise<{
@@ -199,9 +267,35 @@ export interface FoliaNativeBridgePluginContract {
     minimizeApp?: () => Promise<void>;
     setSystemBarsVisibility?: (options: FoliaAndroidSystemBarsConfig) => Promise<FoliaAndroidSystemBarsState>;
     getSystemBarsVisibility?: () => Promise<FoliaAndroidSystemBarsState>;
+    getDisplayRefreshRate?: () => Promise<FoliaDisplayRefreshRateInfo>;
+    setNativeVisualizerState?: (options: FoliaNativeVisualizerStateOptions) => Promise<{
+        ok: boolean;
+        enabled?: boolean;
+        visible?: boolean;
+        fps?: number;
+        vsyncDivider?: number;
+        refreshRate?: number;
+        dim?: number;
+    }>;
+    setNativeVisualizerPalette?: (options: FoliaNativeVisualizerPaletteOptions) => Promise<{
+        ok: boolean;
+        colorCount?: number;
+        transitionMs?: number;
+    }>;
+    setNativeVisualizerEnergy?: (options: FoliaNativeVisualizerEnergyOptions) => Promise<{
+        ok: boolean;
+    }>;
+    loadTrack?: (options: FoliaNativeLoadTrackOptions) => Promise<FoliaNativePlaybackClockAnchor & { ok: boolean }>;
+    play?: () => Promise<FoliaNativePlaybackClockAnchor & { ok: boolean }>;
+    pause?: () => Promise<FoliaNativePlaybackClockAnchor & { ok: boolean }>;
+    seekTo?: (options: { positionMs: number }) => Promise<FoliaNativePlaybackClockAnchor & { ok: boolean }>;
+    setVolume?: (options: { volume: number }) => Promise<{ ok: boolean; volume?: number }>;
+    setPlaybackSpeed?: (options: { playbackSpeed: number; speed?: number }) => Promise<FoliaNativePlaybackClockAnchor & { ok: boolean }>;
+    getPlaybackPosition?: () => Promise<FoliaNativePlaybackClockAnchor & { ok: boolean }>;
     addListener?: (
-        eventName: 'mediaAction',
-        listenerFunc: (event: FoliaAndroidMediaActionEvent) => void,
+        eventName: 'mediaAction' | 'displayRefreshRateChanged' | 'playbackClockAnchor',
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        listenerFunc: (event: any) => void,
     ) => Promise<{ remove: () => Promise<void> }> | { remove: () => Promise<void> };
 }
 
@@ -210,6 +304,7 @@ export const ANDROID_SAF_STREAM_READ_BUFFER_BYTES = 512 * 1024;
 export const ANDROID_VISIBILITY_EVENT = 'folia:native-visibility';
 export const ANDROID_SYSTEM_BARS_STATE_EVENT = 'folia:system-bars-state';
 export const ANDROID_SYSTEM_INSETS_EVENT = 'folia:system-insets';
+export const ANDROID_DISPLAY_REFRESH_RATE_EVENT = 'folia:display-refresh-rate';
 
 const getNativePlugin = (): FoliaNativeBridgePluginContract | null => {
     if (typeof globalThis === 'undefined') return null;
@@ -655,8 +750,30 @@ export const getAndroidDiskCacheStats = async (): Promise<FoliaDiskCacheStats | 
     }
 };
 
+export const ANDROID_MEDIA_CACHE_ROOT_DIR = 'folia_media_cache';
+
+export const getCachedAndroidTrackPalette = async (options: {
+    trackId?: string;
+    albumId?: string;
+    contentUri?: string;
+    assetId?: string;
+    applyToVisualizer?: boolean;
+    transitionMs?: number;
+}): Promise<FoliaCachedCoverAndPaletteResult | null> => {
+    const plugin = getNativePlugin();
+    if (!plugin?.getCachedTrackPalette) return null;
+    try {
+        const res = await plugin.getCachedTrackPalette(options);
+        return res?.ok ? res : null;
+    } catch {
+        return null;
+    }
+};
+
 export const cacheAndroidCoverAndExtractPalette = async (options: {
     assetId?: string;
+    trackId?: string;
+    albumId?: string;
     blob?: Blob;
     contentUri?: string;
 }): Promise<FoliaCachedCoverAndPaletteResult | null> => {
@@ -670,6 +787,8 @@ export const cacheAndroidCoverAndExtractPalette = async (options: {
         }
         return await plugin.cacheCoverAndExtractPalette({
             assetId: options.assetId,
+            trackId: options.trackId,
+            albumId: options.albumId,
             dataBase64,
             contentUri: options.contentUri,
         });
@@ -777,4 +896,711 @@ export const pickAndroidVideoFiles = async (): Promise<FoliaSafPickedFilesResult
         console.warn('[AndroidBridge] Failed to pick video files:', error);
     }
     return null;
+};
+
+/**
+ * Whether the native Android OpenGL background visualizer (FoliaBackgroundSurfaceView) is available.
+ */
+export const hasAndroidNativeVisualizerBridge = (): boolean => {
+    if (!hasFoliaAndroidBridge()) return false;
+    const plugin = getNativePlugin();
+    return Boolean(
+        plugin && (
+            typeof plugin.setNativeVisualizerState === 'function'
+            || typeof plugin.setNativeVisualizerPalette === 'function'
+            || isAndroidNativeApp()
+        ),
+    );
+};
+
+export const applyRootNativeVisualizerTransparency = (active: boolean): void => {
+    if (typeof document === 'undefined') return;
+    const root = document.documentElement;
+    const body = document.body;
+    if (root) {
+        root.setAttribute('data-native-visualizer', active ? 'active' : 'inactive');
+        root.style.backgroundColor = active ? 'transparent' : '#09090b';
+    }
+    if (body) {
+        body.setAttribute('data-native-visualizer', active ? 'active' : 'inactive');
+        body.style.backgroundColor = active ? 'transparent' : '#09090b';
+    }
+};
+
+export const getCurrentDisplayRefreshRateHz = (): number => {
+    if (typeof globalThis !== 'undefined') {
+        const globalAny = globalThis as { __FOLIA_DISPLAY_REFRESH_RATE__?: unknown };
+        const raw = Number(globalAny.__FOLIA_DISPLAY_REFRESH_RATE__);
+        if (Number.isFinite(raw) && raw >= 30 && raw <= 240) {
+            return Math.round(raw);
+        }
+    }
+    return 60;
+};
+
+export const getAndroidDisplayRefreshRate = async (): Promise<FoliaDisplayRefreshRateInfo> => {
+    const plugin = getNativePlugin();
+    if (plugin?.getDisplayRefreshRate) {
+        try {
+            const info = await plugin.getDisplayRefreshRate();
+            if (info && Number.isFinite(info.refreshRate) && info.refreshRate >= 30) {
+                const hz = Math.max(30, Math.min(240, Math.round(info.refreshRate)));
+                if (typeof globalThis !== 'undefined') {
+                    (globalThis as { __FOLIA_DISPLAY_REFRESH_RATE__?: number }).__FOLIA_DISPLAY_REFRESH_RATE__ = hz;
+                }
+                return {
+                    refreshRate: hz,
+                    rawRefreshRate: info.rawRefreshRate ?? hz,
+                    vsyncIntervalMs: info.vsyncIntervalMs ?? (1000 / hz),
+                };
+            }
+        } catch {
+            // Fall through to cached/default refresh rate
+        }
+    }
+    const fallbackHz = getCurrentDisplayRefreshRateHz();
+    return {
+        refreshRate: fallbackHz,
+        rawRefreshRate: fallbackHz,
+        vsyncIntervalMs: 1000 / fallbackHz,
+    };
+};
+
+export const subscribeAndroidDisplayRefreshRate = (
+    listener: (info: FoliaDisplayRefreshRateInfo) => void,
+): (() => void) => {
+    const handleUpdate = (rawHz: unknown, rawExact?: unknown) => {
+        const num = Number(rawHz);
+        if (!Number.isFinite(num) || num < 30) return;
+        const hz = Math.max(30, Math.min(240, Math.round(num)));
+        const exact = Number.isFinite(Number(rawExact)) ? Number(rawExact) : hz;
+        if (typeof globalThis !== 'undefined') {
+            (globalThis as { __FOLIA_DISPLAY_REFRESH_RATE__?: number }).__FOLIA_DISPLAY_REFRESH_RATE__ = hz;
+        }
+        listener({
+            refreshRate: hz,
+            rawRefreshRate: exact,
+            vsyncIntervalMs: 1000 / exact,
+        });
+    };
+
+    const domHandler = (event: Event) => {
+        const detail = (event as CustomEvent<FoliaDisplayRefreshRateInfo> | undefined)?.detail;
+        if (detail) {
+            handleUpdate(detail.refreshRate, detail.rawRefreshRate);
+        }
+    };
+
+    if (typeof window !== 'undefined') {
+        window.addEventListener(ANDROID_DISPLAY_REFRESH_RATE_EVENT, domHandler);
+    }
+
+    const plugin = getNativePlugin();
+    let handlePromise: Promise<{ remove: () => Promise<void> }> | null = null;
+    if (plugin?.addListener) {
+        try {
+            const maybePromise = plugin.addListener('displayRefreshRateChanged', (ev: FoliaDisplayRefreshRateInfo) => {
+                if (ev) {
+                    handleUpdate(ev.refreshRate, ev.rawRefreshRate);
+                }
+            });
+            handlePromise = Promise.resolve(maybePromise);
+        } catch {
+            handlePromise = null;
+        }
+    }
+
+    return () => {
+        if (typeof window !== 'undefined') {
+            window.removeEventListener(ANDROID_DISPLAY_REFRESH_RATE_EVENT, domHandler);
+        }
+        if (handlePromise) {
+            void handlePromise.then(h => h?.remove?.()).catch(() => {});
+        }
+    };
+};
+
+export const setAndroidNativeVisualizerState = async (
+    options: FoliaNativeVisualizerStateOptions,
+): Promise<boolean> => {
+    const isActive = Boolean(options.enabled && options.visible);
+    if (hasFoliaAndroidBridge()) {
+        applyRootNativeVisualizerTransparency(isActive);
+    }
+    const plugin = getNativePlugin();
+    if (!plugin?.setNativeVisualizerState) return false;
+    try {
+        const divider: 1 | 2 = options.vsyncDivider ?? 2;
+        const displayHz = getCurrentDisplayRefreshRateHz();
+        const resolvedFps = options.fps !== undefined
+            ? options.fps
+            : (isActive ? Math.max(15, Math.round(displayHz / divider)) : 0);
+        const res = await plugin.setNativeVisualizerState({
+            enabled: Boolean(options.enabled),
+            visible: Boolean(options.visible),
+            fps: resolvedFps,
+            vsyncDivider: divider,
+            dim: options.dim ?? 0.28,
+        });
+        return Boolean(res?.ok ?? true);
+    } catch {
+        return false;
+    }
+};
+
+export const setAndroidNativeVisualizerPalette = async (
+    options: FoliaNativeVisualizerPaletteOptions,
+): Promise<boolean> => {
+    const plugin = getNativePlugin();
+    if (!plugin?.setNativeVisualizerPalette) return false;
+    const validColors = (options.colors ?? []).filter(c => typeof c === 'string' && c.trim().length > 0);
+    if (validColors.length === 0) return false;
+    try {
+        const res = await plugin.setNativeVisualizerPalette({
+            colors: validColors.slice(0, 6),
+            transitionMs: options.transitionMs ?? 900,
+        });
+        return Boolean(res?.ok ?? true);
+    } catch {
+        return false;
+    }
+};
+
+export const setAndroidNativeVisualizerEnergy = async (
+    options: FoliaNativeVisualizerEnergyOptions,
+): Promise<boolean> => {
+    const plugin = getNativePlugin();
+    if (!plugin?.setNativeVisualizerEnergy) return false;
+    try {
+        const res = await plugin.setNativeVisualizerEnergy({
+            bass: Math.max(0, Math.min(1, Number.isFinite(options.bass) ? options.bass : 0)),
+            mid: Math.max(0, Math.min(1, Number.isFinite(options.mid) ? options.mid : 0)),
+            high: Math.max(0, Math.min(1, Number.isFinite(options.high) ? options.high : 0)),
+            isPlaying: Boolean(options.isPlaying),
+        });
+        return Boolean(res?.ok ?? true);
+    } catch {
+        return false;
+    }
+};
+
+export const buildAndroidVisualizerPalette = (
+    song?: {
+        vibrantColors?: string[] | null;
+        representativeColors?: string[] | null;
+    } | null,
+    theme?: {
+        primaryColor?: string;
+        secondaryColor?: string;
+        accentColor?: string;
+        backgroundColor?: string;
+    } | null,
+): string[] => {
+    const candidates: string[] = [];
+    const pushUnique = (color?: string | null) => {
+        if (!color || typeof color !== 'string') return;
+        const trimmed = color.trim();
+        if (!trimmed || trimmed === 'transparent') return;
+        if (!candidates.includes(trimmed)) {
+            candidates.push(trimmed);
+        }
+    };
+
+    for (const c of song?.vibrantColors ?? []) pushUnique(c);
+    for (const c of song?.representativeColors ?? []) pushUnique(c);
+    pushUnique(theme?.accentColor);
+    pushUnique(theme?.primaryColor);
+    pushUnique(theme?.secondaryColor);
+    pushUnique(theme?.backgroundColor);
+
+    const defaults = ['#5b38c7', '#943ddb', '#297ad1', '#1f1a47', '#c2429e', '#2ea3ad'];
+    for (const fallback of defaults) {
+        if (candidates.length >= 6) break;
+        pushUnique(fallback);
+    }
+    return candidates.slice(0, 6);
+};
+
+export const ANDROID_PLAYBACK_CLOCK_ANCHOR_EVENT = 'folia:playback-clock-anchor';
+
+type StampedPlaybackClockAnchor = FoliaNativePlaybackClockAnchor & {
+    clientPerfNowMs: number;
+};
+
+let latestPlaybackClockAnchor: StampedPlaybackClockAnchor | null = null;
+let nativeExoPlayerRoutingActive = false;
+const clockAnchorSubscribers = new Set<(anchor: StampedPlaybackClockAnchor) => void>();
+
+const getNowPerfMs = (): number => (
+    typeof performance !== 'undefined' && typeof performance.now === 'function'
+        ? performance.now()
+        : Date.now()
+);
+
+export const updateAndroidPlaybackClockAnchor = (
+    raw: Partial<FoliaNativePlaybackClockAnchor> | null | undefined,
+): StampedPlaybackClockAnchor | null => {
+    if (!raw || typeof raw !== 'object') return latestPlaybackClockAnchor;
+    const nowPerf = getNowPerfMs();
+    const prev = latestPlaybackClockAnchor;
+    const positionMs = Number.isFinite(Number(raw.positionMs))
+        ? Math.max(0, Number(raw.positionMs))
+        : (prev?.positionMs ?? 0);
+    const durationMs = Number.isFinite(Number(raw.durationMs)) && Number(raw.durationMs) > 0
+        ? Math.max(0, Number(raw.durationMs))
+        : (prev?.durationMs ?? 0);
+    const bufferedPositionMs = Number.isFinite(Number(raw.bufferedPositionMs))
+        ? Math.max(positionMs, Number(raw.bufferedPositionMs))
+        : Math.max(positionMs, prev?.bufferedPositionMs ?? positionMs);
+    const elapsedRealtimeMs = Number.isFinite(Number(raw.elapsedRealtimeMs))
+        ? Number(raw.elapsedRealtimeMs)
+        : nowPerf;
+    const playbackSpeed = Number.isFinite(Number(raw.playbackSpeed)) && Number(raw.playbackSpeed) > 0
+        ? Number(raw.playbackSpeed)
+        : (prev?.playbackSpeed ?? 1);
+    const isPlaying = typeof raw.isPlaying === 'boolean' ? raw.isPlaying : Boolean(prev?.isPlaying);
+    const ended = Boolean(raw.ended);
+
+    const stamped: StampedPlaybackClockAnchor = {
+        trackId: raw.trackId ?? prev?.trackId ?? '',
+        positionMs,
+        durationMs,
+        bufferedPositionMs,
+        elapsedRealtimeMs,
+        clientPerfNowMs: Number.isFinite(Number(raw.clientPerfNowMs)) ? Number(raw.clientPerfNowMs) : nowPerf,
+        isPlaying,
+        playbackSpeed,
+        playbackState: raw.playbackState ?? (ended ? 'ended' : (isPlaying ? 'ready' : (prev?.playbackState ?? 'idle'))),
+        ended,
+        reason: raw.reason ?? 'sync',
+    };
+    latestPlaybackClockAnchor = stamped;
+    clockAnchorSubscribers.forEach(cb => {
+        try {
+            cb(stamped);
+        } catch {
+            // Ignore subscriber error
+        }
+    });
+    return stamped;
+};
+
+export const hasAndroidNativeExoPlayerBridge = (): boolean => {
+    if (!hasFoliaAndroidBridge()) return false;
+    const plugin = getNativePlugin();
+    return Boolean(plugin && typeof plugin.loadTrack === 'function');
+};
+
+export const isAndroidNativeExoPlayerActive = (): boolean => (
+    nativeExoPlayerRoutingActive && hasAndroidNativeExoPlayerBridge()
+);
+
+export const setAndroidNativeExoPlayerActive = (active: boolean): void => {
+    nativeExoPlayerRoutingActive = Boolean(active);
+    if (!active) {
+        latestPlaybackClockAnchor = null;
+    }
+};
+
+/**
+ * Routes standard Android audio playback through native AndroidX Media3 (ExoPlayer) whenever
+ * WebAudio-only DSP features (Stem Separation / Automix / Equalizer) are not active.
+ */
+export const shouldRouteToAndroidNativeExoPlayer = (options: {
+    audioSrc?: string | null;
+    automixEnabled?: boolean;
+    stemSeparationEnabled?: boolean;
+    equalizerEnabled?: boolean;
+}): boolean => {
+    if (!hasAndroidNativeExoPlayerBridge()) return false;
+    if (options.automixEnabled || options.stemSeparationEnabled || options.equalizerEnabled) {
+        return false;
+    }
+    const src = options.audioSrc?.trim() ?? '';
+    if (!src) return false;
+    // Standard Android SAF streams, content://, file://, and HTTP/HTTPS streams decode in native ExoPlayer.
+    return (
+        isAndroidSafStreamUrl(src)
+        || src.startsWith('content://')
+        || src.startsWith('file://')
+        || src.startsWith('http://')
+        || src.startsWith('https://')
+    );
+};
+
+export const getLatestAndroidPlaybackClockAnchor = (): StampedPlaybackClockAnchor | null => (
+    latestPlaybackClockAnchor
+);
+
+/**
+ * Computes the sub-millisecond interpolated playback position from the latest native ExoPlayer
+ * clock anchor using the high-resolution requestAnimationFrame / performance.now() timestamp,
+ * without polling the Capacitor bridge on every frame.
+ */
+export const getInterpolatedAndroidPlaybackPositionSec = (
+    frameNowPerfMs?: number,
+): {
+    positionSec: number;
+    durationSec: number;
+    isPlaying: boolean;
+    playbackSpeed: number;
+    ended: boolean;
+} | null => {
+    const anchor = latestPlaybackClockAnchor;
+    if (!anchor) return null;
+    const nowPerf = typeof frameNowPerfMs === 'number' && Number.isFinite(frameNowPerfMs) && frameNowPerfMs > 0
+        ? frameNowPerfMs
+        : getNowPerfMs();
+    const elapsedMs = anchor.isPlaying
+        ? Math.max(0, nowPerf - anchor.clientPerfNowMs) * (anchor.playbackSpeed || 1)
+        : 0;
+    const rawPosMs = anchor.positionMs + elapsedMs;
+    const clampedPosMs = anchor.durationMs && anchor.durationMs > 0
+        ? Math.min(anchor.durationMs, rawPosMs)
+        : rawPosMs;
+    return {
+        positionSec: Math.max(0, clampedPosMs / 1000),
+        durationSec: Math.max(0, (anchor.durationMs ?? 0) / 1000),
+        isPlaying: anchor.isPlaying,
+        playbackSpeed: anchor.playbackSpeed || 1,
+        ended: Boolean(anchor.ended),
+    };
+};
+
+export const loadAndroidNativeTrack = async (
+    options: FoliaNativeLoadTrackOptions,
+): Promise<StampedPlaybackClockAnchor | null> => {
+    const plugin = getNativePlugin();
+    if (!plugin?.loadTrack) return null;
+    nativeExoPlayerRoutingActive = true;
+    const startPosMs = Math.max(0, Math.round(options.startPositionMs ?? 0));
+    const speed = options.playbackSpeed && options.playbackSpeed > 0 ? options.playbackSpeed : 1;
+    updateAndroidPlaybackClockAnchor({
+        trackId: options.trackId ?? '',
+        positionMs: startPosMs,
+        durationMs: 0,
+        elapsedRealtimeMs: getNowPerfMs(),
+        isPlaying: Boolean(options.autoPlay ?? true),
+        playbackSpeed: speed,
+        playbackState: 'buffering',
+        ended: false,
+        reason: 'track-change',
+    });
+    try {
+        const res = await plugin.loadTrack({
+            ...options,
+            uri: options.uri ?? options.url,
+            startPositionMs: startPosMs,
+            autoPlay: options.autoPlay ?? true,
+            volume: options.volume ?? 1,
+            playbackSpeed: speed,
+        });
+        return updateAndroidPlaybackClockAnchor({
+            ...res,
+            trackId: res?.trackId ?? options.trackId ?? '',
+            reason: 'track-change',
+        });
+    } catch {
+        return latestPlaybackClockAnchor;
+    }
+};
+
+export const playAndroidNativeAudio = async (): Promise<StampedPlaybackClockAnchor | null> => {
+    const plugin = getNativePlugin();
+    if (!plugin?.play) return null;
+    const current = getInterpolatedAndroidPlaybackPositionSec();
+    updateAndroidPlaybackClockAnchor({
+        positionMs: current ? Math.round(current.positionSec * 1000) : (latestPlaybackClockAnchor?.positionMs ?? 0),
+        isPlaying: true,
+        ended: false,
+        reason: 'play',
+    });
+    try {
+        const res = await plugin.play();
+        return updateAndroidPlaybackClockAnchor({ ...res, isPlaying: true, reason: 'play' });
+    } catch {
+        return latestPlaybackClockAnchor;
+    }
+};
+
+export const pauseAndroidNativeAudio = async (): Promise<StampedPlaybackClockAnchor | null> => {
+    const plugin = getNativePlugin();
+    if (!plugin?.pause) return null;
+    const current = getInterpolatedAndroidPlaybackPositionSec();
+    updateAndroidPlaybackClockAnchor({
+        positionMs: current ? Math.round(current.positionSec * 1000) : (latestPlaybackClockAnchor?.positionMs ?? 0),
+        isPlaying: false,
+        reason: 'pause',
+    });
+    try {
+        const res = await plugin.pause();
+        return updateAndroidPlaybackClockAnchor({ ...res, isPlaying: false, reason: 'pause' });
+    } catch {
+        return latestPlaybackClockAnchor;
+    }
+};
+
+export const seekAndroidNativeAudio = async (
+    positionMs: number,
+): Promise<StampedPlaybackClockAnchor | null> => {
+    const plugin = getNativePlugin();
+    const clampedMs = Math.max(0, Math.round(Number.isFinite(positionMs) ? positionMs : 0));
+    updateAndroidPlaybackClockAnchor({
+        positionMs: clampedMs,
+        ended: false,
+        reason: 'seek',
+    });
+    if (!plugin?.seekTo) return latestPlaybackClockAnchor;
+    try {
+        const res = await plugin.seekTo({ positionMs: clampedMs });
+        return updateAndroidPlaybackClockAnchor({
+            ...res,
+            positionMs: res?.positionMs ?? clampedMs,
+            ended: false,
+            reason: 'seek',
+        });
+    } catch {
+        return latestPlaybackClockAnchor;
+    }
+};
+
+export const setAndroidNativeVolume = async (volume: number): Promise<boolean> => {
+    const plugin = getNativePlugin();
+    if (!plugin?.setVolume) return false;
+    const clamped = Math.max(0, Math.min(1, Number.isFinite(volume) ? volume : 1));
+    try {
+        const res = await plugin.setVolume({ volume: clamped });
+        return Boolean(res?.ok ?? true);
+    } catch {
+        return false;
+    }
+};
+
+export const setAndroidNativePlaybackSpeed = async (
+    playbackSpeed: number,
+): Promise<StampedPlaybackClockAnchor | null> => {
+    const plugin = getNativePlugin();
+    const safeSpeed = Math.max(0.25, Math.min(4.0, Number.isFinite(playbackSpeed) && playbackSpeed > 0 ? playbackSpeed : 1));
+    const current = getInterpolatedAndroidPlaybackPositionSec();
+    updateAndroidPlaybackClockAnchor({
+        positionMs: current ? Math.round(current.positionSec * 1000) : (latestPlaybackClockAnchor?.positionMs ?? 0),
+        playbackSpeed: safeSpeed,
+        reason: 'speed-change',
+    });
+    if (!plugin?.setPlaybackSpeed) return latestPlaybackClockAnchor;
+    try {
+        const res = await plugin.setPlaybackSpeed({ playbackSpeed: safeSpeed, speed: safeSpeed });
+        return updateAndroidPlaybackClockAnchor({
+            ...res,
+            playbackSpeed: res?.playbackSpeed ?? safeSpeed,
+            reason: 'speed-change',
+        });
+    } catch {
+        return latestPlaybackClockAnchor;
+    }
+};
+
+export const getAndroidNativePlaybackPosition = async (): Promise<StampedPlaybackClockAnchor | null> => {
+    const plugin = getNativePlugin();
+    if (!plugin?.getPlaybackPosition) return latestPlaybackClockAnchor;
+    try {
+        const res = await plugin.getPlaybackPosition();
+        return updateAndroidPlaybackClockAnchor(res);
+    } catch {
+        return latestPlaybackClockAnchor;
+    }
+};
+
+export const subscribeAndroidPlaybackClockAnchor = (
+    listener: (anchor: StampedPlaybackClockAnchor) => void,
+): (() => void) => {
+    clockAnchorSubscribers.add(listener);
+
+    const domHandler = (event: Event) => {
+        const detail = (event as CustomEvent<FoliaNativePlaybackClockAnchor> | undefined)?.detail;
+        if (detail) {
+            updateAndroidPlaybackClockAnchor(detail);
+        }
+    };
+    if (typeof window !== 'undefined') {
+        window.addEventListener(ANDROID_PLAYBACK_CLOCK_ANCHOR_EVENT, domHandler);
+    }
+
+    const plugin = getNativePlugin();
+    let handlePromise: Promise<{ remove: () => Promise<void> }> | null = null;
+    if (plugin?.addListener) {
+        try {
+            const maybePromise = plugin.addListener('playbackClockAnchor', (ev: FoliaNativePlaybackClockAnchor) => {
+                if (ev) {
+                    updateAndroidPlaybackClockAnchor(ev);
+                }
+            });
+            handlePromise = Promise.resolve(maybePromise);
+        } catch {
+            handlePromise = null;
+        }
+    }
+
+    return () => {
+        clockAnchorSubscribers.delete(listener);
+        if (typeof window !== 'undefined') {
+            window.removeEventListener(ANDROID_PLAYBACK_CLOCK_ANCHOR_EVENT, domHandler);
+        }
+        if (handlePromise) {
+            void handlePromise.then(h => h?.remove?.()).catch(() => {});
+        }
+    };
+};
+
+const patchedElements = new WeakMap<HTMLAudioElement, { unbind: () => void }>();
+
+/**
+ * Binds or unbinds an HTMLAudioElement to the native AndroidX Media3 ExoPlayer bridge so all
+ * existing transport callers (audioRef.current.play(), .pause(), .currentTime = ..., .volume = ...)
+ * operate on the hardware-decoded ExoPlayer instance when WebAudio DSP features are inactive.
+ */
+export const bindAudioElementToNativeExoPlayer = (
+    audioElement: HTMLAudioElement | null,
+    active: boolean,
+): void => {
+    if (!audioElement) return;
+    const existing = patchedElements.get(audioElement);
+    if (!active) {
+        if (existing) {
+            existing.unbind();
+            patchedElements.delete(audioElement);
+        }
+        return;
+    }
+    if (existing) return;
+
+    const proto = Object.getPrototypeOf(audioElement) as HTMLMediaElement;
+    const origPlay = proto.play.bind(audioElement);
+    const origPause = proto.pause.bind(audioElement);
+    const currentTimeDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'currentTime');
+    const durationDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'duration');
+    const pausedDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'paused');
+    const endedDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'ended');
+    const volumeDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'volume');
+    const mutedDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'muted');
+    const rateDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'playbackRate');
+
+    // Ensure the underlying WebView media element stays silent and paused while ExoPlayer decodes natively.
+    try {
+        origPause();
+        mutedDesc?.set?.call(audioElement, true);
+    } catch {
+        // Ignore in non-browser test mocks
+    }
+
+    let virtualVolume = 1;
+    let virtualMuted = false;
+
+    audioElement.play = () => {
+        void playAndroidNativeAudio();
+        audioElement.dispatchEvent(new Event('play'));
+        audioElement.dispatchEvent(new Event('playing'));
+        return Promise.resolve();
+    };
+
+    audioElement.pause = () => {
+        void pauseAndroidNativeAudio();
+        audioElement.dispatchEvent(new Event('pause'));
+    };
+
+    Object.defineProperty(audioElement, 'currentTime', {
+        configurable: true,
+        get: () => getInterpolatedAndroidPlaybackPositionSec()?.positionSec ?? (currentTimeDesc?.get?.call(audioElement) ?? 0),
+        set: (val: number) => {
+            const safeSec = Math.max(0, Number.isFinite(val) ? val : 0);
+            void seekAndroidNativeAudio(Math.round(safeSec * 1000));
+            audioElement.dispatchEvent(new Event('timeupdate'));
+            audioElement.dispatchEvent(new Event('seeked'));
+        },
+    });
+
+    Object.defineProperty(audioElement, 'duration', {
+        configurable: true,
+        get: () => {
+            const interp = getInterpolatedAndroidPlaybackPositionSec();
+            if (interp && interp.durationSec > 0) return interp.durationSec;
+            return durationDesc?.get?.call(audioElement) ?? 0;
+        },
+    });
+
+    Object.defineProperty(audioElement, 'paused', {
+        configurable: true,
+        get: () => {
+            const interp = getInterpolatedAndroidPlaybackPositionSec();
+            return interp ? !interp.isPlaying : true;
+        },
+    });
+
+    Object.defineProperty(audioElement, 'ended', {
+        configurable: true,
+        get: () => Boolean(getInterpolatedAndroidPlaybackPositionSec()?.ended),
+    });
+
+    Object.defineProperty(audioElement, 'volume', {
+        configurable: true,
+        get: () => virtualVolume,
+        set: (val: number) => {
+            virtualVolume = Math.max(0, Math.min(1, Number.isFinite(val) ? val : 1));
+            void setAndroidNativeVolume(virtualMuted ? 0 : virtualVolume);
+        },
+    });
+
+    Object.defineProperty(audioElement, 'muted', {
+        configurable: true,
+        get: () => virtualMuted,
+        set: (val: boolean) => {
+            virtualMuted = Boolean(val);
+            void setAndroidNativeVolume(virtualMuted ? 0 : virtualVolume);
+        },
+    });
+
+    Object.defineProperty(audioElement, 'playbackRate', {
+        configurable: true,
+        get: () => getInterpolatedAndroidPlaybackPositionSec()?.playbackSpeed ?? (rateDesc?.get?.call(audioElement) ?? 1),
+        set: (val: number) => {
+            const safeRate = Math.max(0.25, Math.min(4.0, Number.isFinite(val) && val > 0 ? val : 1));
+            void setAndroidNativePlaybackSpeed(safeRate);
+        },
+    });
+
+    const unbindSub = subscribeAndroidPlaybackClockAnchor((anchor) => {
+        if (anchor.reason === 'ready' || anchor.reason === 'track-change') {
+            audioElement.dispatchEvent(new Event('durationchange'));
+            audioElement.dispatchEvent(new Event('loadedmetadata'));
+        }
+        if (anchor.reason === 'play') {
+            audioElement.dispatchEvent(new Event('play'));
+            audioElement.dispatchEvent(new Event('playing'));
+        } else if (anchor.reason === 'pause') {
+            audioElement.dispatchEvent(new Event('pause'));
+        } else if (anchor.reason === 'seek') {
+            audioElement.dispatchEvent(new Event('seeked'));
+        }
+        audioElement.dispatchEvent(new Event('timeupdate'));
+        if (anchor.ended) {
+            audioElement.dispatchEvent(new Event('ended'));
+        }
+    });
+
+    patchedElements.set(audioElement, {
+        unbind: () => {
+            unbindSub();
+            delete (audioElement as { play?: unknown }).play;
+            delete (audioElement as { pause?: unknown }).pause;
+            for (const prop of ['currentTime', 'duration', 'paused', 'ended', 'volume', 'muted', 'playbackRate']) {
+                delete (audioElement as unknown as Record<string, unknown>)[prop];
+            }
+            try {
+                mutedDesc?.set?.call(audioElement, false);
+            } catch {
+                // Ignore
+            }
+            void origPlay;
+        },
+    });
 };

@@ -13,7 +13,7 @@ import type { ChorusRange } from '../../../utils/lyrics/chorusEffects';
 import { getPlaybackSongKey } from '../../../utils/appPlaybackGuards';
 import { applyLyricsTransform, lyricsForNoLyrics, untransformedLyrics } from '../../../services/hostExtensionHooks';
 import { setLyricsState as setPlaybackLyrics, usePlaybackStore } from '../../../stores/usePlaybackStore';
-import { persistPreSegmentedLyricsToDisk } from '../../../services/persistentDiskCacheService';
+import { isPreSegmentedLyricsReady, persistPreSegmentedLyricsToDisk } from '../../../services/persistentDiskCacheService';
 
 // src/components/app/playback/createLyricsSetter.ts
 
@@ -104,9 +104,11 @@ export const createLyricsSetter = (
             // with no song identity and so cannot look up a per-song override themselves. Last in
             // the chain, so it sees the lines that actually survived filtering.
             processed = applyLyricWordSegmentation(processed, getLyricSegmentationRecord());
-            // icu-folia's default split, for every line the saved one does not cover. A no-op until
-            // its engines have loaded; useIcuFoliaSegmentation bakes it on afterwards in that case.
-            processed = applyAutoWordSegmentation(processed);
+            // Skip re-running Jieba/ICU word segmentation when lyrics were loaded from the persistent
+            // pre-segmented disk cache with autoWordSegments already baked onto the lines.
+            if (!isPreSegmentedLyricsReady(processed)) {
+                processed = applyAutoWordSegmentation(processed);
+            }
             const readyLyrics = ensureLyricDataRenderHints(processed);
             // Persist the pre-parsed, pre-segmented, render-hinted structure to disk so future plays
             // of this track load ready-to-render lyrics with zero CPU parsing or segmentation.

@@ -1105,8 +1105,10 @@ describe('Android SAF local music adapter & Media3 playback bridge', () => {
         // 1. Pre-Parsed & Pre-Segmented Lyrics Disk Cache
         const parsedFirst = await LyricParserFactory.parse({
             type: 'embedded',
-            textContent: '[00:01.00]故事的结局\n[00:03.50]Hello world',
-            translationContent: '[00:01.00]The end of the story\n[00:03.50]你好世界',
+            textContent: '[00:01.00]故事的结局
+[00:03.50]Hello world',
+            translationContent: '[00:01.00]The end of the story
+[00:03.50]你好世界',
         });
         expect(parsedFirst).not.toBeNull();
         expect(parsedFirst!.lines).toHaveLength(2);
@@ -1129,8 +1131,10 @@ describe('Android SAF local music adapter & Media3 playback bridge', () => {
         clearPersistentDiskCacheForTests();
         const parsedFromDisk = await LyricParserFactory.parse({
             type: 'embedded',
-            textContent: '[00:01.00]故事的结局\n[00:03.50]Hello world',
-            translationContent: '[00:01.00]The end of the story\n[00:03.50]你好世界',
+            textContent: '[00:01.00]故事的结局
+[00:03.50]Hello world',
+            translationContent: '[00:01.00]The end of the story
+[00:03.50]你好世界',
         });
         expect(parsedFromDisk).not.toBeNull();
         expect(parsedFromDisk!.lines[0]!.autoWordSegments).toEqual(['故事', '的', '结局']);
@@ -1179,7 +1183,7 @@ describe('Android SAF local music adapter & Media3 playback bridge', () => {
                 return {
                     ok: true,
                     stagedCount: uris.length,
-                    stagedPaths: uris.map((_uri: string, idx: number) => `/data/user/0/top.izuna.foliamajor/cache/saf_audio_stage/stage_${idx}.bin`),
+                    stagedPaths: uris.map((_, idx) => `/data/user/0/top.izuna.foliamajor/cache/saf_audio_stage/stage_${idx}.bin`),
                     cacheDir: '/data/user/0/top.izuna.foliamajor/cache/saf_audio_stage',
                 };
             }),

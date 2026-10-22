@@ -118,11 +118,15 @@ const VisualizerCladdagh: React.FC<VisualizerSharedProps> = (props) => {
             const scaleY = 1.0 + bassSqr * 0.5;
             lineEl.style.transform = `translate(-50%, -50%) rotate(${centerNormalTiltDeg}deg) scale(${scaleX}, ${scaleY})`;
 
-            // Smoothly transition glow intensity (transition duration ~330ms at 60fps)
+            // Frame-rate-independent glow intensity transition (~330ms across 60Hz, 90Hz, and 120Hz)
+            const nowMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+            const dtSec = lastGlowFrameMs > 0 ? Math.min(0.1, Math.max(0.001, (nowMs - lastGlowFrameMs) / 1000)) : (1 / 60);
+            lastGlowFrameMs = nowMs;
             const targetIntensity = isChorus ? 1.0 : 0.0;
             const diff = targetIntensity - glowIntensityRef.current;
-            if (Math.abs(diff) > 0.01) {
-                glowIntensityRef.current += Math.sign(diff) * 0.05;
+            const step = dtSec * 3.0;
+            if (Math.abs(diff) > step) {
+                glowIntensityRef.current += Math.sign(diff) * step;
                 glowIntensityRef.current = Math.max(0, Math.min(1, glowIntensityRef.current));
             } else {
                 glowIntensityRef.current = targetIntensity;
@@ -137,9 +141,7 @@ const VisualizerCladdagh: React.FC<VisualizerSharedProps> = (props) => {
                 lineEl.style.filter = 'none';
             }
 
-            if (!paused || Math.abs(targetIntensity - glowIntensityRef.current) > 0.01) {
-                frameId = requestAnimationFrame(updateColors);
-            }
+            frameId = requestAnimationFrame(updateColors);
         };
 
         frameId = requestAnimationFrame(updateColors);
