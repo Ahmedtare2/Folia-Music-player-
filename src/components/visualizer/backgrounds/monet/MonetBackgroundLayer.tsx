@@ -1,6 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { DEFAULT_MONET_BACKGROUND_TUNING, type MonetBackgroundImage, type MonetBackgroundTuning, type Theme } from '../../../../types';
+import {
+    extractAssetIdFromCoverUrl,
+    getCachedLocalCoverObjectUrl,
+    resolveLocalCoverObjectUrl,
+} from '../../../../services/localCoverRuntime';
+import { isAppForegroundVisible, subscribeAppForegroundVisibility } from '../../../../utils/visualizerVisibilityGate';
 import { colorWithAlpha } from '../../colorMix';
 import { getMonetBackgroundCacheKey, wantMonetBackgroundUrl, checkCanvasFilterSupport } from '../../monet/monetBackgroundPipeline';
 import { buildMonetDriftTrack } from './monetBackgroundDrift';
@@ -28,7 +34,7 @@ const clamp = (value: number, min: number, max: number) => Math.min(max, Math.ma
 /**
  * Plays the noise-driven drift track on `ref` for as long as it stays enabled. The keyframes are
  * handed to the Web Animations API rather than written per frame, so playback stays on the
- * compositor and costs no main-thread work once started.
+ * compositor and costs no main-thread work once started. Pauses automatically when hidden.
  */
 const useMonetBackgroundDrift = (
     ref: React.RefObject<HTMLDivElement | null>,
@@ -51,7 +57,21 @@ const useMonetBackgroundDrift = (
             easing: 'linear',
         });
 
-        return () => animation.cancel();
+        if (!isAppForegroundVisible()) {
+            animation.pause();
+        }
+        const unsubscribe = subscribeAppForegroundVisibility((visible) => {
+            if (visible) {
+                animation.play();
+            } else {
+                animation.pause();
+            }
+        });
+
+        return () => {
+            unsubscribe();
+            animation.cancel();
+        };
     }, [enabled, ref, strength, reducedMotion]);
 };
 
@@ -80,6 +100,9 @@ const MonetBackgroundLayer: React.FC<MonetBackgroundLayerProps> = ({
     // still to come, so that a small picture of this background is not taken with the raw cover.
     const [isPipelinePending, setIsPipelinePending] = useState(false);
     const sourceUrl = resolveMonetSourceUrl(coverUrl, monetBackgroundImage, tuning);
+    const [resolvedFallbackUrl, setResolvedFallbackUrl] = useState<string | null>(() => (
+        sourceUrl ? (getCachedLocalCoverObjectUrl(sourceUrl) ?? sourceUrl) : null
+    ));
     // A copy for a new song (or a new type) is ready once its first picture is made, and shows that
     // picture at once rather than crossfading it in from the raw cover: the background layer around
     // it plays the change. Later pictures (another theme, a setting) crossfade in place, as they did.
@@ -87,6 +110,31 @@ const MonetBackgroundLayer: React.FC<MonetBackgroundLayerProps> = ({
     const [firstPicture, setFirstPicture] = useState<string | null>(null);
     // The image the picture on screen was made from.
     const shownSource = useRef<string | null>(null);
+
+    useEffect(() => {
+        if (!sourceUrl) {
+            setResolvedFallbackUrl(null);
+            return undefined;
+        }
+        const cached = getCachedLocalCoverObjectUrl(sourceUrl);
+        if (cached) {
+            setResolvedFallbackUrl(cached);
+            return undefined;
+        }
+        setResolvedFallbackUrl(sourceUrl);
+        if (!extractAssetIdFromCoverUrl(sourceUrl)) {
+            return undefined;
+        }
+        let cancelled = false;
+        void resolveLocalCoverObjectUrl(sourceUrl).then((blobUrl) => {
+            if (!cancelled && blobUrl) {
+                setResolvedFallbackUrl(blobUrl);
+            }
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [sourceUrl]);
 
     const fallbackGradient = useMemo(
         () => `linear-gradient(135deg, ${colorWithAlpha(theme.accentColor, 0.22)}, ${colorWithAlpha(theme.backgroundColor, 0.96)} 50%, ${colorWithAlpha(theme.primaryColor, 0.18)})`,
@@ -162,7 +210,7 @@ const MonetBackgroundLayer: React.FC<MonetBackgroundLayerProps> = ({
     useMonetBackgroundDrift(driftRef, driftEnabled, driftStrength, reduceBackgroundMotion);
     // Only promote the layer while it actually moves; an idle drift wrapper stays a plain div.
     const driftStyle = useMemo<React.CSSProperties | undefined>(
-        () => (driftEnabled ? { willChange: 'transform' } : undefined),
+        () => (driftEnabled ? { willChange: 'transform', transform: 'translate3d(0, 0, 0)', backfaceVisibility: 'hidden' } : undefined),
         [driftEnabled],
     );
 
@@ -182,10 +230,11 @@ const MonetBackgroundLayer: React.FC<MonetBackgroundLayerProps> = ({
         return null;
     }
 
+    const effectiveSourceForCss = resolvedFallbackUrl || sourceUrl;
     const resolvedBackgroundImage = pipelineUrl
         ? `url(${pipelineUrl})`
-        : sourceUrl
-            ? `linear-gradient(135deg, ${colorWithAlpha(theme.accentColor, 0.2)}, ${colorWithAlpha(theme.backgroundColor, 0.78)}), url(${sourceUrl})`
+        : effectiveSourceForCss
+            ? `linear-gradient(135deg, ${colorWithAlpha(theme.accentColor, 0.2)}, ${colorWithAlpha(theme.backgroundColor, 0.78)}), url(${effectiveSourceForCss})`
             : fallbackGradient;
 
     const arriving = isPipelinePending ? { [ARRIVING_MARK]: '' } : {};
@@ -194,7 +243,7 @@ const MonetBackgroundLayer: React.FC<MonetBackgroundLayerProps> = ({
 
     if (tuning.backgroundLayout === 'full-overlay') {
         return (
-            <div className="absolute inset-0 z-0 overflow-hidden" {...arriving}>
+            <div className="absolute inset-0 z-0 overflow-hidden" style={{ contain: 'layout paint style', transform: 'translate3d(0, 0, 0)' }} {...arriving}>
                 <div ref={driftRef} className="absolute inset-0" style={driftStyle}>
                     <AnimatePresence initial={false}>
                         <motion.div
@@ -209,6 +258,8 @@ const MonetBackgroundLayer: React.FC<MonetBackgroundLayerProps> = ({
                                 backgroundImage: resolvedBackgroundImage,
                                 backgroundSize: 'cover',
                                 backgroundPosition: 'center',
+                                transform: 'translate3d(0, 0, 0)',
+                                backfaceVisibility: 'hidden',
                                 ...blurStyle,
                             }}
                         />
@@ -227,7 +278,7 @@ const MonetBackgroundLayer: React.FC<MonetBackgroundLayerProps> = ({
     const imagePositionX = clamp(50 + tuning.backgroundHalfPaneOffsetX, 10, 90);
 
     return (
-        <div className="absolute inset-0 z-0 overflow-hidden" {...arriving}>
+        <div className="absolute inset-0 z-0 overflow-hidden" style={{ contain: 'layout paint style', transform: 'translate3d(0, 0, 0)' }} {...arriving}>
             <div
                 className="absolute inset-0"
                 style={{
@@ -257,6 +308,8 @@ const MonetBackgroundLayer: React.FC<MonetBackgroundLayerProps> = ({
                                     backgroundRepeat: 'no-repeat',
                                     backgroundSize: 'cover',
                                     backgroundPosition: `${imagePositionX}% center`,
+                                    transform: 'translate3d(0, 0, 0)',
+                                    backfaceVisibility: 'hidden',
                                     ...blurStyle,
                                 }}
                             />

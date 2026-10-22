@@ -1,17 +1,18 @@
 /* src/components/visualizer/backgrounds/common/GeometricBackground.css */
 /* The loops of the geometric background (GeometricBackground.tsx). Each element gives its own
-   duration and delay, and its numbers as custom properties; a delay shows the loop's first frame. A
-   paused scene holds every loop where it is. */
+   duration and delay, and its numbers as custom properties; a delay shows the loop's first frame.
+   Promoted to 3D GPU compositor layers (translate3d + will-change) so all drift/pulse/rise
+   animations execute on the hardware RenderThread with zero main-thread layout or paint. */
 
 @keyframes geometric-drift {
     0% {
-        transform: translate(calc(-15px * var(--geometric-dir)), calc(30px * var(--geometric-dir))) rotate(var(--geometric-rotate));
+        transform: translate3d(calc(-15px * var(--geometric-dir)), calc(30px * var(--geometric-dir)), 0) rotate(var(--geometric-rotate));
     }
     50% {
-        transform: translate(calc(15px * var(--geometric-dir)), calc(-30px * var(--geometric-dir))) rotate(calc(var(--geometric-rotate) + 180deg));
+        transform: translate3d(calc(15px * var(--geometric-dir)), calc(-30px * var(--geometric-dir)), 0) rotate(calc(var(--geometric-rotate) + 180deg));
     }
     100% {
-        transform: translate(calc(-15px * var(--geometric-dir)), calc(30px * var(--geometric-dir))) rotate(calc(var(--geometric-rotate) + 360deg));
+        transform: translate3d(calc(-15px * var(--geometric-dir)), calc(30px * var(--geometric-dir)), 0) rotate(calc(var(--geometric-rotate) + 360deg));
     }
 }
 
@@ -27,14 +28,14 @@
 
 @keyframes geometric-rise {
     0% {
-        transform: translateY(0);
+        transform: translate3d(0, 0, 0);
         opacity: 0;
     }
     50% {
         opacity: var(--geometric-peak);
     }
     100% {
-        transform: translateY(-100px);
+        transform: translate3d(0, -100px, 0);
         opacity: 0;
     }
 }
@@ -44,6 +45,9 @@
 .geometric-rise {
     animation-iteration-count: infinite;
     animation-fill-mode: backwards;
+    will-change: transform, opacity;
+    backface-visibility: hidden;
+    -webkit-backface-visibility: hidden;
 }
 
 .geometric-drift {
@@ -65,4 +69,5 @@
 .geometric-paused .geometric-pulse,
 .geometric-paused .geometric-rise {
     animation-play-state: paused;
+    will-change: auto;
 }

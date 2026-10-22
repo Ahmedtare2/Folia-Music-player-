@@ -62,7 +62,7 @@ export type ThemeSettingsState = {
 };
 
 export const useThemeSettingsStore = create<ThemeSettingsState>((set, get) => ({
-    useCoverColorBg: getStoredBoolean('use_cover_color_bg', false),
+    useCoverColorBg: getStoredBoolean('use_cover_color_bg', true),
     staticMode: getStoredBoolean('static_mode', false),
     disableHomeDynamicBackground: readStoredDisableHomeDynamicBackground(),
     followSystemTheme: initialFollowSystemTheme,
