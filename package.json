@@ -67,7 +67,9 @@
     "android:apk:debug": "npm run build:android && node packaging/android/build-apk.mjs --debug",
     "android:assets": "python3 packaging/android/generate-android-assets.py",
     "android:apk:release": "npm run build:android && node packaging/android/build-apk.mjs --release --require-signed",
-    "android:apk": "npm run android:apk:release"
+    "android:apk": "npm run android:apk:release",
+    "pretypecheck": "node packaging/android/restore-latest-overrides.mjs",
+    "prebuild:android:web": "node packaging/android/restore-latest-overrides.mjs"
   },
   "build": {
     "appId": "top.izuna.foliamajor",
