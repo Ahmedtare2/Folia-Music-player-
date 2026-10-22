@@ -129,7 +129,7 @@ export const useVisualizerRendererModel = ({
 
     const background = useMemo<VisualizerBackgroundConfig>(() => ({
         ...backgroundConfig,
-        transparent: isPlayerPageTransparent || hasAndroidNativeVisualizerBridge(),
+        transparent: isPlayerPageTransparent,
         common: {
             ...backgroundConfig.common,
             // A settings subview covers the geometry anyway, and drawing it under an opaque panel
@@ -154,7 +154,7 @@ export const useVisualizerRendererModel = ({
         songTitle: displaySong?.name,
         songArtist,
         songAlbum,
-        coverUrl: displayCoverUrl,
+        coverUrl: displayCoverUrl || displaySong?.album?.coverUrl || null,
         showText: resolveVisualizerShowText({ currentView, isSettingsModalOpen, isPanelOpen, backdropLyrics, isMobileVisualizerActive }),
         seed,
         songHandoff,

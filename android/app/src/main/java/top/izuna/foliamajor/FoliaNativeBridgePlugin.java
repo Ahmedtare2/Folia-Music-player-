@@ -1324,14 +1324,18 @@ public class FoliaNativeBridgePlugin extends Plugin {
         serviceIntent.putExtra(FoliaPlaybackService.EXTRA_PLAYBACK_SPEED, speed != null ? speed : 1.0f);
 
         try {
-            if (Boolean.TRUE.equals(isPlaying) && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(serviceIntent);
-            } else {
+            if (Boolean.TRUE.equals(isPlaying)) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(serviceIntent);
+                } else {
+                    context.startService(serviceIntent);
+                }
+            } else if (FoliaPlaybackService.isPlaybackActive()) {
                 context.startService(serviceIntent);
             }
             call.resolve();
         } catch (Exception e) {
-            call.reject("Failed to start FoliaPlaybackService: " + e.getMessage(), e);
+            call.resolve();
         }
     }
 

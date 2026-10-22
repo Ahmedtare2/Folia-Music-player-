@@ -259,14 +259,25 @@ export const buildMobileLibraryCollections = (
     const toDetail = (
         kind: MobileCollectionDetail['kind'],
         group: LocalLibraryGroup,
-    ): MobileCollectionDetail => ({
-        kind,
-        id: group.id,
-        title: group.name,
-        subtitle: group.description,
-        coverUrl: typeof group.coverUrl === 'string' ? group.coverUrl : undefined,
-        songs: group.songs,
-    });
+    ): MobileCollectionDetail => {
+        const firstSong = group.songs[0];
+        const fallbackCover = firstSong ? resolveLocalSongCoverThumb(firstSong, 512) : undefined;
+        let subtitle = group.description;
+        if (kind === 'album' && firstSong) {
+            const artistText = resolveLocalSongArtistText(firstSong, t('localMusic.unknownArtist', 'Unknown Artist'));
+            if (!subtitle || subtitle === t('localMusic.albums', 'localMusic.albums') || subtitle === 'localMusic.albums') {
+                subtitle = artistText;
+            }
+        }
+        return {
+            kind,
+            id: group.id,
+            title: group.name,
+            subtitle,
+            coverUrl: (typeof group.coverUrl === 'string' && group.coverUrl) ? group.coverUrl : fallbackCover,
+            songs: group.songs,
+        };
+    };
 
     return {
         albums: groups.albums.map(g => toDetail('album', g)),

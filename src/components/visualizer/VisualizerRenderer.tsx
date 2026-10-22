@@ -31,8 +31,26 @@ const VisualizerRenderer: React.FC<VisualizerRendererProps> = ({ mode, animateSt
     // the style is switched here, in one place, with the props tuned for it.
     const shownMode = useDeferredValue(mode);
     const entry = getVisualizerRegistryEntry(shownMode);
+    const [mobileDisplayMode, setMobileDisplayMode] = React.useState<string>(() => (
+        typeof document !== 'undefined' ? (document.documentElement?.getAttribute?.('data-mobile-display-mode') || 'closed') : 'closed'
+    ));
+    React.useEffect(() => {
+        if (typeof window === 'undefined') return undefined;
+        const onMode = (e: Event) => {
+            const detailMode = (e as CustomEvent<{ mode?: string }>)?.detail?.mode;
+            if (typeof detailMode === 'string') {
+                setMobileDisplayMode(detailMode);
+            } else if (typeof document !== 'undefined') {
+                setMobileDisplayMode(document.documentElement?.getAttribute?.('data-mobile-display-mode') || 'closed');
+            }
+        };
+        window.addEventListener('folia:mobile-display-mode', onMode);
+        return () => window.removeEventListener('folia:mobile-display-mode', onMode);
+    }, []);
+    const isMobileLyricsOverlay = mobileDisplayMode === 'lyrics';
     const sharedProps = {
         ...props,
+        showText: isMobileLyricsOverlay ? false : props.showText,
         background: {
             ...props.background,
             mode: props.background?.mode ?? DEFAULT_VISUALIZER_BACKGROUND_MODE,

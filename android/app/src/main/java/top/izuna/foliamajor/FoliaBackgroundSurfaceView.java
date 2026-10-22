@@ -215,7 +215,7 @@ public class FoliaBackgroundSurfaceView extends GLSurfaceView implements Choreog
             && hostWindowFocused
             && visualizerEnabled
             && visualizerVisible
-            && (isAudioPlaying || renderer.isTransitionActive());
+            && (isAudioPlaying || requestedTargetFps > 0 || renderer.isTransitionActive());
     }
 
     private synchronized void stopChoreographerCallbacks() {
@@ -347,39 +347,38 @@ public class FoliaBackgroundSurfaceView extends GLSurfaceView implements Choreog
             "}\n" +
             "\n" +
             "void main() {\n" +
-            "    float aspect = uResolution.x / max(1.0, uResolution.y);\n" +
             "    vec2 uv = vUv;\n" +
-            "    vec2 p = (uv - 0.5) * vec2(aspect, 1.0);\n" +
+            "    vec2 p = uv - 0.5;\n" +
             "\n" +
             "    float t = uTime;\n" +
-            "    float bassPulse = 1.0 + uBass * 0.28;\n" +
-            "    float midSwirl = uMid * 0.22;\n" +
+            "    float bassPulse = 1.0 + uBass * 0.34;\n" +
+            "    float midSwirl = uMid * 0.28;\n" +
             "\n" +
             "    // Perlin/FBM domain warp for liquid silk flow\n" +
             "    vec2 warp = vec2(\n" +
-            "        fbm(p * 1.65 + vec2(t * 0.18, -t * 0.14)),\n" +
-            "        fbm(p * 1.65 + vec2(-t * 0.15, t * 0.21) + vec2(5.2, 1.3))\n" +
+            "        fbm(p * 2.35 + vec2(t * 0.22, -t * 0.18)),\n" +
+            "        fbm(p * 2.35 + vec2(-t * 0.19, t * 0.25) + vec2(5.2, 1.3))\n" +
             "    ) - 0.5;\n" +
-            "    vec2 wp = p + warp * (0.42 + uEnergy * 0.24);\n" +
+            "    vec2 wp = p + warp * (0.36 + uEnergy * 0.22);\n" +
             "\n" +
-            "    // 6 orbiting color anchors across the viewport\n" +
-            "    vec2 c0 = vec2(sin(t * 0.41) * 0.28 * aspect, cos(t * 0.33) * 0.32);\n" +
-            "    vec2 c1 = vec2(cos(t * 0.37 + 1.4) * 0.30 * aspect, sin(t * 0.45 + 0.8) * 0.34);\n" +
-            "    vec2 c2 = vec2(sin(t * 0.29 + 2.8) * 0.26 * aspect, cos(t * 0.51 + 2.1) * 0.28);\n" +
-            "    vec2 c3 = vec2(cos(t * 0.49 + 4.1) * 0.32 * aspect, sin(t * 0.31 + 3.5) * 0.36);\n" +
-            "    vec2 c4 = vec2(sin(t * 0.35 + 5.0 + midSwirl) * 0.24 * aspect, cos(t * 0.43 + 4.4) * 0.25);\n" +
-            "    vec2 c5 = vec2(cos(t * 0.27 + 0.5) * 0.20 * aspect, sin(t * 0.39 + 5.6) * 0.30);\n" +
+            "    // 6 wide-orbiting color anchors spread across all quadrants so colors stay distinct\n" +
+            "    vec2 c0 = vec2(-0.26 + sin(t * 0.43) * 0.22, -0.24 + cos(t * 0.35) * 0.22);\n" +
+            "    vec2 c1 = vec2( 0.26 + cos(t * 0.39 + 1.4) * 0.22, -0.20 + sin(t * 0.47 + 0.8) * 0.22);\n" +
+            "    vec2 c2 = vec2(-0.24 + sin(t * 0.31 + 2.8) * 0.22,  0.24 + cos(t * 0.51 + 2.1) * 0.22);\n" +
+            "    vec2 c3 = vec2( 0.24 + cos(t * 0.49 + 4.1) * 0.22,  0.26 + sin(t * 0.33 + 3.5) * 0.22);\n" +
+            "    vec2 c4 = vec2( sin(t * 0.37 + 5.0 + midSwirl) * 0.32, -0.32 + cos(t * 0.43 + 4.4) * 0.18);\n" +
+            "    vec2 c5 = vec2( cos(t * 0.29 + 0.5) * 0.30,  0.32 + sin(t * 0.41 + 5.6) * 0.18);\n" +
             "\n" +
-            "    float falloff = 2.65 / bassPulse;\n" +
-            "    float w0 = exp(-dot(wp - c0, wp - c0) * falloff) * (1.15 + uBass * 0.40);\n" +
-            "    float w1 = exp(-dot(wp - c1, wp - c1) * (falloff * 1.05)) * (1.05 + uMid * 0.30);\n" +
-            "    float w2 = exp(-dot(wp - c2, wp - c2) * (falloff * 0.95)) * (0.95 + uHigh * 0.30);\n" +
-            "    float w3 = exp(-dot(wp - c3, wp - c3) * (falloff * 1.10)) * 0.90;\n" +
-            "    float w4 = exp(-dot(wp - c4, wp - c4) * (falloff * 1.20)) * (0.85 + uEnergy * 0.25);\n" +
-            "    float w5 = exp(-dot(wp - c5, wp - c5) * (falloff * 1.15)) * 0.80;\n" +
+            "    float falloff = 8.4 / bassPulse;\n" +
+            "    float w0 = pow(exp(-dot(wp - c0, wp - c0) * falloff), 1.65) * (1.35 + uBass * 0.50);\n" +
+            "    float w1 = pow(exp(-dot(wp - c1, wp - c1) * (falloff * 1.05)), 1.65) * (1.20 + uMid * 0.40);\n" +
+            "    float w2 = pow(exp(-dot(wp - c2, wp - c2) * (falloff * 0.95)), 1.65) * (1.10 + uHigh * 0.40);\n" +
+            "    float w3 = pow(exp(-dot(wp - c3, wp - c3) * (falloff * 1.10)), 1.65) * 0.95;\n" +
+            "    float w4 = pow(exp(-dot(wp - c4, wp - c4) * (falloff * 1.15)), 1.65) * (0.95 + uEnergy * 0.35);\n" +
+            "    float w5 = pow(exp(-dot(wp - c5, wp - c5) * (falloff * 1.12)), 1.65) * 0.90;\n" +
             "\n" +
-            "    vec3 baseDeep = mix(uColor0, uColor3, 0.5) * 0.26;\n" +
-            "    float totalWeight = w0 + w1 + w2 + w3 + w4 + w5 + 0.35;\n" +
+            "    vec3 baseDeep = mix(uColor3, uColor0, 0.28) * 0.14;\n" +
+            "    float totalWeight = w0 + w1 + w2 + w3 + w4 + w5 + 0.55;\n" +
             "    vec3 meshColor = (\n" +
             "        uColor0 * w0 +\n" +
             "        uColor1 * w1 +\n" +
@@ -387,7 +386,7 @@ public class FoliaBackgroundSurfaceView extends GLSurfaceView implements Choreog
             "        uColor3 * w3 +\n" +
             "        uColor4 * w4 +\n" +
             "        uColor5 * w5 +\n" +
-            "        baseDeep * 0.35\n" +
+            "        baseDeep * 0.55\n" +
             "    ) / totalWeight;\n" +
             "\n" +
             "    // Subtle high-frequency shimmer from treble & FBM crest\n" +

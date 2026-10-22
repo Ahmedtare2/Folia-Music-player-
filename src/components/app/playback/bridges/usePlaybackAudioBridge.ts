@@ -99,7 +99,9 @@ export function usePlaybackAudioBridge({
         automixEnabled,
         stemSeparationEnabled,
     });
-    const useNativeExoPlayer = shouldRouteToAndroidNativeExoPlayer({
+    const forceNativeExoOverride = typeof window !== 'undefined'
+        && Boolean((window as Window & { __FOLIA_FORCE_NATIVE_EXOPLAYER__?: boolean }).__FOLIA_FORCE_NATIVE_EXOPLAYER__);
+    const useNativeExoPlayer = forceNativeExoOverride && shouldRouteToAndroidNativeExoPlayer({
         audioSrc,
         automixEnabled,
         stemSeparationEnabled,

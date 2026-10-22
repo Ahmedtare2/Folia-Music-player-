@@ -922,6 +922,24 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
     }, []);
 
     useEffect(() => {
+        const nextMode = isOpen ? displayMode : 'closed';
+        if (typeof document !== 'undefined' && document.documentElement?.setAttribute) {
+            document.documentElement.setAttribute('data-mobile-display-mode', nextMode);
+        }
+        if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+            window.dispatchEvent(new CustomEvent('folia:mobile-display-mode', { detail: { mode: nextMode } }));
+        }
+        return () => {
+            if (typeof document !== 'undefined' && document.documentElement?.setAttribute) {
+                document.documentElement.setAttribute('data-mobile-display-mode', 'closed');
+            }
+            if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+                window.dispatchEvent(new CustomEvent('folia:mobile-display-mode', { detail: { mode: 'closed' } }));
+            }
+        };
+    }, [displayMode, isOpen]);
+
+    useEffect(() => {
         if (!hasAndroidNativeVisualizerBridge()) return;
         const isVideoCovering = displayMode === 'cover' && videoStageState.shouldShowVideo && Boolean(effectiveAlbumVideoUrl);
         const enabled = Boolean(isOpen && currentSong && !isVideoCovering);
@@ -1004,7 +1022,7 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
             data-immersive-lyrics={effectiveSystemBars.isImmersiveLyricsActive ? 'true' : 'false'}
             className="fixed inset-0 z-[200] flex flex-col overflow-hidden select-none text-zinc-100"
             style={{
-                backgroundColor: (displayMode === 'cover' && !isAndroidNativeVisualizerActive) ? '#060609' : 'transparent',
+                backgroundColor: displayMode === 'cover' ? '#060609' : 'transparent',
                 paddingTop: topSafePadding,
                 paddingBottom: bottomSafePadding,
                 paddingLeft: leftSafePadding,
@@ -1116,23 +1134,33 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
             )}
 
             {/* OLED Artwork-Derived Ambient Background Layer:
-                - Rich multi-stop atmospheric blend in 'cover' mode that transitions seamlessly into the lower controls
-                - Semi-translucent scrim in 'lyrics' mode so the live VisualizerRenderer shines through while keeping lyrics readable
+                - Rich multi-stop atmospheric blend + softly blurred album cover in 'cover' mode
+                - Semi-translucent scrim in 'lyrics' mode so the live VisualizerRenderer (Monet/Latent/Cover background) shines through while keeping lyrics crisp
                 - Hidden in 'stage' mode so the full-screen Visualizer shines at 100% */}
-            {displayMode !== 'stage' && !isAndroidNativeVisualizerActive && (
+            {displayMode !== 'stage' && (
                 <div
                     aria-hidden="true"
-                    className="pointer-events-none absolute inset-0 -z-10 transition-opacity duration-500"
+                    className="pointer-events-none absolute inset-0 -z-10 overflow-hidden transition-opacity duration-500"
                     style={{
-                        opacity: displayMode === 'lyrics' ? 0.62 : 1,
+                        opacity: displayMode === 'lyrics' ? 0.56 : 1,
                         background: `
-                            radial-gradient(circle at 50% 24%, color-mix(in srgb, ${accentColor} 34%, transparent) 0%, transparent 64%),
-                            radial-gradient(circle at 22% 72%, color-mix(in srgb, ${primaryColor} 22%, transparent) 0%, transparent 58%),
-                            radial-gradient(circle at 78% 84%, color-mix(in srgb, ${accentColor} 18%, transparent) 0%, transparent 56%),
-                            linear-gradient(180deg, color-mix(in srgb, ${bgTint} 72%, #060609) 0%, color-mix(in srgb, ${bgTint} 42%, #050508) 64%, #050507 100%)
+                            radial-gradient(circle at 50% 24%, color-mix(in srgb, ${accentColor} 42%, transparent) 0%, transparent 66%),
+                            radial-gradient(circle at 22% 72%, color-mix(in srgb, ${primaryColor} 26%, transparent) 0%, transparent 60%),
+                            radial-gradient(circle at 78% 84%, color-mix(in srgb, ${accentColor} 24%, transparent) 0%, transparent 58%),
+                            linear-gradient(180deg, color-mix(in srgb, ${bgTint} 78%, #060609) 0%, color-mix(in srgb, ${bgTint} 48%, #050508) 64%, #050507 100%)
                         `,
                     }}
-                />
+                >
+                    {effectiveCover && (
+                        <img
+                            src={effectiveCover}
+                            alt=""
+                            aria-hidden="true"
+                            className="absolute inset-0 h-full w-full scale-125 object-cover blur-3xl saturate-150 transition-opacity duration-700"
+                            style={{ opacity: displayMode === 'lyrics' ? 0.34 : 0.44 }}
+                        />
+                    )}
+                </div>
             )}
 
             {/* Top Header Bar: Collapse + Mode Switcher (Cover / Lyrics / Visualizer) + Active Visualizer Quick Button + EQ + Lyric Tools + Queue */}

@@ -109,22 +109,43 @@ export const hasLocalCoverBinary = async (assetId: string): Promise<boolean> => 
   if (!isValidLocalCoverAssetId(assetId)) return false;
   if (hasElectronBridge()) return window.electron!.hasLocalCoverAsset(assetId);
   const directory = await getOpfsDirectory(false);
-  return directory ? Boolean(await readOpfsDescriptor(directory, assetId)) : false;
+  if (directory && (await readOpfsDescriptor(directory, assetId))) {
+    return true;
+  }
+  const fallbackBlob = await fetchNativeCachedCoverBlob(assetId);
+  return Boolean(fallbackBlob && fallbackBlob.size > 0);
+};
+
+const fetchNativeCachedCoverBlob = async (assetId: string): Promise<Blob | null> => {
+  if (typeof fetch !== 'function' || typeof window === 'undefined') return null;
+  try {
+    const resp = await fetch(`/__folia_cover/${encodeURIComponent(assetId)}?size=1024`);
+    if (!resp.ok) return null;
+    const contentType = resp.headers?.get?.('content-type') || '';
+    if (contentType.includes('text/html')) return null;
+    const blob = await resp.blob();
+    return blob && blob.size > 0 ? blob : null;
+  } catch {
+    return null;
+  }
 };
 
 /**
- * Reads a validated cover binary directly from OPFS as a typed Blob. Used in Capacitor native
- * shells where the web PWA service worker is intentionally not registered.
+ * Reads a validated cover binary directly from OPFS (or Android's persistent WebP mipmap disk cache
+ * at /__folia_cover/{assetId}) as a typed Blob.
  */
 export const readLocalCoverBinaryBlob = async (assetId: string): Promise<Blob | null> => {
   if (!isValidLocalCoverAssetId(assetId)) return null;
   const directory = await getOpfsDirectory(false);
-  if (!directory) return null;
-  const entry = await readOpfsDescriptor(directory, assetId);
-  if (!entry) return null;
-  return entry.file.type === entry.descriptor.mimeType
-    ? entry.file
-    : new Blob([entry.file], { type: entry.descriptor.mimeType });
+  if (directory) {
+    const entry = await readOpfsDescriptor(directory, assetId);
+    if (entry) {
+      return entry.file.type === entry.descriptor.mimeType
+        ? entry.file
+        : new Blob([entry.file], { type: entry.descriptor.mimeType });
+    }
+  }
+  return await fetchNativeCachedCoverBlob(assetId);
 };
 
 export const writeLocalCoverBinary = async (

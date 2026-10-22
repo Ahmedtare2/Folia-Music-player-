@@ -1552,8 +1552,8 @@ export default function App() {
     const isAndroidNativeVisualizerActive = hasAndroidNativeVisualizerBridge()
         && (isMobileShellActive ? isMobileVisualizerActive : currentView === 'player');
     const isPlayerPageTransparent = transparentPlayerBackground
-        || enablePlayerPageNativeBlur
-        || isAndroidNativeVisualizerActive;
+        || enablePlayerPageNativeBlur;
+    void isAndroidNativeVisualizerActive;
     const shouldUseTransparentAppBackground = isPlayerPageTransparent;
     const appStyle = useMemo(() => buildAppStyle({
         bgMode,
@@ -3139,7 +3139,7 @@ export default function App() {
                     localPlaylists={localPlaylists}
                     localLibraryCatalog={localLibraryCatalog}
                     currentSong={playerDisplayCurrentSong}
-                    coverUrl={displayCoverUrl}
+                    coverUrl={displayCoverUrl || playerDisplayCurrentSong?.album?.coverUrl || null}
                     playerState={displayPlayerState}
                     currentTime={currentTime}
                     lyricCurrentTime={lyricCurrentTime}

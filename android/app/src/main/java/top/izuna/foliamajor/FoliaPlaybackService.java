@@ -494,6 +494,10 @@ public class FoliaPlaybackService extends Service {
 
     @Override
     public int onStartCommand(@Nullable Intent intent, int flags, int startId) {
+        // Always satisfy Android 8-16's strict Context.startForegroundService() contract synchronously
+        // inside onStartCommand before any async handler post so ForegroundServiceDidNotStartInTimeException
+        // can never be thrown even if playback is buffering, paused, or immediately stopped.
+        promoteToForegroundImmediate();
         if (intent != null && intent.getAction() != null) {
             String action = intent.getAction();
             if (ACTION_LOAD_TRACK.equals(action)) {
@@ -769,7 +773,13 @@ public class FoliaPlaybackService extends Service {
                 Uri wrapper = Uri.parse(trimmed);
                 String embeddedUri = wrapper.getQueryParameter("uri");
                 if (embeddedUri != null && !embeddedUri.isEmpty()) {
-                    trimmed = URLDecoder.decode(embeddedUri, StandardCharsets.UTF_8.name());
+                    if (embeddedUri.startsWith("content%3A") || embeddedUri.startsWith("content%3a")
+                        || embeddedUri.startsWith("file%3A") || embeddedUri.startsWith("http%3A")
+                        || embeddedUri.startsWith("https%3A")) {
+                        trimmed = URLDecoder.decode(embeddedUri, StandardCharsets.UTF_8.name());
+                    } else {
+                        trimmed = embeddedUri;
+                    }
                 }
             } catch (Exception ignored) {}
         }
@@ -825,6 +835,30 @@ public class FoliaPlaybackService extends Service {
         syncNotificationAndPlatformSession();
     }
 
+    private void promoteToForegroundImmediate() {
+        if (isForegroundStarted) return;
+        try {
+            ensureNotificationChannel();
+            Notification notification = buildNotification();
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+                );
+            } else {
+                startForeground(NOTIFICATION_ID, notification);
+            }
+            isForegroundStarted = true;
+        } catch (Exception e) {
+            if (notificationManager != null) {
+                try {
+                    notificationManager.notify(NOTIFICATION_ID, buildNotification());
+                } catch (Exception ignored) {}
+            }
+        }
+    }
+
     private void syncNotificationAndPlatformSession() {
         if (currentIsPlaying) {
             registerNoisyReceiverIfNeeded();
@@ -837,23 +871,8 @@ public class FoliaPlaybackService extends Service {
         updateMediaSessionState();
         Notification notification = buildNotification();
 
-        if (currentIsPlaying && !isForegroundStarted) {
-            try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    startForeground(
-                        NOTIFICATION_ID,
-                        notification,
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
-                    );
-                } else {
-                    startForeground(NOTIFICATION_ID, notification);
-                }
-                isForegroundStarted = true;
-            } catch (Exception e) {
-                if (notificationManager != null) {
-                    notificationManager.notify(NOTIFICATION_ID, notification);
-                }
-            }
+        if (!isForegroundStarted) {
+            promoteToForegroundImmediate();
         } else if (notificationManager != null) {
             notificationManager.notify(NOTIFICATION_ID, notification);
         }

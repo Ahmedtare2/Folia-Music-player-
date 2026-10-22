@@ -542,6 +542,29 @@ export function useThemeController({
 
         setCurrentSongHasLocalAiTheme(false);
 
+        // When auto-switching song themes is enabled and this song has no cached theme yet,
+        // derive a faithful theme directly from the song's album cover artwork if available.
+        const candidateSongObj = typeof songOrId === 'object' ? (songOrId as SongResult) : null;
+        const songCoverCandidate = candidateSongObj?.album?.coverUrl || coverUrl || null;
+        if (songCoverCandidate && !isCustomThemePreferred) {
+            void (async () => {
+                try {
+                    const extracted = await extractColors(songCoverCandidate, 6);
+                    if (extracted.length > 0) {
+                        const autoCoverTheme = applyStoredAnimationIntensityToDualTheme(
+                            buildBuiltinDualTheme({ coverColors: extracted }),
+                        );
+                        if (candidateSongObj) {
+                            await saveToCache(`dual_theme_${getPlaybackSongKey(candidateSongObj)}`, autoCoverTheme);
+                        }
+                        applyDualTheme(autoCoverTheme, { respectCustomPreference: true });
+                    }
+                } catch {
+                    // Ignore background cover extraction failure
+                }
+            })();
+        }
+
         if (options?.allowLastUsedFallback) {
             const lastDualTheme = await getLastDualTheme();
             if (lastDualTheme) {
@@ -564,6 +587,31 @@ export function useThemeController({
         return 'none' as const;
     };
 
+    const lastAutoCoverUrlRef = useRef<string | null>(null);
+    useEffect(() => {
+        if (!songThemeAutoSwitchEnabled || isCustomThemePreferred || !coverUrl) {
+            return;
+        }
+        if (lastAutoCoverUrlRef.current === coverUrl) {
+            return;
+        }
+        lastAutoCoverUrlRef.current = coverUrl;
+        if (currentSongHasLocalAiTheme) {
+            return;
+        }
+        let cancelled = false;
+        void extractColors(coverUrl, 6).then((extracted) => {
+            if (cancelled || extracted.length === 0) return;
+            const autoCoverTheme = applyStoredAnimationIntensityToDualTheme(
+                buildBuiltinDualTheme({ coverColors: extracted }),
+            );
+            applyDualTheme(autoCoverTheme, { respectCustomPreference: true });
+        }).catch(() => {});
+        return () => {
+            cancelled = true;
+        };
+    }, [coverUrl, currentSongHasLocalAiTheme, isCustomThemePreferred, songThemeAutoSwitchEnabled]);
+
     // Cover-derived theme: the no-AI path. Shared by the "cover" generation source the user can
     // pick and by the fallback taken when the AI call fails for a missing API key.
     const applyCoverDerivedTheme = async (
@@ -571,7 +619,8 @@ export function useThemeController({
         shouldApply: () => boolean,
         origin: 'chosen' | 'fallback',
     ): Promise<GenerateAIThemeResult> => {
-        const coverColors = coverUrl ? await extractColors(coverUrl, 5) : [];
+        const targetCover = coverUrl || currentSong?.album?.coverUrl || null;
+        const coverColors = targetCover ? await extractColors(targetCover, 6) : [];
         const coverTheme = applyStoredAnimationIntensityToDualTheme(buildBuiltinDualTheme({ coverColors }));
 
         if (currentSong) {

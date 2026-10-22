@@ -68,16 +68,15 @@ const pickScheme = (
     random: () => number,
 ): HarmonyScheme => {
     // A real second hue on the cover is the most "from this artwork" accent available.
-    if (supportHue !== null && random() < 0.65) {
+    if (supportHue !== null && random() < 0.88) {
         return 'duotone';
     }
 
     return pickWeighted<HarmonyScheme>(random, [
-        { value: 'analogous', weight: 3 },
-        { value: 'complementary', weight: 2 },
-        { value: 'split', weight: 2 },
-        { value: 'triadic', weight: 1.5 },
-        { value: 'monochrome', weight: baseSaturation < MONOCHROME_SATURATION_CEILING ? 2.5 : 0 },
+        { value: 'analogous', weight: 6.5 },
+        { value: 'duotone', weight: supportHue !== null ? 4.0 : 0 },
+        { value: 'monochrome', weight: baseSaturation < MONOCHROME_SATURATION_CEILING ? 4.0 : 1.5 },
+        { value: 'split', weight: 0.4 },
     ]);
 };
 
@@ -124,9 +123,9 @@ export const analyzeCoverPalette = (coverColors: string[], random: () => number)
         accentHue: normalizeHue(resolveAccentHue(scheme, base.h, supportHue, random) + accentJitter),
         scheme,
         tone: pickWeighted<PaletteTone>(random, [
-            { value: 'ink', weight: 3 },
-            { value: 'tinted', weight: 4 },
-            { value: 'rich', weight: 2.5 },
+            { value: 'ink', weight: 1.5 },
+            { value: 'tinted', weight: 4.5 },
+            { value: 'rich', weight: 4.5 },
         ]),
     };
 };

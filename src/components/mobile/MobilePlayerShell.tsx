@@ -39,7 +39,7 @@ import {
     type VisualizerMode,
 } from '../../types';
 import type { LocalLibraryDisplayCatalog } from '../../services/playbackAdapters';
-import type { LocalMusicScanProgressDetail } from '../../services/localMusicService';
+import { ensureLocalSongCoverAsset, type LocalMusicScanProgressDetail } from '../../services/localMusicService';
 import { buildLocalQueue } from '../../services/playbackAdapters';
 import { getCachedLocalCoverObjectUrl, resolveLocalCoverObjectUrl } from '../../services/localCoverRuntime';
 import { isLocalCoverAssetUrl } from '../../services/localCoverAssetUrl';
@@ -164,33 +164,56 @@ const MAX_RENDERED_SONGS_STEP = 120;
 
 const LocalCoverThumbnail: React.FC<{
     coverUrl: string | null | undefined;
+    fallbackSong?: LocalSong;
     alt: string;
     fallback: React.ReactNode;
-}> = React.memo(({ coverUrl, alt, fallback }) => {
+}> = React.memo(({ coverUrl, fallbackSong, alt, fallback }) => {
+    const [lazyCoverUrl, setLazyCoverUrl] = useState<string | null>(null);
+    const effectiveCoverUrl = coverUrl || lazyCoverUrl || (fallbackSong ? resolveLocalSongCoverThumb(fallbackSong, 512) : null) || null;
     const [resolvedUrl, setResolvedUrl] = useState<string | null>(() => {
-        if (!coverUrl) return null;
-        return getCachedLocalCoverObjectUrl(coverUrl) ?? coverUrl;
+        if (!effectiveCoverUrl) return null;
+        return getCachedLocalCoverObjectUrl(effectiveCoverUrl) ?? effectiveCoverUrl;
     });
     const [hasError, setHasError] = useState(false);
 
     useEffect(() => {
+        if (effectiveCoverUrl || !fallbackSong || fallbackSong.hasNoEmbeddedCover) {
+            return undefined;
+        }
+        let cancelled = false;
+        const timer = window.setTimeout(() => {
+            void ensureLocalSongCoverAsset(fallbackSong).then((updated) => {
+                if (cancelled) return;
+                const nextUrl = resolveLocalSongCoverThumb(updated, 512);
+                if (nextUrl) {
+                    setLazyCoverUrl(nextUrl);
+                }
+            }).catch(() => {});
+        }, 40);
+        return () => {
+            cancelled = true;
+            window.clearTimeout(timer);
+        };
+    }, [effectiveCoverUrl, fallbackSong]);
+
+    useEffect(() => {
         setHasError(false);
-        if (!coverUrl) {
+        if (!effectiveCoverUrl) {
             setResolvedUrl(null);
             return undefined;
         }
-        const cached = getCachedLocalCoverObjectUrl(coverUrl);
+        const cached = getCachedLocalCoverObjectUrl(effectiveCoverUrl);
         if (cached) {
             setResolvedUrl(cached);
             return undefined;
         }
-        if (!isLocalCoverAssetUrl(coverUrl)) {
-            setResolvedUrl(coverUrl);
+        if (!isLocalCoverAssetUrl(effectiveCoverUrl)) {
+            setResolvedUrl(effectiveCoverUrl);
             return undefined;
         }
-        setResolvedUrl(coverUrl);
+        setResolvedUrl(effectiveCoverUrl);
         let cancelled = false;
-        void resolveLocalCoverObjectUrl(coverUrl).then((blobUrl) => {
+        void resolveLocalCoverObjectUrl(effectiveCoverUrl).then((blobUrl) => {
             if (!cancelled && blobUrl) {
                 setResolvedUrl(blobUrl);
                 setHasError(false);
@@ -199,7 +222,7 @@ const LocalCoverThumbnail: React.FC<{
         return () => {
             cancelled = true;
         };
-    }, [coverUrl]);
+    }, [effectiveCoverUrl]);
 
     if (!resolvedUrl || hasError) {
         return <>{fallback}</>;
@@ -334,8 +357,10 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
     const { t } = useTranslation();
     const [navState, setNavState] = useState<MobileNavigationState>(INITIAL_MOBILE_NAVIGATION_STATE);
     const [searchQuery, setSearchQuery] = useState('');
+    const [albumsSearchQuery, setAlbumsSearchQuery] = useState('');
     const [sortOrder, setSortOrder] = useState<MobileSongSortOrder>('title');
     const [visibleSongLimit, setVisibleSongLimit] = useState(MAX_RENDERED_SONGS_STEP);
+    const [visibleAlbumLimit, setVisibleAlbumLimit] = useState(60);
     const [isKeyboardOpen, setIsKeyboardOpen] = useState(false);
     const playlistInputRef = useRef<HTMLInputElement>(null);
     const songsListScrollRef = useRef<HTMLDivElement>(null);
@@ -669,6 +694,7 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                     <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded-xl border border-white/10 bg-zinc-900">
                         <LocalCoverThumbnail
                             coverUrl={thumbUrl}
+                            fallbackSong={song}
                             alt={song.title}
                             fallback={
                                 <div className="flex h-full w-full items-center justify-center text-zinc-500">
@@ -839,6 +865,7 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                     <div className="h-28 w-28 shrink-0 overflow-hidden rounded-2xl border border-white/10 bg-zinc-900 shadow-lg">
                         <LocalCoverThumbnail
                             coverUrl={detail.coverUrl ?? null}
+                            fallbackSong={detail.songs[0]}
                             alt={detail.title}
                             fallback={
                                 <div className="flex h-full w-full items-center justify-center text-zinc-500">
@@ -1160,71 +1187,145 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                             )
                         ) : navState.activeTab === 'albums' ? (
                             <div className="flex min-h-0 flex-1 flex-col px-4">
-                                {/* Segmented Albums / Artists Sub-Switcher */}
-                                <div className="flex items-center gap-2 pb-3">
-                                    {([
-                                        { id: 'albums' as const, label: `Albums (${collections.albums.length})`, icon: <Disc3 size={14} /> },
-                                        { id: 'artists' as const, label: `Artists (${collections.artists.length})`, icon: <User size={14} /> },
-                                    ]).map(sub => {
-                                        const active = navState.albumsSubTab === sub.id;
-                                        return (
-                                            <button
-                                                key={sub.id}
-                                                type="button"
-                                                onClick={() => setNavState(prev => ({ ...prev, albumsSubTab: sub.id }))}
-                                                className={`flex h-9 items-center gap-1.5 rounded-full px-4 text-xs font-semibold transition-all ${
-                                                    active
-                                                        ? 'bg-white text-zinc-950'
-                                                        : 'border border-white/10 bg-white/[0.05] text-zinc-300'
-                                                }`}
-                                            >
-                                                {sub.icon}
-                                                <span>{sub.label}</span>
-                                            </button>
-                                        );
-                                    })}
+                                {/* Segmented Albums / Artists Sub-Switcher + Quick Filter */}
+                                <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5">
+                                    <div className="flex items-center gap-2">
+                                        {([
+                                            { id: 'albums' as const, label: `Albums (${collections.albums.length})`, icon: <Disc3 size={14} /> },
+                                            { id: 'artists' as const, label: `Artists (${collections.artists.length})`, icon: <User size={14} /> },
+                                        ]).map(sub => {
+                                            const active = navState.albumsSubTab === sub.id;
+                                            return (
+                                                <button
+                                                    key={sub.id}
+                                                    type="button"
+                                                    onClick={() => {
+                                                        setVisibleAlbumLimit(60);
+                                                        setNavState(prev => ({ ...prev, albumsSubTab: sub.id }));
+                                                    }}
+                                                    className={`flex h-9 items-center gap-1.5 rounded-full px-4 text-xs font-semibold transition-all ${
+                                                        active
+                                                            ? 'bg-white text-zinc-950 shadow-sm'
+                                                            : 'border border-white/10 bg-white/[0.05] text-zinc-300'
+                                                    }`}
+                                                >
+                                                    {sub.icon}
+                                                    <span>{sub.label}</span>
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
                                 </div>
+
+                                {localSongs.length > 0 && (
+                                    <div className="relative mb-3 shrink-0">
+                                        <Search
+                                            size={15}
+                                            className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-400"
+                                        />
+                                        <input
+                                            type="search"
+                                            value={albumsSearchQuery}
+                                            onChange={(e) => {
+                                                setAlbumsSearchQuery(e.target.value);
+                                                setVisibleAlbumLimit(60);
+                                            }}
+                                            placeholder={navState.albumsSubTab === 'albums' ? 'Search albums or artists...' : 'Search artists...'}
+                                            dir="auto"
+                                            className="h-9 w-full rounded-2xl border border-white/10 bg-white/[0.06] pl-9 pr-8 text-xs text-white placeholder-zinc-500 focus:border-white/25 focus:outline-none"
+                                        />
+                                        {albumsSearchQuery && (
+                                            <button
+                                                type="button"
+                                                onClick={() => setAlbumsSearchQuery('')}
+                                                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400"
+                                                aria-label="Clear album search"
+                                            >
+                                                <X size={14} />
+                                            </button>
+                                        )}
+                                    </div>
+                                )}
 
                                 {localSongs.length === 0 ? (
                                     renderEmptyLibraryState()
                                 ) : (
                                     <div
                                         ref={albumsGridScrollRef}
+                                        data-testid="mobile-albums-scroll-container"
                                         onScroll={(e) => {
-                                            savedScrollOffsetsRef.current[`albums:${navState.albumsSubTab}`] = e.currentTarget.scrollTop;
+                                            const el = e.currentTarget;
+                                            savedScrollOffsetsRef.current[`albums:${navState.albumsSubTab}`] = el.scrollTop;
+                                            if (el.scrollTop + el.clientHeight >= el.scrollHeight - 320) {
+                                                const activeList = navState.albumsSubTab === 'albums' ? collections.albums : collections.artists;
+                                                if (visibleAlbumLimit < activeList.length) {
+                                                    setVisibleAlbumLimit(prev => prev + 60);
+                                                }
+                                            }
                                         }}
-                                        className="grid grid-cols-2 sm:grid-cols-3 landscape:grid-cols-4 gap-3 overflow-y-auto overscroll-contain pb-6"
+                                        className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-6"
                                     >
-                                        {(navState.albumsSubTab === 'albums' ? collections.albums : collections.artists).map(item => (
-                                            <button
-                                                key={item.id}
-                                                type="button"
-                                                onClick={() => handleOpenCollection(item)}
-                                                className="group flex flex-col overflow-hidden rounded-2xl border border-white/10 bg-white/[0.04] p-2.5 text-left active:scale-[0.98] transition-transform"
-                                            >
-                                                <div className="relative aspect-square w-full overflow-hidden rounded-xl bg-zinc-900">
-                                                    <LocalCoverThumbnail
-                                                        coverUrl={item.coverUrl ?? null}
-                                                        alt={item.title}
-                                                        fallback={
-                                                            <div className="flex h-full w-full items-center justify-center text-zinc-600">
-                                                                {item.kind === 'artist' ? <User size={36} /> : <Disc3 size={36} />}
+                                        {(() => {
+                                            const rawList = navState.albumsSubTab === 'albums' ? collections.albums : collections.artists;
+                                            const q = albumsSearchQuery.trim().toLowerCase();
+                                            const filteredList = q
+                                                ? rawList.filter(item =>
+                                                    item.title.toLowerCase().includes(q)
+                                                    || (item.subtitle && item.subtitle.toLowerCase().includes(q)),
+                                                )
+                                                : rawList;
+                                            return (
+                                                <div className="grid grid-cols-2 sm:grid-cols-3 landscape:grid-cols-4 auto-rows-max items-start content-start gap-3.5">
+                                                    {filteredList.slice(0, visibleAlbumLimit).map(item => (
+                                                        <button
+                                                            key={item.id}
+                                                            type="button"
+                                                            onClick={() => handleOpenCollection(item)}
+                                                            className="group flex w-full flex-col rounded-2xl border border-white/10 bg-white/[0.05] p-2.5 text-left active:scale-[0.98] transition-all hover:bg-white/[0.08]"
+                                                        >
+                                                            <div
+                                                                className="relative w-full shrink-0 overflow-hidden rounded-xl border border-white/10 bg-zinc-900 shadow-md"
+                                                                style={{ aspectRatio: '1 / 1' }}
+                                                            >
+                                                                <LocalCoverThumbnail
+                                                                    coverUrl={item.coverUrl ?? null}
+                                                                    fallbackSong={item.songs[0]}
+                                                                    alt={item.title}
+                                                                    fallback={
+                                                                        <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-zinc-800/80 to-zinc-950 text-zinc-500">
+                                                                            {item.kind === 'artist' ? <User size={38} /> : <Disc3 size={38} />}
+                                                                        </div>
+                                                                    }
+                                                                />
+                                                                <div className="pointer-events-none absolute bottom-2 right-2 rounded-full bg-black/70 px-2 py-0.5 text-[10px] font-semibold text-zinc-200 backdrop-blur-md">
+                                                                    {item.songs.length} {item.songs.length === 1 ? 'track' : 'tracks'}
+                                                                </div>
                                                             </div>
-                                                        }
-                                                    />
+                                                            <div
+                                                                dir={detectTextDirection(item.title)}
+                                                                className="mt-2.5 w-full truncate text-[13px] font-semibold text-zinc-100 leading-snug"
+                                                                style={{ unicodeBidi: 'plaintext' }}
+                                                            >
+                                                                {item.title}
+                                                            </div>
+                                                            {item.kind === 'album' && item.subtitle ? (
+                                                                <div
+                                                                    dir={detectTextDirection(item.subtitle)}
+                                                                    className="mt-0.5 w-full truncate text-[11px] text-zinc-400"
+                                                                    style={{ unicodeBidi: 'plaintext' }}
+                                                                >
+                                                                    {item.subtitle}
+                                                                </div>
+                                                            ) : (
+                                                                <div className="mt-0.5 w-full truncate text-[11px] text-zinc-400">
+                                                                    {item.songs.length} {item.songs.length === 1 ? 'track' : 'tracks'}
+                                                                </div>
+                                                            )}
+                                                        </button>
+                                                    ))}
                                                 </div>
-                                                <div
-                                                    dir={detectTextDirection(item.title)}
-                                                    className="mt-2 truncate text-xs font-semibold text-zinc-100"
-                                                    style={{ unicodeBidi: 'plaintext' }}
-                                                >
-                                                    {item.title}
-                                                </div>
-                                                <div className="truncate text-[11px] text-zinc-400">
-                                                    {item.songs.length} {item.songs.length === 1 ? 'track' : 'tracks'}
-                                                </div>
-                                            </button>
-                                        ))}
+                                            );
+                                        })()}
                                     </div>
                                 )}
                             </div>
@@ -1288,6 +1389,7 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                                                 <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-zinc-900 text-zinc-300">
                                                     <LocalCoverThumbnail
                                                         coverUrl={item.coverUrl ?? null}
+                                                        fallbackSong={item.songs[0]}
                                                         alt={item.title}
                                                         fallback={
                                                             item.kind === 'folder' ? (

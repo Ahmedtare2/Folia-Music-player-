@@ -68,7 +68,7 @@ export const VisualizerBackdropLayers: React.FC<VisualizerBackdropLayersProps> =
 }) => {
     const staticMode = sharedProps?.staticMode ?? false;
     const paused = sharedProps?.paused ?? false;
-    const disableWebViewBackgroundForNativeSurface = hasAndroidNativeVisualizerBridge() && !sharedProps?.isPreviewMode && isMainAppSurface;
+    const disableWebViewBackgroundForNativeSurface = false;
 
     return (
         <>
