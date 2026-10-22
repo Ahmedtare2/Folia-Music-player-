@@ -637,7 +637,11 @@ export function useLibraryPlaybackController({
         }
 
         const nextQueuedSong = queue[currentIndex + 1] ?? queue[0];
-        void prestageLocalSongsForPlayback([currentLocalSong, nextQueuedSong]);
+        const stageUris = [currentLocalSong?.safContentUri, nextQueuedSong?.safContentUri]
+            .filter((u): u is string => typeof u === 'string' && u.startsWith('content://'));
+        if (stageUris.length > 0) {
+            void prestageAndroidSafAudioTracks(stageUris);
+        }
 
         const nearbySongs = [-1, 1, 2]
             .map(offset => queue[currentIndex + offset])
