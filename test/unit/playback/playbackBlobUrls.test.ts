@@ -1,10 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { retireBlobUrl } from '../../../src/services/playbackBlobUrls';
+import {
+    isRevocableBlobUrl,
+    retireBlobUrl,
+    safeRevokeBlobUrl,
+} from '../../../src/services/playbackBlobUrls';
 
 // A blend keeps the previous track sounding on the other deck, and a URL revoked while that deck
 // still holds it leaves the deck unable to seek - silently, with no error event. So the only thing
 // that may be revoked is a URL no deck is on.
-describe('retireBlobUrl', () => {
+describe('retireBlobUrl & safeRevokeBlobUrl', () => {
     let revoke: ReturnType<typeof vi.fn>;
 
     /** Pretends the two automix decks are rendering these sources. */
@@ -71,5 +75,24 @@ describe('retireBlobUrl', () => {
         decksHolding('blob:three');
         retireBlobUrl('blob:three');
         expect(revoke.mock.calls.flat().sort()).toEqual(['blob:one', 'blob:two']);
+    });
+
+    it('never revokes Android SAF stream URLs or active deck URLs via safeRevokeBlobUrl', () => {
+        const safUrl = '/__folia_saf/stream?uri=content%3A%2F%2Fsaf%2Fsong.flac&mime=audio%2Fflac';
+        expect(isRevocableBlobUrl(safUrl)).toBe(false);
+        expect(isRevocableBlobUrl('blob:https://localhost/1234')).toBe(true);
+
+        retireBlobUrl(safUrl);
+        retireBlobUrl(null);
+        expect(safeRevokeBlobUrl(safUrl)).toBe(false);
+        expect(revoke).not.toHaveBeenCalled();
+
+        decksHolding('blob:active-deck');
+        expect(safeRevokeBlobUrl('blob:active-deck')).toBe(false);
+        expect(revoke).not.toHaveBeenCalled();
+
+        decksHolding();
+        expect(safeRevokeBlobUrl('blob:active-deck')).toBe(true);
+        expect(revoke).toHaveBeenCalledExactlyOnceWith('blob:active-deck');
     });
 });

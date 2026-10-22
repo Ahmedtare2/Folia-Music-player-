@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import type React from 'react';
 import type { StatusMessage } from '../../../../types';
+import { safeRevokeBlobUrl } from '../../../../services/playbackBlobUrls';
 import { runStatusMessageTime, setStatusMessage as setStatusMsg } from '../../../../stores/useStatusMessageStore';
 
 // App-level UI side effects that do not own playback business logic.
@@ -37,7 +38,7 @@ export const usePlaybackUiEffects = ({
     useEffect(() => {
         return () => {
             if (blobUrlRef.current) {
-                URL.revokeObjectURL(blobUrlRef.current);
+                safeRevokeBlobUrl(blobUrlRef.current);
             }
             if (volumePreviewFrameRef.current !== null) {
                 cancelAnimationFrame(volumePreviewFrameRef.current);

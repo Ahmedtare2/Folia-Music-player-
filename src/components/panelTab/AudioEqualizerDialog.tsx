@@ -4,12 +4,18 @@ import {
     AUDIO_EQUALIZER_CUSTOM_SLOT_IDS,
     getAudioEqualizerCustomSlotIndex,
     isAudioEqualizerCustomSlotId,
+    isAudioEqualizerFlat,
+    resetAudioEqualizerToFlat,
     type AudioEqualizerCustomSlotId,
     type AudioEqualizerModeId,
     type AudioEqualizerSettings,
 } from '../../utils/audioEqualizer';
 import { AUDIO_SOUND_PRESETS, AUDIO_SOUND_PRESET_IDS } from '../../utils/audioPresets';
-import { createNeutralAudioEffects, type AudioEffectId, type AudioEffectSettings } from '../../utils/audioEffects';
+import { type AudioEffectId, type AudioEffectSettings } from '../../utils/audioEffects';
+import {
+    getAudioEqualizerRuntimeStatus,
+    subscribeAudioEqualizerRuntime,
+} from '../../services/audioEqualizerGraph';
 import Sheet from '../shared/Sheet';
 import { Toggle } from '../modal/settings/kit';
 import AudioEffectGrid from './equalizer/AudioEffectGrid';
@@ -18,9 +24,8 @@ import PresetChips from './equalizer/PresetChips';
 import { useAudioSettingsStore } from '../../stores/useAudioSettingsStore';
 
 // src/components/panelTab/AudioEqualizerDialog.tsx
-// The audio effect window opened from the controls tab, on the app's sheet: the processing switch
-// in the header, then the presets, the ten EQ bands and the effect chain. It owns the draft that
-// the parts edit and writes it to the store when an edit is let go.
+// The audio effect window opened from the controls tab or settings, on the app's sheet: the
+// processing switch in the header, then the presets, the ten EQ bands and the effect chain.
 
 type AudioEqualizerDialogProps = {
     isDaylight: boolean;
@@ -36,11 +41,20 @@ const AudioEqualizerDialog: React.FC<AudioEqualizerDialogProps> = ({ isDaylight 
     const commitSettings = useAudioSettingsStore(state => state.handleSetAudioEqualizerSettings);
     const [draft, setDraft] = useState<AudioEqualizerSettings>(settings);
     const draftRef = useRef(draft);
+    const [runtimeStatus, setRuntimeStatus] = useState(() => getAudioEqualizerRuntimeStatus());
 
     const updateDraft = (next: AudioEqualizerSettings) => {
         draftRef.current = next;
         setDraft(next);
     };
+
+    useEffect(() => {
+        if (!isOpen) return undefined;
+        setRuntimeStatus(getAudioEqualizerRuntimeStatus());
+        return subscribeAudioEqualizerRuntime(() => {
+            setRuntimeStatus(getAudioEqualizerRuntimeStatus());
+        });
+    }, [isOpen]);
 
     useEffect(() => {
         if (isOpen) {
@@ -55,12 +69,13 @@ const AudioEqualizerDialog: React.FC<AudioEqualizerDialogProps> = ({ isDaylight 
     }, [isOpen, settings]);
 
     // Edits are always written into a custom slot: the active one, or the first while a built-in plays.
+    // Also commits immediately so the live Web Audio BiquadFilterNode chain updates in real time.
     const writeCustomDraft = (gains: number[], effects: AudioEffectSettings) => {
         const slotId: AudioEqualizerCustomSlotId = isAudioEqualizerCustomSlotId(draftRef.current.preset)
             ? draftRef.current.preset
             : AUDIO_EQUALIZER_CUSTOM_SLOT_IDS[0];
         const slotIndex = getAudioEqualizerCustomSlotIndex(slotId);
-        updateDraft({
+        const next: AudioEqualizerSettings = {
             ...draftRef.current,
             enabled: true,
             gains,
@@ -69,7 +84,9 @@ const AudioEqualizerDialog: React.FC<AudioEqualizerDialogProps> = ({ isDaylight 
             customSlots: draftRef.current.customSlots.map((slot, index) => (
                 index === slotIndex ? { gains: [...gains], effects: { ...effects } } : slot
             )),
-        });
+        };
+        updateDraft(next);
+        commitSettings(next);
     };
 
     const updateBandDraft = (index: number, value: number) => {
@@ -97,22 +114,9 @@ const AudioEqualizerDialog: React.FC<AudioEqualizerDialogProps> = ({ isDaylight 
         commitSettings(next);
     };
 
-    // Reset only ever clears a custom slot; the built-in presets are not editable, so nothing to undo.
+    // Reset clears the active custom slot or resets any active preset back to Flat (0 dB across all 10 bands).
     const resetActiveCustomSlot = () => {
-        const slotId = isAudioEqualizerCustomSlotId(draftRef.current.preset) ? draftRef.current.preset : null;
-        if (!slotId) return;
-
-        const slotIndex = getAudioEqualizerCustomSlotIndex(slotId);
-        const gains = [...AUDIO_SOUND_PRESETS.flat.gains];
-        const effects = createNeutralAudioEffects();
-        const next: AudioEqualizerSettings = {
-            ...draftRef.current,
-            gains,
-            effects,
-            customSlots: draftRef.current.customSlots.map((slot, index) => (
-                index === slotIndex ? { gains: [...gains], effects: { ...effects } } : slot
-            )),
-        };
+        const next = resetAudioEqualizerToFlat(draftRef.current);
         updateDraft(next);
         commitSettings(next);
     };
@@ -126,6 +130,12 @@ const AudioEqualizerDialog: React.FC<AudioEqualizerDialogProps> = ({ isDaylight 
 
     const commitDraft = () => commitSettings(draftRef.current);
 
+    const statusLine = !runtimeStatus.supported
+        ? (runtimeStatus.reason || 'Audio effects are unsupported in this environment.')
+        : runtimeStatus.connected
+            ? `10-Band Web Audio Biquad DSP Active${runtimeStatus.sampleRate ? ` · ${Math.round(runtimeStatus.sampleRate / 100) / 10} kHz` : ''}`
+            : '10-Band Web Audio Biquad DSP Ready (engages automatically on playback)';
+
     return (
         <Sheet
             isOpen={isOpen}
@@ -134,8 +144,8 @@ const AudioEqualizerDialog: React.FC<AudioEqualizerDialogProps> = ({ isDaylight 
             size="l"
             title={t('ui.equalizerTitle')}
             subtitle={t('ui.equalizerDescription')}
+            footerNote={statusLine}
             headerActions={(
-                // The switch takes its name from the label it sits in. A narrow window has no room for the words: they stay for a screen reader.
                 <label className="flex cursor-pointer items-center gap-3">
                     <span className="whitespace-nowrap text-xs text-[color:var(--st-t2)] max-sm:sr-only">
                         {t(draft.enabled ? 'ui.equalizerEnabled' : 'ui.equalizerDisabled')}
@@ -144,16 +154,14 @@ const AudioEqualizerDialog: React.FC<AudioEqualizerDialogProps> = ({ isDaylight 
                 </label>
             )}
         >
-            {/* 这一层排窗口里的内容（至少和窗口一样高，多出的高度给推子），也让这扇对话框自己能被思索命中。 */}
             <div data-ponder="audio-equalizer" className="flex min-h-full flex-col">
                 <PresetChips
                     presetIds={PRESET_IDS}
                     chosen={draft.preset}
                     onChoose={applyPreset}
-                    canReset={isAudioEqualizerCustomSlotId(draft.preset)}
+                    canReset={!isAudioEqualizerFlat(draft) || isAudioEqualizerCustomSlotId(draft.preset)}
                     onReset={resetActiveCustomSlot}
                 />
-                {/* Dimmed while processing is off, and still in reach: an edit turns processing on. */}
                 <div className={`st-t-move flex flex-1 flex-col transition-opacity${draft.enabled ? '' : ' opacity-40'}`}>
                     <EqualizerBandGrid gains={draft.gains} onBandChange={updateBandDraft} onCommit={commitDraft} />
                     <AudioEffectGrid effects={draft.effects} onEffectChange={updateEffectDraft} onCommit={commitDraft} />

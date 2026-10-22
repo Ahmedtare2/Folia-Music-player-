@@ -205,12 +205,13 @@ export function buildLocalQueue(
         : undefined;
     const convertedQueue = queue.map(song => {
         const localCoverUrl = getLocalCoverAssetUrl(song.localCoverAssetId, coverSize);
+        const fallbackOnlineCover = song.useOnlineCover !== false ? (song.onlineMetadata?.coverUrl || null) : null;
         return applyLocalLibraryEntityDisplay(buildUnifiedLocalSong({
             localSong: song,
             matchedSong: null,
             coverUrl: song.useOnlineCover
                 ? song.onlineMetadata?.coverUrl || localCoverUrl
-                : localCoverUrl,
+                : localCoverUrl || fallbackOnlineCover,
             preferOnlineMetadata: false,
         }), catalog, catalogIndex);
     });

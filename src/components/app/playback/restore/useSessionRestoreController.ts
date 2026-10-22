@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 import { getFromCache, getLocalSongs } from '../../../../services/db';
+import { resumeInterruptedLocalLibraryScans } from '../../../../services/localMusicService';
 import { getLocalLibraryCatalogSnapshot } from '../../../../services/localLibraryEntityRepository';
 import { buildLocalQueue } from '../../../../services/playbackAdapters';
 import { prefetchNearbySongs } from '../../../../services/prefetchService';
@@ -66,7 +67,11 @@ export function useSessionRestoreController({
         }
 
         hasLoadedLocalLibraryRef.current = true;
-        void loadLocalSongs();
+        void Promise.resolve(loadLocalSongs()).then(() => {
+            void resumeInterruptedLocalLibraryScans().catch(err => {
+                console.warn('[Session] Failed to resume interrupted local library scans:', err);
+            });
+        });
         void loadLocalPlaylists();
     }, [loadLocalPlaylists, loadLocalSongs]);
 
