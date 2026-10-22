@@ -991,7 +991,7 @@ export const subscribeAndroidDisplayRefreshRate = (
         }
     };
 
-    if (typeof window !== 'undefined') {
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
         window.addEventListener(ANDROID_DISPLAY_REFRESH_RATE_EVENT, domHandler);
     }
 
@@ -1011,7 +1011,7 @@ export const subscribeAndroidDisplayRefreshRate = (
     }
 
     return () => {
-        if (typeof window !== 'undefined') {
+        if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
             window.removeEventListener(ANDROID_DISPLAY_REFRESH_RATE_EVENT, domHandler);
         }
         if (handlePromise) {
@@ -1422,7 +1422,7 @@ export const subscribeAndroidPlaybackClockAnchor = (
             updateAndroidPlaybackClockAnchor(detail);
         }
     };
-    if (typeof window !== 'undefined') {
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
         window.addEventListener(ANDROID_PLAYBACK_CLOCK_ANCHOR_EVENT, domHandler);
     }
 
@@ -1443,7 +1443,7 @@ export const subscribeAndroidPlaybackClockAnchor = (
 
     return () => {
         clockAnchorSubscribers.delete(listener);
-        if (typeof window !== 'undefined') {
+        if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
             window.removeEventListener(ANDROID_PLAYBACK_CLOCK_ANCHOR_EVENT, domHandler);
         }
         if (handlePromise) {
@@ -1474,16 +1474,21 @@ export const bindAudioElementToNativeExoPlayer = (
     }
     if (existing) return;
 
-    const proto = Object.getPrototypeOf(audioElement) as HTMLMediaElement;
-    const origPlay = proto.play.bind(audioElement);
-    const origPause = proto.pause.bind(audioElement);
-    const currentTimeDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'currentTime');
-    const durationDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'duration');
-    const pausedDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'paused');
-    const endedDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'ended');
-    const volumeDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'volume');
-    const mutedDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'muted');
-    const rateDesc = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'playbackRate');
+    const proto = Object.getPrototypeOf(audioElement) as Partial<HTMLMediaElement> | null;
+    const origPlay = typeof proto?.play === 'function'
+        ? proto.play.bind(audioElement)
+        : (typeof audioElement.play === 'function' ? audioElement.play.bind(audioElement) : (() => Promise.resolve()));
+    const origPause = typeof proto?.pause === 'function'
+        ? proto.pause.bind(audioElement)
+        : (typeof audioElement.pause === 'function' ? audioElement.pause.bind(audioElement) : (() => {}));
+    const mediaProto = typeof HTMLMediaElement !== 'undefined' ? HTMLMediaElement.prototype : proto;
+    const currentTimeDesc = mediaProto ? Object.getOwnPropertyDescriptor(mediaProto, 'currentTime') : undefined;
+    const durationDesc = mediaProto ? Object.getOwnPropertyDescriptor(mediaProto, 'duration') : undefined;
+    const pausedDesc = mediaProto ? Object.getOwnPropertyDescriptor(mediaProto, 'paused') : undefined;
+    const endedDesc = mediaProto ? Object.getOwnPropertyDescriptor(mediaProto, 'ended') : undefined;
+    const volumeDesc = mediaProto ? Object.getOwnPropertyDescriptor(mediaProto, 'volume') : undefined;
+    const mutedDesc = mediaProto ? Object.getOwnPropertyDescriptor(mediaProto, 'muted') : undefined;
+    const rateDesc = mediaProto ? Object.getOwnPropertyDescriptor(mediaProto, 'playbackRate') : undefined;
 
     // Ensure the underlying WebView media element stays silent and paused while ExoPlayer decodes natively.
     try {

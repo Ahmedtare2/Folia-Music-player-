@@ -225,15 +225,66 @@ describe('Android SAF local music adapter & Media3 playback bridge', () => {
         };
 
         (globalThis as { __FOLIA_ANDROID_BRIDGE__?: FoliaNativeBridgePluginContract }).__FOLIA_ANDROID_BRIDGE__ = bridge;
+        const winListeners = new Map<string, Set<EventListenerOrEventListenerObject>>();
         (globalThis as { window?: unknown }).window = {
             location: { protocol: 'https:', hostname: 'localhost' },
             isSecureContext: true,
+            addEventListener: vi.fn((type: string, listener: EventListenerOrEventListenerObject) => {
+                if (!winListeners.has(type)) winListeners.set(type, new Set());
+                winListeners.get(type)!.add(listener);
+            }),
+            removeEventListener: vi.fn((type: string, listener: EventListenerOrEventListenerObject) => {
+                winListeners.get(type)?.delete(listener);
+            }),
             dispatchEvent: vi.fn((evt: Event) => {
                 const customEvt = evt as CustomEvent<LocalMusicScanProgressDetail>;
                 if (customEvt?.type === LOCAL_MUSIC_SCAN_PROGRESS_EVENT && customEvt.detail) {
                     scanProgressEvents.push(customEvt.detail);
                 }
+                const set = winListeners.get(evt.type);
+                if (set) {
+                    for (const l of Array.from(set)) {
+                        if (typeof l === 'function') l(evt);
+                        else l.handleEvent(evt);
+                    }
+                }
                 return true;
+            }),
+        };
+        const makeDomEl = () => {
+            const attrs = new Map<string, string>();
+            return {
+                style: { backgroundColor: '' },
+                getAttribute: (k: string) => attrs.get(k) ?? null,
+                setAttribute: (k: string, v: string) => { attrs.set(k, String(v)); },
+            };
+        };
+        (globalThis as { document?: unknown }).document = {
+            visibilityState: 'visible',
+            documentElement: makeDomEl(),
+            body: makeDomEl(),
+            addEventListener: vi.fn(),
+            removeEventListener: vi.fn(),
+            createElement: vi.fn((tag: string) => {
+                if (tag === 'audio') {
+                    return {
+                        src: '',
+                        currentTime: 0,
+                        duration: 0,
+                        volume: 1,
+                        muted: false,
+                        playbackRate: 1,
+                        paused: true,
+                        ended: false,
+                        play: () => Promise.resolve(),
+                        pause: () => {},
+                        load: () => {},
+                        addEventListener: vi.fn(),
+                        removeEventListener: vi.fn(),
+                        dispatchEvent: vi.fn(() => true),
+                    };
+                }
+                return makeDomEl();
             }),
         };
         return bridge;
@@ -349,6 +400,7 @@ describe('Android SAF local music adapter & Media3 playback bridge', () => {
         await new Promise(resolve => setTimeout(resolve, 60));
         delete (globalThis as { Capacitor?: unknown }).Capacitor;
         delete (globalThis as { __FOLIA_ANDROID_BRIDGE__?: unknown }).__FOLIA_ANDROID_BRIDGE__;
+        delete (globalThis as { document?: unknown }).document;
     });
 
     it('reports local library as supported on Android Capacitor even without window.showDirectoryPicker', () => {

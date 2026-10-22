@@ -1,5 +1,5 @@
 import { LyricData } from '../../types';
-import type { LyricParseFormat } from './parserCore';
+import { parseLyricsByFormat, type LyricParseFormat } from './parserCore';
 import type { LyricProcessingOptions } from './types';
 
 let lyricsWorker: Worker | null = null;
@@ -50,18 +50,52 @@ export const parseLyricsAsync = (
     options?: LyricProcessingOptions,
     romanization?: string
 ): Promise<LyricData | null> => {
+    const workerOptions = toWorkerLyricProcessingOptions(options);
+    if (typeof Worker === 'undefined') {
+        try {
+            return Promise.resolve(
+                parseLyricsByFormat(
+                    format,
+                    content,
+                    translation || '',
+                    workerOptions,
+                    romanization || '',
+                ),
+            );
+        } catch (err) {
+            console.warn('[LyricsWorker] fallback parsing error:', err);
+            return Promise.resolve(null);
+        }
+    }
     return new Promise((resolve) => {
-        const worker = initLyricsWorker();
-        const requestId = `req_${++workerRequestId}`;
-        workerCallbacks.set(requestId, resolve);
-        worker.postMessage({
-            type: 'parse',
-            format,
-            content,
-            translation,
-            romanization,
-            options: toWorkerLyricProcessingOptions(options),
-            requestId,
-        });
+        try {
+            const worker = initLyricsWorker();
+            const requestId = `req_${++workerRequestId}`;
+            workerCallbacks.set(requestId, resolve);
+            worker.postMessage({
+                type: 'parse',
+                format,
+                content,
+                translation,
+                romanization,
+                options: workerOptions,
+                requestId,
+            });
+        } catch (err) {
+            try {
+                resolve(
+                    parseLyricsByFormat(
+                        format,
+                        content,
+                        translation || '',
+                        workerOptions,
+                        romanization || '',
+                    ),
+                );
+            } catch (fallbackErr) {
+                console.warn('[LyricsWorker] fallback parsing error:', err, fallbackErr);
+                resolve(null);
+            }
+        }
     });
 };

@@ -16,15 +16,16 @@ let listenersInstalled = false;
 const visibilityListeners = new Set<(visible: boolean) => void>();
 
 const readDocumentVisible = (): boolean => {
-    if (typeof document === 'undefined') return true;
+    if (typeof document === 'undefined' || typeof document.visibilityState !== 'string') return true;
     return document.visibilityState !== 'hidden';
 };
 
 const readNativeVisible = (): boolean => {
-    if (typeof window === 'undefined') return true;
-    const win = window as VisibilityWindow;
-    if (typeof win.__FOLIA_NATIVE_VISIBLE__ === 'boolean') {
-        return win.__FOLIA_NATIVE_VISIBLE__;
+    if (typeof window !== 'undefined') {
+        const win = window as VisibilityWindow;
+        if (typeof win.__FOLIA_NATIVE_VISIBLE__ === 'boolean') {
+            return win.__FOLIA_NATIVE_VISIBLE__;
+        }
     }
     return nativeActivityVisible;
 };
@@ -45,23 +46,27 @@ const notifyVisibilityListeners = () => {
 };
 
 const ensureVisibilityListeners = () => {
-    if (listenersInstalled || typeof window === 'undefined' || typeof document === 'undefined') {
+    if (listenersInstalled || typeof window === 'undefined') {
         return;
     }
     listenersInstalled = true;
 
-    document.addEventListener('visibilitychange', () => {
-        notifyVisibilityListeners();
-    });
-
-    window.addEventListener(NATIVE_VISIBILITY_EVENT_NAME, (event: Event) => {
-        const custom = event as CustomEvent<{ visible?: boolean }>;
-        if (typeof custom.detail?.visible === 'boolean') {
-            nativeActivityVisible = custom.detail.visible;
-            (window as VisibilityWindow).__FOLIA_NATIVE_VISIBLE__ = custom.detail.visible;
+    if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+        document.addEventListener('visibilitychange', () => {
             notifyVisibilityListeners();
-        }
-    });
+        });
+    }
+
+    if (typeof window.addEventListener === 'function') {
+        window.addEventListener(NATIVE_VISIBILITY_EVENT_NAME, (event: Event) => {
+            const custom = event as CustomEvent<{ visible?: boolean }>;
+            if (typeof custom.detail?.visible === 'boolean') {
+                nativeActivityVisible = custom.detail.visible;
+                (window as VisibilityWindow).__FOLIA_NATIVE_VISIBLE__ = custom.detail.visible;
+                notifyVisibilityListeners();
+            }
+        });
+    }
 };
 
 export const subscribeAppForegroundVisibility = (
