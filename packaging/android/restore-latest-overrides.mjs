@@ -18,6 +18,21 @@ if (fs.existsSync(overridesPath)) {
       restoredCount += 1;
     }
   }
+  for (const localeRel of ['src/i18n/locales/en.ts', 'src/i18n/locales/in.ts', 'src/i18n/locales/zh-CN.ts']) {
+    const locPath = path.join(repoRoot, localeRel);
+    if (fs.existsSync(locPath)) {
+      const txt = fs.readFileSync(locPath, 'utf8');
+      if (!txt.includes('"lrclib":')) {
+        const updated = txt.includes('"amll": "AMLLDB",')
+          ? txt.replace('"amll": "AMLLDB",', '"amll": "AMLLDB",\n    "lrclib": "LRCLIB",')
+          : txt.replace('"amll": "AMLLDB"', '"amll": "AMLLDB",\n    "lrclib": "LRCLIB"');
+        if (updated !== txt) {
+          fs.writeFileSync(locPath, updated, 'utf8');
+          restoredCount += 1;
+        }
+      }
+    }
+  }
   if (restoredCount > 0) {
     console.log(`[restore-latest-overrides] Restored ${restoredCount} updated source files from latest ZIP.`);
   }

@@ -7,6 +7,7 @@ import {
     deleteSongsByIds,
     deleteLocalSong as deleteLocalMusicSong,
     extractMetadataFromFilename,
+    repairSwappedTitleArtistAndAlbumMetadata,
     getAudioFromFile,
     getAudioFromLocalSong,
     importFolder,
@@ -212,6 +213,52 @@ describe('localMusicService', () => {
             expect(extractMetadataFromFilename(fileName)).toEqual({
                 title: fileName.replace(/\.wav$/, ''),
             });
+        });
+
+        it('repairs swapped Title <-> Artist across Amr Diab tracks and propagates shared-cover album names', () => {
+            const coverHash = `sha256:${'c'.repeat(64)}`;
+            const swappedTracks = [
+                { id: '1', title: 'Amr Diab', artist: 'Al Leila', album: undefined, cover: coverHash },
+                { id: '2', title: 'Amr Diab', artist: 'Allem Alby', album: 'Allem Alby', cover: coverHash },
+                { id: '3', title: 'Amr Diab', artist: 'Amaken El Sahar', album: undefined, cover: coverHash },
+                { id: '4', title: 'Amr Diab', artist: 'Amarain', album: undefined, cover: undefined },
+            ].map(item => ({
+                id: item.id,
+                fileName: `${item.artist} - ${item.title}.mp3`,
+                filePath: `Music/${item.artist} - ${item.title}.mp3`,
+                folderName: 'Music',
+                duration: 210000,
+                fileSize: 1024,
+                mimeType: 'audio/mpeg',
+                addedAt: 1,
+                title: item.title,
+                titleOrigin: 'import' as const,
+                localCoverAssetId: item.cover,
+                localCoverSource: item.cover ? ('embedded' as const) : undefined,
+                importedMetadata: {
+                    title: item.title,
+                    titleSource: 'filename' as const,
+                    artistNames: [item.artist],
+                    albumName: item.album,
+                },
+            }));
+
+            const modified = repairSwappedTitleArtistAndAlbumMetadata(swappedTracks);
+            expect(modified).toHaveLength(4);
+            expect(swappedTracks.map(s => s.title)).toEqual([
+                'Al Leila',
+                'Allem Alby',
+                'Amaken El Sahar',
+                'Amarain',
+            ]);
+            expect(swappedTracks.map(s => s.importedMetadata.artistNames)).toEqual([
+                ['Amr Diab'],
+                ['Amr Diab'],
+                ['Amr Diab'],
+                ['Amr Diab'],
+            ]);
+            expect(swappedTracks[0].importedMetadata.albumName).toBe('Allem Alby');
+            expect(swappedTracks[2].importedMetadata.albumName).toBe('Allem Alby');
         });
     });
 

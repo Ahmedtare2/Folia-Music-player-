@@ -5,6 +5,7 @@ import type { ChorusRange, ProviderLyricsResult } from '../../types/onlineMusic'
 import { calculateMatchScore } from './matchScore';
 import { searchQQLyrics, fetchQQLyrics } from '../../services/onlineMusic/qq/qqLyricProvider';
 import { fetchAmllDbLyrics, getAmllDbMusicIds, searchAmllDbSongs } from './providers/amllDbProvider';
+import { fetchLrclibLyrics, searchLrclibLyrics } from './providers/lrclibProvider';
 import { buildAmllDbSearchQueries, toAmllDbSongResults } from './amllDbCandidates';
 import { applyChorusRangesByTime } from './chorusEffects';
 import { hasRenderableLyrics } from './validity';
@@ -147,6 +148,19 @@ const OWN_ACCESS: Partial<Record<LyricProviderSource, Partial<LyricSourceAccess>
     },
     kugou: {
         songKey: song => String(song.kgHash ?? song.id).toUpperCase(),
+    },
+    // LRCLIB + Piped zero-API-key synchronized lyric & metadata service.
+    lrclib: {
+        search: (query, limit, target) => searchLrclibLyrics(query, limit, target),
+        fetch: (song, lent) => fetchLrclibLyrics(song, lent),
+        songKey: song => String(song.id),
+        knownById: (songId) => {
+            const numericId = typeof songId === 'number' ? songId : Number(songId);
+            if (Number.isSafeInteger(numericId) && numericId > 0) return numericId;
+            const str = String(songId).trim();
+            return str ? str : null;
+        },
+        marksChorusOnFetch: true,
     },
 };
 

@@ -164,6 +164,17 @@ export async function findAutomaticOnlineMetadataCandidate(
         if ((error as Error).name === 'AbortError') throw error;
         console.warn('[LocalMusic] QQ metadata search failed, falling back to KuGou:', error);
     }
-    const kugouCandidates = await searchOnlineMetadata('kugou', query, target, { limit: 10, signal });
-    return kugouCandidates[0]?.titleMatched ? kugouCandidates[0] : null;
+    try {
+        const kugouCandidates = await searchOnlineMetadata('kugou', query, target, { limit: 10, signal });
+        if (kugouCandidates[0]?.titleMatched) return kugouCandidates[0];
+    } catch (error) {
+        if ((error as Error).name === 'AbortError') throw error;
+    }
+    try {
+        const lrclibCandidates = await searchOnlineMetadata('lrclib', query, target, { limit: 10, signal });
+        if (lrclibCandidates[0]?.titleMatched) return lrclibCandidates[0];
+    } catch (error) {
+        if ((error as Error).name === 'AbortError') throw error;
+    }
+    return null;
 }

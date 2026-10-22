@@ -19,7 +19,7 @@ vi.mock('@/utils/lyrics/providers/amllDbProvider', async (importOriginal) => ({
 }));
 vi.mock('@/services/onlineMusic/qq/qqLyricProvider', () => ({ searchQQLyrics: vi.fn(), fetchQQLyrics: vi.fn() }));
 
-const STORED_NAMES = ['netease', 'amll', 'qq', 'kugou', 'spotify'] as const;
+const STORED_NAMES = ['netease', 'amll', 'qq', 'kugou', 'lrclib', 'spotify'] as const;
 const SETTING_KEY = 'preferred_alternative_lyric_source_v2';
 const LEGACY_SETTING_KEY = 'preferred_alternative_lyric_source';
 

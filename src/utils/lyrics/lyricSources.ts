@@ -40,6 +40,7 @@ const ENTRIES = [
     { id: 'amll', labelKey: 'lyricProvider.amll', platform: false },
     { id: 'qq', labelKey: 'lyricProvider.qq', platform: true },
     { id: 'kugou', labelKey: 'lyricProvider.kugou', platform: true },
+    { id: 'lrclib', labelKey: 'lyricProvider.lrclib', platform: true },
     { id: 'spotify', labelKey: 'lyricProvider.spotify', platform: true, needsAccount: true, linesOnly: true },
 ] as const satisfies readonly LyricSourceEntry[];
 
