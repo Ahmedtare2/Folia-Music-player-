@@ -1799,8 +1799,6 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
             expect(line25?.props?.style?.filter).toBe('none');
 
             // 3. Strict screen-off & background visibility gate
-            // The test environment is node: give the gate a window to carry the native visibility flag.
-            (globalThis as { window?: unknown }).window = {};
             const observedStates: boolean[] = [];
             const unsub = subscribeAppForegroundVisibility(v => observedStates.push(v));
             setNativeActivityVisibleForTests(false);

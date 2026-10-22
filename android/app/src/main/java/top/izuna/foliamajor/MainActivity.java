@@ -198,8 +198,6 @@ public class MainActivity extends BridgeActivity {
         if (this.bridge != null && this.bridge.getWebView() != null) {
             WebView webView = this.bridge.getWebView();
             webView.setBackgroundColor(0xFF09090B);
-            // Composite the web content on the GPU (blur, transforms and canvases) rather than in software.
-            webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
             WebSettings settings = webView.getSettings();
             settings.setMediaPlaybackRequiresUserGesture(false);
 

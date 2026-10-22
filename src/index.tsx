@@ -1,6 +1,5 @@
 import { Buffer } from 'buffer';
 import { installGlobalVisualizerFrameRateLimiter } from './utils/frameRateLimiter';
-import { isAndroidNativeApp } from './utils/platform';
 import { installConsoleLogCapture } from './utils/consoleLogBuffer';
 import { installDebugModule } from './services/debug/debugModule';
 import { installMemorySampleFeed } from './services/debug/memorySamples';
@@ -21,8 +20,6 @@ installMemorySampleFeed();
 // only even then: a packaged build has nothing to do with the answer, so it should not pay the
 // observer or the rows it retains.
 // if (import.meta.env.DEV) installCoverSizeAudit();
-// The Android app trades glass blur for battery: index.css lowers the backdrop blur radii under this flag.
-if (isAndroidNativeApp()) document.documentElement.setAttribute('data-folia-power-saver', '');
 installGlobalVisualizerFrameRateLimiter();
 
 void import('./bootstrap');

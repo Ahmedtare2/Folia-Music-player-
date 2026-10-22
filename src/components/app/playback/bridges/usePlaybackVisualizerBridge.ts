@@ -97,7 +97,7 @@ export function usePlaybackVisualizerBridge({
     lyricsRef.current = lyrics;
     // Reuse a single typed array for FFT frequency reads instead of allocating on every frame.
     const fftBufferRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
-    const emptySpectrumRef = useRef<Uint8Array<ArrayBuffer>>(new Uint8Array(0));
+    const emptySpectrumRef = useRef<Uint8Array<ArrayBuffer>>(new Uint8Array(new ArrayBuffer(0)));
     // 智能动感模式: loads the track's beats while it is on; the clock is stepped below. A ref, so
     // switching it does not rebuild the frame loop.
     const beatFxWantedRef = useRef(false);
@@ -194,7 +194,7 @@ export function usePlaybackVisualizerBridge({
         if (hasAudibleSignal && analyserRef.current) {
             const bufferLength = analyserRef.current.frequencyBinCount;
             if (!fftBufferRef.current || fftBufferRef.current.length !== bufferLength) {
-                fftBufferRef.current = new Uint8Array(bufferLength);
+                fftBufferRef.current = new Uint8Array(new ArrayBuffer(bufferLength));
             }
             const dataArray = fftBufferRef.current;
             analyserRef.current.getByteFrequencyData(dataArray);

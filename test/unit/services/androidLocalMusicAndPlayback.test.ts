@@ -99,20 +99,6 @@ vi.mock('@/utils/localMetadataWorkerClient', () => ({
     parseEmbeddedMetadataAsync: vi.fn(async () => ({})),
 }));
 
-// The adapters hand parsing to a Web Worker, which does not exist in node; run the same parser inline.
-vi.mock('@/utils/lyrics/workerClient', async () => {
-    const { parseLyricsByFormat } = await import('@/utils/lyrics/parserCore');
-    return {
-        parseLyricsAsync: vi.fn(async (
-            format: Parameters<typeof parseLyricsByFormat>[0],
-            content: string,
-            translation: string,
-            options: Parameters<typeof parseLyricsByFormat>[3],
-            romanization: string,
-        ) => parseLyricsByFormat(format, content, translation, options, romanization)),
-    };
-});
-
 const TTML_SAMPLE = `<?xml version="1.0" encoding="utf-8"?>
 <tt xmlns="http://www.w3.org/ns/ttml" xmlns:itunes="http://music.apple.com/lyric-ttml-internal" itunes:timing="Word">
   <body>
@@ -1193,7 +1179,7 @@ describe('Android SAF local music adapter & Media3 playback bridge', () => {
                 return {
                     ok: true,
                     stagedCount: uris.length,
-                    stagedPaths: uris.map((_: string, idx: number) => `/data/user/0/top.izuna.foliamajor/cache/saf_audio_stage/stage_${idx}.bin`),
+                    stagedPaths: uris.map((_uri: string, idx: number) => `/data/user/0/top.izuna.foliamajor/cache/saf_audio_stage/stage_${idx}.bin`),
                     cacheDir: '/data/user/0/top.izuna.foliamajor/cache/saf_audio_stage',
                 };
             }),

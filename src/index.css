@@ -462,18 +462,3 @@ html, body {
   overscroll-behavior: none;
   -webkit-tap-highlight-color: transparent;
 }
-
-/* Android app: lighter glass for lists, sheets and chips.
-   backdrop-filter has to copy and blur whatever is behind the element on every frame it changes, which
-   is the costliest thing the compositor does on a phone GPU. Smaller radii keep the frosted look at a
-   fraction of the cost. Only backdrop blurs are touched; lyric and visualizer filters are not. */
-html[data-folia-power-saver] .backdrop-blur-sm { --tw-backdrop-blur: blur(3px); }
-html[data-folia-power-saver] .backdrop-blur-md { --tw-backdrop-blur: blur(4px); }
-html[data-folia-power-saver] .backdrop-blur-lg { --tw-backdrop-blur: blur(6px); }
-html[data-folia-power-saver] .backdrop-blur-xl,
-html[data-folia-power-saver] .backdrop-blur-2xl,
-html[data-folia-power-saver] .backdrop-blur-3xl { --tw-backdrop-blur: blur(8px); }
-html[data-folia-power-saver] [style*="backdrop-filter: blur"] {
-  -webkit-backdrop-filter: blur(8px) !important;
-  backdrop-filter: blur(8px) !important;
-}

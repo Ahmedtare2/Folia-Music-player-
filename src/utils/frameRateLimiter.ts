@@ -2,7 +2,6 @@
 // Shared helpers and global RAF gate for optional visualizer frame throttling.
 
 import type { VisualizerFrameRate } from '../types';
-import { isAndroidNativeApp } from './platform';
 
 type AnimationFrameCallback = FrameRequestCallback;
 type RequestAnimationFrameFn = (callback: AnimationFrameCallback) => number;
@@ -32,12 +31,7 @@ export const isVisualizerFrameRate = (value: unknown): value is VisualizerFrameR
 );
 
 export const parseVisualizerFrameRate = (value: string | null): VisualizerFrameRate => {
-    // Nothing stored yet: the Android app starts capped at 60 fps, since 120 Hz phone panels would
-    // otherwise run every animation loop at 120 for no visible gain. An explicit 'off' still uncaps.
-    if (value === null) {
-        return isAndroidNativeApp() ? 60 : 'off';
-    }
-    if (value === 'off' || value === 'auto') {
+    if (value === 'off' || value === 'auto' || value === null) {
         return 'off';
     }
 

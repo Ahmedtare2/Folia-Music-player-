@@ -74,8 +74,6 @@ vi.mock('@/services/localMusicService', () => ({
         return song;
     },
     matchLyrics: async (song: { id: string }) => { env.note(`wait match ${song.id}`); await env.matchGate.get(song.id); },
-    // Staging the audio of the songs around the one played is not what this file pins.
-    prestageLocalSongsForPlayback: async () => {},
 }));
 vi.mock('@/utils/lyrics/localSongMatchContext', async importOriginal => ({
     ...await importOriginal<typeof import('@/utils/lyrics/localSongMatchContext')>(),
