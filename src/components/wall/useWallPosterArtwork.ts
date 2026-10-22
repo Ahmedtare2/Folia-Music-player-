@@ -1,9 +1,4 @@
 import { useEffect, useMemo, useState } from 'react';
-import {
-    extractAssetIdFromCoverUrl,
-    getCachedLocalCoverObjectUrl,
-    resolveLocalCoverObjectUrl,
-} from '../../services/localCoverRuntime';
 import { COVER_SIZE_STEPS, getOriginalCoverUrl, getSizedCoverUrl, resolveCoverSizeStep } from '../../utils/coverUrl';
 
 // src/components/wall/useWallPosterArtwork.ts
@@ -58,32 +53,19 @@ const decodeVariant = (url: string): Promise<boolean> => {
     const pending = decodingVariants.get(url);
     if (pending) return pending;
 
-    const decodeImageUrl = (effectiveUrl: string): Promise<void> => {
-        const image = new Image();
-        image.decoding = 'async';
-        image.src = effectiveUrl;
-        return typeof image.decode === 'function'
-            ? image.decode()
-            : new Promise<void>((resolve, reject) => {
-                image.onload = () => resolve();
-                image.onerror = () => reject(new Error(`Cover variant failed: ${effectiveUrl}`));
-            });
-    };
-
-    const request = (async () => {
-        if (extractAssetIdFromCoverUrl(url)) {
-            const objectUrl = await resolveLocalCoverObjectUrl(url);
-            if (objectUrl) {
-                await decodeImageUrl(objectUrl);
-                remember(decodedVariants, url);
-                remember(decodedVariants, objectUrl);
-                return true;
-            }
-        }
-        await decodeImageUrl(url);
-        remember(decodedVariants, url);
-        return true;
-    })()
+    const image = new Image();
+    image.decoding = 'async';
+    image.src = url;
+    const request = (typeof image.decode === 'function'
+        ? image.decode()
+        : new Promise<void>((resolve, reject) => {
+            image.onload = () => resolve();
+            image.onerror = () => reject(new Error(`Cover variant failed: ${url}`));
+        }))
+        .then(() => {
+            remember(decodedVariants, url);
+            return true;
+        })
         .catch(() => {
             remember(failedVariants, url);
             return false;
@@ -101,14 +83,6 @@ const decodeVariant = (url: string): Promise<boolean> => {
  * whole path exists to avoid. With nothing decoded the box's own step is returned and simply loads.
  */
 const pickDisplay = (cover: string, targetStep: number): PosterArtwork => {
-    if (extractAssetIdFromCoverUrl(cover)) {
-        const cachedBlobUrl = getCachedLocalCoverObjectUrl(cover);
-        if (cachedBlobUrl) {
-            return { cover, step: Number.POSITIVE_INFINITY, url: cachedBlobUrl };
-        }
-        return { cover, step: 0, url: variantUrl(cover, targetStep) };
-    }
-
     const targetUrl = variantUrl(cover, targetStep);
     if (decodedVariants.has(targetUrl)) return { cover, step: targetStep, url: targetUrl };
 
@@ -125,10 +99,6 @@ const pickDisplay = (cover: string, targetStep: number): PosterArtwork => {
 /** Fetches the variant a box of `sizePx` will need, off the path of the interaction that opens it. */
 export const prewarmWallPosterArtwork = (cover: string | undefined, sizePx: number): void => {
     if (!cover) return;
-    if (extractAssetIdFromCoverUrl(cover)) {
-        void resolveLocalCoverObjectUrl(cover);
-        return;
-    }
     const url = variantUrl(cover, resolveCoverSizeStep(sizePx));
     if (!url || decodedVariants.has(url) || failedVariants.has(url)) return;
     void decodeVariant(url);
@@ -153,25 +123,7 @@ export const useWallPosterArtwork = (cover: string | undefined, sizePx: number):
     );
 
     useEffect(() => {
-        if (!source) return;
-        if (extractAssetIdFromCoverUrl(source)) {
-            const cachedBlobUrl = getCachedLocalCoverObjectUrl(source);
-            if (cachedBlobUrl) {
-                if (current.url !== cachedBlobUrl) {
-                    setReady({ cover: source, step: Number.POSITIVE_INFINITY, url: cachedBlobUrl });
-                }
-                return;
-            }
-            let cancelled = false;
-            void resolveLocalCoverObjectUrl(source).then(objectUrl => {
-                if (objectUrl && !cancelled) {
-                    setReady({ cover: source, step: Number.POSITIVE_INFINITY, url: objectUrl });
-                }
-            });
-            return () => { cancelled = true; };
-        }
-
-        if (current.cover === source && current.step >= targetStep) return;
+        if (!source || (current.cover === source && current.step >= targetStep)) return;
         const url = variantUrl(source, targetStep);
         const upgrade = () => setReady({ cover: source, step: targetStep, url });
         if (decodedVariants.has(url)) {

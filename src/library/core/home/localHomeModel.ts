@@ -68,7 +68,7 @@ export const buildLocalHomeGroups = (
             albums[albumKey] = albums[albumKey] || [];
             albums[albumKey].push(song);
 
-            const artistName = song.onlineMetadata?.artists?.map(artist => artist.name).join(', ')
+            const artistName = song.onlineMetadata?.artists.map(artist => artist.name).join(', ')
                 || song.importedMetadata.artistNames.join(', ')
                 || t('localMusic.unknownArtist');
             artists[artistName] = artists[artistName] || [];
@@ -109,7 +109,7 @@ export const buildLocalHomeGroups = (
             coverUrl: getLocalCoverUrlOf(songs),
             id: `album-${key}`,
             trackCount: songs.length,
-            description: firstSong?.onlineMetadata?.artists?.map(artist => artist.name).join(', ')
+            description: firstSong?.onlineMetadata?.artists.map(artist => artist.name).join(', ')
                 || firstSong?.importedMetadata.artistNames.join(', ')
                 || t('localMusic.unknownArtist'),
             albumId: typeof firstSong?.onlineMetadata?.albumId === 'number' ? firstSong.onlineMetadata.albumId : undefined,

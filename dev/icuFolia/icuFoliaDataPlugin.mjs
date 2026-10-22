@@ -26,15 +26,8 @@ const JIEBA_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'jieba
 /** The two large tables are committed gzipped (see jieba/README.md); the small ones stay plain. */
 const dataPath = (file) => path.join(JIEBA_DIR, fs.existsSync(path.join(JIEBA_DIR, `${file}.gz`)) ? `${file}.gz` : file);
 const readData = (file) => {
-    const resolvedPath = dataPath(file);
-    if (!fs.existsSync(resolvedPath)) {
-        if (file === 'dict.txt') return '中国 1000\n音乐 1000\n歌词 1000\n';
-        if (file === 'prob_emit.py') return "P = {'B': {'\\u4e00': -3.0}, 'E': {'\\u4e00': -3.0}, 'M': {'\\u4e00': -3.0}, 'S': {'\\u4e00': -3.0}}\n";
-        if (file === 'prob_start.py') return "P = {'B': -0.26268660809250016, 'E': -3.14e+100, 'M': -3.14e+100, 'S': -1.4652633398537678}\n";
-        if (file === 'prob_trans.py') return "P = {'B': {'E': -0.510825623765990, 'M': -0.916290731874155}, 'E': {'B': -0.5897149736854513, 'S': -0.8085250474669937}, 'M': {'E': -0.33344856811948514, 'M': -1.2603623820268226}, 'S': {'B': -0.7211965654669841, 'S': -0.6658631448798212}}\n";
-    }
-    const raw = fs.readFileSync(resolvedPath);
-    return (resolvedPath.endsWith('.gz') ? zlib.gunzipSync(raw) : raw).toString('utf8');
+    const raw = fs.readFileSync(dataPath(file));
+    return (dataPath(file).endsWith('.gz') ? zlib.gunzipSync(raw) : raw).toString('utf8');
 };
 
 /** Code-unit order, which is what the runtime's `<` comparisons see. */
@@ -121,15 +114,11 @@ export const icuFoliaDataPlugin = () => ({
     },
     load(id) {
         if (id === RESOLVED.get(DICT_MODULE_ID)) {
-            const p = dataPath('dict.txt');
-            if (fs.existsSync(p)) this.addWatchFile(p);
+            this.addWatchFile(dataPath('dict.txt'));
             return buildDictModule();
         }
         if (id === RESOLVED.get(HMM_MODULE_ID)) {
-            ['prob_start.py', 'prob_trans.py', 'prob_emit.py'].forEach(file => {
-                const p = dataPath(file);
-                if (fs.existsSync(p)) this.addWatchFile(p);
-            });
+            ['prob_start.py', 'prob_trans.py', 'prob_emit.py'].forEach(file => this.addWatchFile(dataPath(file)));
             return buildHmmModule();
         }
         return null;

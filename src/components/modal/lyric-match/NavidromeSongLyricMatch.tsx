@@ -89,8 +89,6 @@ const NavidromeSongLyricMatch: React.FC<NavidromeSongLyricMatchProps> = ({ song,
 
     return (
         <LyricMatchWindow
-            overAllLayers
-            closesOnBackdropClick
             search={search}
             isDaylight={isDaylight}
             onClose={onClose}

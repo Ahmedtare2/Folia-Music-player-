@@ -105,7 +105,7 @@ const SearchWorkspace: React.FC<SearchWorkspaceProps> = ({
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: 28 }}
                     className={`fixed inset-0 flex flex-col overflow-hidden px-3 py-4 sm:px-6 sm:py-6 ${
-                        hasCollection ? 'z-[5]' : 'z-[240]'
+                        hasCollection ? 'z-[5]' : 'z-50'
                     }`}
                     style={{
                         color: theme.primaryColor,

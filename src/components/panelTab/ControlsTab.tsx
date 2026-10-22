@@ -1,6 +1,7 @@
 import React from 'react';
 import { Theme, ThemeMode, VisualizerMode } from '../../types';
 import type { ThemeSourceModel } from '../../hooks/themeControllerState';
+import AudioEqualizerDialog from './AudioEqualizerDialog';
 import AppearanceSection from './controls/AppearanceSection';
 import SoundTiles from './controls/SoundTiles';
 import ThemeNameRow from './controls/ThemeNameRow';
@@ -121,6 +122,7 @@ const ControlsTab: React.FC<ControlsTabProps> = ({
             onToggleDaylight={onToggleDaylight}
         />
 
+        <AudioEqualizerDialog isDaylight={isDaylight} />
     </div>
 );
 

@@ -2,11 +2,6 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { animate, motion, useMotionValue, type MotionValue } from 'framer-motion';
 import { progressSince } from '../../../services/automix/handoffProgress';
 import {
-    extractAssetIdFromCoverUrl,
-    getCachedLocalCoverObjectUrl,
-    resolveLocalCoverObjectUrl,
-} from '../../../services/localCoverRuntime';
-import {
     dropLeavingMonetPortraitLayers,
     endMonetPortraitHandoff,
     MONET_PORTRAIT_FADE_MS,
@@ -97,41 +92,28 @@ const MonetPortraitImage: React.FC<MonetPortraitImageProps> = ({ src, fadeMs = M
             return undefined;
         }
         let cancelled = false;
-        const startDecode = (effectiveSrc: string) => {
+        const stack = () => {
             if (cancelled) return;
-            const stack = () => {
-                if (cancelled) return;
-                layerKeyRef.current += 1;
-                const key = `monet-portrait-${layerKeyRef.current}`;
-                // One that decodes once the hand-off has come to its end fades in on the clock.
-                const handoffAt = progressRef.current?.get();
-                const along = handoffAt !== undefined && handoffAt < 1 ? Math.max(0, handoffAt) : undefined;
-                setLayers(current => pushMonetPortraitLayer(current, effectiveSrc, key, along));
-            };
-
-            // Decoded on a detached element so the frame keeps showing the old cover until this one can
-            // be painted whole. The rendered <img> below then hits the same decoded entry.
-            const loader = new Image();
-            loader.decoding = 'async';
-            loader.src = effectiveSrc;
-            if (typeof loader.decode === 'function') {
-                loader.decode().then(stack, () => {});
-            } else {
-                loader.onload = stack;
-            }
+            layerKeyRef.current += 1;
+            const key = `monet-portrait-${layerKeyRef.current}`;
+            // One that decodes once the hand-off has come to its end fades in on the clock.
+            const handoffAt = progressRef.current?.get();
+            const along = handoffAt !== undefined && handoffAt < 1 ? Math.max(0, handoffAt) : undefined;
+            setLayers(current => pushMonetPortraitLayer(current, src, key, along));
         };
 
-        if (extractAssetIdFromCoverUrl(src)) {
-            const cached = getCachedLocalCoverObjectUrl(src);
-            if (cached) {
-                startDecode(cached);
-            } else {
-                void resolveLocalCoverObjectUrl(src).then(resolved => {
-                    startDecode(resolved || src);
-                });
-            }
+        // Decoded on a detached element so the frame keeps showing the old cover until this one can
+        // be painted whole. The rendered <img> below then hits the same decoded entry.
+        const loader = new Image();
+        loader.decoding = 'async';
+        loader.src = src;
+        if (typeof loader.decode === 'function') {
+            // A rejection is a cover that cannot be shown - a dead blob URL, a 404, a truncated
+            // body. Swallowed on purpose: the stack is left as it is, which keeps the cover that is
+            // already on screen rather than fading to an empty frame.
+            loader.decode().then(stack, () => {});
         } else {
-            startDecode(src);
+            loader.onload = stack;
         }
 
         return () => {

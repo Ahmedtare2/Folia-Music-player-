@@ -28,8 +28,6 @@ export const isLocalCoverAssetUrl = (url: string | null | undefined): url is str
   && (url.startsWith('folia-cover://asset/') || url.startsWith(WEB_COVER_PATH_PREFIX))
 );
 
-export const isLocalCoverUrl = isLocalCoverAssetUrl;
-
 export const getPreferredLocalSongCoverUrl = (song: LocalSong): string | null => {
   const localCoverUrl = getLocalCoverAssetUrl(song.localCoverAssetId, 1024);
   return song.useOnlineCover

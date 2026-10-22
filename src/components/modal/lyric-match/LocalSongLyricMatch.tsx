@@ -172,8 +172,6 @@ const LocalSongLyricMatch: React.FC<LocalSongLyricMatchProps> = ({ song, onClose
 
     return (
         <LyricMatchWindow
-            overAllLayers
-            closesOnBackdropClick
             search={search}
             isDaylight={isDaylight}
             onClose={onClose}

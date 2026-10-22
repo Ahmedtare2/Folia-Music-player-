@@ -14,9 +14,6 @@ import {
 import { type LocalLibraryDisplayCatalog, buildLocalQueue } from '../../services/playbackAdapters';
 import {
     LOCAL_MUSIC_SCAN_PROGRESS_EVENT,
-    type LocalMusicScanProgressDetail,
-    cancelLocalLibraryScan,
-    getActiveLocalMusicScanProgress,
     importFolder,
     resyncAllFolders,
 } from '../../services/localMusicService';
@@ -27,10 +24,7 @@ import { closeSettings, openSettings, useSettingsModalStore } from '../../stores
 import { setStatusMessage } from '../../stores/useStatusMessageStore';
 import { useThemeSettingsStore } from '../../stores/useThemeSettingsStore';
 import { useTypographySettingsStore } from '../../stores/useTypographySettingsStore';
-import type { NavidromeSong } from '../../types/navidrome';
-import { useAudioSettingsStore } from '../../stores/useAudioSettingsStore';
 import { useVisualizerSettingsStore } from '../../stores/useVisualizerSettingsStore';
-import { closeLoginWindow, useLoginWindowStore } from '../login/loginWindowStore';
 import MobilePlayerShell from './MobilePlayerShell';
 
 // src/components/mobile/MobileAppContainer.tsx
@@ -81,17 +75,6 @@ interface MobileAppContainerProps {
     isCommandPaletteOpen: boolean;
     onCloseCommandPalette: () => void;
     onVisualizerVisibilityChange?: (visible: boolean) => void;
-    isLatticeOpen?: boolean;
-    onOpenLattice?: () => void;
-    onCloseLattice?: () => void;
-    onPlayOnlineSong?: (song: SongResult, queue?: SongResult[]) => void;
-    onAddOnlineSongToQueue?: (song: SongResult) => void;
-    onPlayNavidromeSong?: (song: NavidromeSong, queue?: NavidromeSong[]) => void;
-    onAddNavidromeSongsToQueue?: (songs: NavidromeSong[]) => void;
-    onOpenFullSearchWorkspace?: () => void;
-    onCloseSearch?: () => void;
-    isSearchOpen?: boolean;
-    onAutoMatchLyrics?: () => void;
 }
 
 export const MobileAppContainer: React.FC<MobileAppContainerProps> = ({
@@ -139,21 +122,7 @@ export const MobileAppContainer: React.FC<MobileAppContainerProps> = ({
     isCommandPaletteOpen,
     onCloseCommandPalette,
     onVisualizerVisibilityChange,
-    isLatticeOpen = false,
-    onOpenLattice,
-    onCloseLattice,
-    onPlayOnlineSong,
-    onAddOnlineSongToQueue,
-    onPlayNavidromeSong,
-    onAddNavidromeSongsToQueue,
-    onOpenFullSearchWorkspace,
-    onCloseSearch,
-    isSearchOpen = false,
-    onAutoMatchLyrics,
 }) => {
-    const isEqualizerOpen = useAudioSettingsStore(state => state.isAudioEqualizerOpen);
-    const closeEqualizer = useAudioSettingsStore(state => state.closeAudioEqualizer);
-    const isLoginWindowOpen = useLoginWindowStore(state => state.isOpen);
     const { t } = useTranslation();
     const activeLocalLyricsSource = usePlaybackStore(state => state.activeLocalLyricsSource);
     const isSettingsModalOpen = useSettingsModalStore(state => state.settingsModalState.isOpen);
@@ -180,31 +149,29 @@ export const MobileAppContainer: React.FC<MobileAppContainerProps> = ({
             lyricsFontScale: state.lyricsFontScale,
             handleSetLyricsFontScale: state.handleSetLyricsFontScale,
             showSubtitleTranslation: state.showSubtitleTranslation,
-            handleToggleSubtitleTranslation: state.handleToggleShowSubtitleTranslation,
+            handleToggleSubtitleTranslation: state.handleToggleSubtitleTranslation,
         })),
     );
 
     const [isBusy, setIsBusy] = useState(false);
-    const [scanProgress, setScanProgress] = useState<LocalMusicScanProgressDetail | null>(() => getActiveLocalMusicScanProgress());
-    const scanPercent = useMemo(() => {
-        if (!scanProgress?.active) return 0;
-        if (!scanProgress.totalSongs || scanProgress.totalSongs <= 0) return 5;
-        return Math.min(100, Math.round(((scanProgress.completedSongs ?? 0) / scanProgress.totalSongs) * 100));
-    }, [scanProgress]);
+    const [scanPercent, setScanPercent] = useState(0);
 
     useEffect(() => {
         if (typeof window === 'undefined') return undefined;
         const onScanProgress = (event: Event) => {
-            const detail = (event as CustomEvent<LocalMusicScanProgressDetail>).detail;
-            setScanProgress(detail ? { ...detail } : null);
+            const detail = (event as CustomEvent<{ active?: boolean; completedSongs?: number; totalSongs?: number }>).detail;
+            if (!detail || !detail.active) {
+                setScanPercent(0);
+                return;
+            }
+            const pct = detail.totalSongs
+                ? Math.min(100, Math.round(((detail.completedSongs ?? 0) / detail.totalSongs) * 100))
+                : 0;
+            setScanPercent(pct);
         };
         window.addEventListener(LOCAL_MUSIC_SCAN_PROGRESS_EVENT, onScanProgress);
         return () => window.removeEventListener(LOCAL_MUSIC_SCAN_PROGRESS_EVENT, onScanProgress);
     }, []);
-
-    const handleCancelScan = useCallback(() => {
-        cancelLocalLibraryScan(scanProgress?.folderName);
-    }, [scanProgress?.folderName]);
 
     const handleImportFolder = useCallback(async () => {
         if (isBusy) return;
@@ -281,26 +248,15 @@ export const MobileAppContainer: React.FC<MobileAppContainerProps> = ({
         isLyricMatchOpen,
         isSettingsModalOpen,
         isCommandPaletteOpen,
-        isEqualizerOpen,
-        isSearchOpen,
-        isLoginWindowOpen,
         closeLyricMatch: onCloseLyricMatch,
         closeSettingsModal: closeSettings,
         closeCommandPalette: onCloseCommandPalette,
-        closeEqualizer,
-        closeSearch: onCloseSearch,
-        closeLoginWindow,
     }), [
-        closeEqualizer,
         isCommandPaletteOpen,
-        isEqualizerOpen,
-        isLoginWindowOpen,
         isLyricMatchOpen,
-        isSearchOpen,
         isSettingsModalOpen,
         onCloseCommandPalette,
         onCloseLyricMatch,
-        onCloseSearch,
     ]);
 
     return (
@@ -340,15 +296,12 @@ export const MobileAppContainer: React.FC<MobileAppContainerProps> = ({
             onChangeLyricsSource={onChangeLyricsSource}
             onImportLocalLyricsFile={(content, fileName) => onUpdateLocalLyrics(content, false, fileName)}
             onOpenLyricMatch={onOpenLyricMatch}
-            onAutoMatchLyrics={onAutoMatchLyrics}
             onTogglePureMusic={onTogglePureMusic}
             onImportFolder={handleImportFolder}
             onRefreshFolders={handleRefreshFolders}
             onImportPlaylistFile={handleImportPlaylist}
-            isImportingOrScanning={isBusy || Boolean(scanProgress?.active)}
+            isImportingOrScanning={isBusy || scanPercent > 0}
             scanPercent={scanPercent}
-            scanProgress={scanProgress}
-            onCancelScan={handleCancelScan}
             onPlayLocalSongList={(song, queue) => {
                 void onPlayLocalSong(song, queue);
             }}
@@ -368,14 +321,6 @@ export const MobileAppContainer: React.FC<MobileAppContainerProps> = ({
             onOpenFullSettingsModal={() => openSettings('options')}
             externalModals={externalModals}
             onVisualizerVisibilityChange={onVisualizerVisibilityChange}
-            isLatticeOpen={isLatticeOpen}
-            onOpenLattice={onOpenLattice}
-            onCloseLattice={onCloseLattice}
-            onPlayOnlineSong={onPlayOnlineSong}
-            onAddOnlineSongToQueue={onAddOnlineSongToQueue}
-            onPlayNavidromeSong={onPlayNavidromeSong}
-            onAddNavidromeSongsToQueue={onAddNavidromeSongsToQueue}
-            onOpenFullSearchWorkspace={onOpenFullSearchWorkspace}
         />
     );
 };

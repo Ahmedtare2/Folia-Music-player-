@@ -1,7 +1,6 @@
 import { useCallback } from 'react';
 import { useSettledTitle } from '../../hooks/useSettledTitle';
 import { readTitleMetrics, type TitleMetrics } from '../../utils/fitSettledTitle';
-import { hasCursiveJoiningScript } from '../../utils/lyrics/arabicText';
 import { readTitleColumn, titleColumnWidth, type TitleColumn } from './titleLayoutWidth';
 
 // src/components/wall/WallTitle.tsx — preserve the full accessible title while fitting its preview.
@@ -63,17 +62,5 @@ export function WallTitle({ title, expanded, targetPosterWidth, variant = '', ma
         return { ...metrics, width, ...limit };
     }, [expanded, maxLines, targetPosterWidth, variant]);
     const { ref, value, settled } = useSettledTitle(title, expanded, { readMetrics });
-    const isCursive = hasCursiveJoiningScript(title);
-    return (
-        <strong
-            ref={ref}
-            dir="auto"
-            aria-label={title}
-            title={title}
-            data-title-settled={settled || undefined}
-            style={isCursive ? { letterSpacing: '0px', unicodeBidi: 'plaintext' } : { unicodeBidi: 'plaintext' }}
-        >
-            {value}
-        </strong>
-    );
+    return <strong ref={ref} aria-label={title} title={title} data-title-settled={settled || undefined}>{value}</strong>;
 }

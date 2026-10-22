@@ -19,11 +19,9 @@ type PlayerVisualizerMountInput = {
     hasLibraryOcclusionSettled: boolean;
     /** 翻牌交接要求 visualizer 挂着（首页墙的窗还开着 / 马上要开）。 */
     handoffKeepsVisualizer?: boolean;
-    /** 移动端全屏播放器的 Visualizer/Lyrics 视图打开时强制挂载。 */
-    isMobileVisualizerActive?: boolean;
 };
 
-/** visualizer 是否挂载。三项遮挡条件缺一不可，任何一项失效都立即恢复挂载；交接要求挂着或移动端全屏打开时一定挂着。 */
+/** visualizer 是否挂载。三项遮挡条件缺一不可，任何一项失效都立即恢复挂载；交接要求挂着时一定挂着。 */
 export const shouldMountPlayerVisualizer = ({
     currentView,
     hasLatticeExited,
@@ -31,9 +29,8 @@ export const shouldMountPlayerVisualizer = ({
     libraryOccludesPlayer,
     hasLibraryOcclusionSettled,
     handoffKeepsVisualizer = false,
-    isMobileVisualizerActive = false,
 }: PlayerVisualizerMountInput) => handoffKeepsVisualizer || (
     currentView !== 'lattice'
     && hasLatticeExited
-    && (isMobileVisualizerActive || !(shouldRevealHomeSurface && libraryOccludesPlayer && hasLibraryOcclusionSettled))
+    && !(shouldRevealHomeSurface && libraryOccludesPlayer && hasLibraryOcclusionSettled)
 );

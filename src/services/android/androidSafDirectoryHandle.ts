@@ -3,19 +3,17 @@ import {
     buildAndroidSafStreamUrl,
     checkAndroidDirectoryPermission,
     checkAndroidFileReadable,
-    extractAndroidAudioMetadata,
     pickAndroidMusicSource,
     readAndroidContentUriBytes,
     resolveAndroidRelativeFile,
     scanAndroidDirectoryTree,
-    type FoliaAndroidExtractedMetadata,
     type FoliaSafEntryDescriptor,
 } from './foliaAndroidBridge';
 
 // src/services/android/androidSafDirectoryHandle.ts
 // Implements FileSystemDirectoryHandle and FileSystemFileHandle over Android's Storage Access
 // Framework (SAF) with persisted URI permissions, structured-cloneable IndexedDB persistence,
-// bounded header-slice metadata reads, and direct byte-range stream URL resolution.
+// and direct byte-range stream URL resolution for local audio playback.
 
 export interface SerializedAndroidSafDirectoryHandle {
     __foliaAndroidSafHandle: true;
@@ -42,22 +40,11 @@ export interface AndroidSafFileHandle extends FileSystemFileHandle {
     canStreamDirectly(): boolean;
     getPlayableStreamUrl(): string;
     verifyReadable(): Promise<boolean>;
-    /**
-     * Reads only a bounded header slice of the audio file for metadata/tag inspection so
-     * multi-megabyte lossless files are never loaded in full into the WebView JS heap.
-     */
-    getMetadataFile(options?: { includeCover?: boolean; maxBytes?: number }): Promise<File>;
-    /**
-     * Uses Android's native off-thread MediaMetadataRetriever (when available) to extract
-     * tags and downscaled cover art without reading the audio stream into JS memory.
-     */
-    extractNativeMetadata(options?: { includeCover?: boolean; maxCoverDimension?: number }): Promise<FoliaAndroidExtractedMetadata | null>;
 }
 
-export interface AndroidSafDirectoryHandle extends FileSystemDirectoryHandle, Omit<SerializedAndroidSafDirectoryHandle, 'kind' | 'name'> {
+export interface AndroidSafDirectoryHandle extends FileSystemDirectoryHandle, SerializedAndroidSafDirectoryHandle {
     queryPermission(descriptor?: { mode?: 'read' | 'readwrite' }): Promise<PermissionState>;
     requestPermission(descriptor?: { mode?: 'read' | 'readwrite' }): Promise<PermissionState>;
-    invalidateTreeCache(): void;
 }
 
 const normalizeRelativePath = (value: string): string => (
@@ -92,26 +79,8 @@ export const isAndroidSafDirectoryHandle = (handle: unknown): handle is AndroidS
 );
 
 /**
- * Shared tree entry cache keyed by `treeUri::documentId` so handle recovery and nested directory
- * lookups reuse the scanned entries in O(1) without triggering repeated native full-tree scans.
- */
-const sharedTreeEntriesCache = new Map<string, Promise<FoliaSafEntryDescriptor[]>>();
-
-export const invalidateAndroidSafTreeCache = (treeUri?: string): void => {
-    if (!treeUri) {
-        sharedTreeEntriesCache.clear();
-        return;
-    }
-    for (const key of Array.from(sharedTreeEntriesCache.keys())) {
-        if (key === treeUri || key.startsWith(`${treeUri}::`)) {
-            sharedTreeEntriesCache.delete(key);
-        }
-    }
-};
-
-/**
  * Creates a lightweight stat-only File object for initial directory snapshot diffing so scanning
- * a large folder does not read multi-megabyte audio, lyric, or cover payloads into memory before diffing signatures.
+ * a large folder does not read multi-megabyte audio payloads into memory before diffing signatures.
  */
 const createBrowserOrNodeFile = (
     parts: BlobPart[],
@@ -129,50 +98,19 @@ const createBrowserOrNodeFile = (
     }) as unknown as File;
 };
 
-export interface TaggedStatFile extends File {
-    readonly __foliaSafStatFile?: boolean;
-    readonly __foliaSafHandle?: AndroidSafFileHandle;
-}
-
-export const createLightweightStatFile = (handle: AndroidSafFileHandle): TaggedStatFile => {
+export const createLightweightStatFile = (handle: AndroidSafFileHandle): File => {
     const stat = handle.getStatMetadata();
     const file = createBrowserOrNodeFile([], stat.name, {
         type: stat.type,
         lastModified: stat.lastModified,
-    }) as TaggedStatFile;
+    });
     Object.defineProperty(file, 'size', {
         configurable: true,
         enumerable: true,
         value: stat.size,
     });
-    Object.defineProperty(file, '__foliaSafStatFile', {
-        configurable: true,
-        enumerable: false,
-        value: true,
-    });
-    Object.defineProperty(file, '__foliaSafHandle', {
-        configurable: true,
-        enumerable: false,
-        value: handle,
-    });
     return file;
 };
-
-/**
- * Resolves a real File with actual bytes if the given File was created via `createLightweightStatFile`
- * during fast snapshot tree traversal.
- */
-export const ensureLoadedSafFile = async (file: File): Promise<File> => {
-    const tagged = file as TaggedStatFile;
-    if (tagged?.__foliaSafStatFile && tagged.__foliaSafHandle) {
-        return await tagged.__foliaSafHandle.getFile();
-    }
-    return file;
-};
-
-/** Default bounded header slice sizes for tag-only vs embedded-cover metadata inspection. */
-export const METADATA_HEADER_SLICE_NO_COVER_BYTES = 256 * 1024;
-export const METADATA_HEADER_SLICE_WITH_COVER_BYTES = 1536 * 1024;
 
 export const createAndroidSafFileHandle = (
     entry: FoliaSafEntryDescriptor,
@@ -180,8 +118,6 @@ export const createAndroidSafFileHandle = (
 ): AndroidSafFileHandle => {
     const mimeType = inferAudioOrLyricMimeType(entry.name, entry.mimeType);
     const relativePath = normalizeRelativePath(entry.relativePath || entry.name);
-    const statSize = Number(entry.size) || 0;
-    const statLastModified = Number(entry.lastModified) || 0;
 
     return {
         __foliaAndroidSafFileHandle: true,
@@ -191,14 +127,14 @@ export const createAndroidSafFileHandle = (
         treeUri,
         documentId: entry.documentId,
         relativePath,
-        size: statSize,
-        lastModified: statLastModified,
+        size: Number(entry.size) || 0,
+        lastModified: Number(entry.lastModified) || 0,
         mimeType,
         getStatMetadata() {
             return {
                 name: entry.name,
-                size: statSize,
-                lastModified: statLastModified,
+                size: Number(entry.size) || 0,
+                lastModified: Number(entry.lastModified) || 0,
                 type: mimeType,
             };
         },
@@ -214,29 +150,10 @@ export const createAndroidSafFileHandle = (
         },
         async getFile(): Promise<File> {
             const bytes = await readAndroidContentUriBytes(entry.contentUri, treeUri, mimeType);
-            return createBrowserOrNodeFile([bytes as unknown as BlobPart], entry.name, {
+            return createBrowserOrNodeFile([bytes], entry.name, {
                 type: mimeType,
-                lastModified: statLastModified || Date.now(),
+                lastModified: Number(entry.lastModified) || Date.now(),
             });
-        },
-        async getMetadataFile(options?: { includeCover?: boolean; maxBytes?: number }): Promise<File> {
-            const includeCover = options?.includeCover ?? false;
-            const defaultMax = includeCover
-                ? METADATA_HEADER_SLICE_WITH_COVER_BYTES
-                : METADATA_HEADER_SLICE_NO_COVER_BYTES;
-            const maxBytes = options?.maxBytes ?? defaultMax;
-            const boundedLimit = statSize > 0 ? Math.min(statSize, maxBytes) : maxBytes;
-            const bytes = await readAndroidContentUriBytes(entry.contentUri, treeUri, mimeType, {
-                offset: 0,
-                maxBytes: boundedLimit,
-            });
-            return createBrowserOrNodeFile([bytes as unknown as BlobPart], entry.name, {
-                type: mimeType,
-                lastModified: statLastModified || Date.now(),
-            });
-        },
-        async extractNativeMetadata(options?: { includeCover?: boolean; maxCoverDimension?: number }): Promise<FoliaAndroidExtractedMetadata | null> {
-            return await extractAndroidAudioMetadata(entry.contentUri, options);
         },
         async isSameEntry(other: FileSystemHandle): Promise<boolean> {
             return isAndroidSafFileHandle(other) && other.contentUri === entry.contentUri;
@@ -258,8 +175,7 @@ export const createAndroidSafDirectoryHandle = (
     },
 ): AndroidSafDirectoryHandle => {
     const relativePrefix = normalizeRelativePath(init.relativePrefix || '');
-    const rootDocId = init.documentId.includes('/') ? init.documentId.split('/')[0]! : init.documentId;
-    const cacheKey = `${init.treeUri}::${rootDocId}`;
+    let cachedEntriesPromise: Promise<FoliaSafEntryDescriptor[]> | null = null;
 
     const loadAllTreeEntries = (): Promise<FoliaSafEntryDescriptor[]> => {
         if (init.sharedEntriesLoader) {
@@ -268,15 +184,15 @@ export const createAndroidSafDirectoryHandle = (
         if (Array.isArray(init.virtualEntries)) {
             return Promise.resolve(init.virtualEntries);
         }
-        let cached = sharedTreeEntriesCache.get(cacheKey);
-        if (!cached) {
-            cached = scanAndroidDirectoryTree(init.treeUri, rootDocId).catch((err) => {
-                sharedTreeEntriesCache.delete(cacheKey);
-                throw err;
+        if (!cachedEntriesPromise) {
+            cachedEntriesPromise = scanAndroidDirectoryTree(init.treeUri, init.documentId).finally(() => {
+                // Reset after the scan pass settles so a subsequent manual rescan sees fresh disk changes.
+                setTimeout(() => {
+                    cachedEntriesPromise = null;
+                }, 2000);
             });
-            sharedTreeEntriesCache.set(cacheKey, cached);
         }
-        return cached;
+        return cachedEntriesPromise;
     };
 
     const listDirectChildren = async (): Promise<Array<AndroidSafDirectoryHandle | AndroidSafFileHandle>> => {
@@ -323,7 +239,7 @@ export const createAndroidSafDirectoryHandle = (
                 createAndroidSafDirectoryHandle({
                     name: dirName,
                     treeUri: init.treeUri,
-                    documentId: dirDescriptor?.documentId || `${rootDocId}/${childPrefix}`,
+                    documentId: dirDescriptor?.documentId || `${init.documentId}/${childPrefix}`,
                     relativePrefix: childPrefix,
                     virtualEntries: init.virtualEntries,
                     sharedEntriesLoader: loadAllTreeEntries,
@@ -346,10 +262,6 @@ export const createAndroidSafDirectoryHandle = (
         documentId: init.documentId,
         ...(relativePrefix ? { relativePrefix } : {}),
         ...(init.virtualEntries ? { virtualEntries: init.virtualEntries } : {}),
-
-        invalidateTreeCache() {
-            invalidateAndroidSafTreeCache(init.treeUri);
-        },
 
         async queryPermission(): Promise<PermissionState> {
             if (Array.isArray(init.virtualEntries) && init.virtualEntries.length > 0 && !init.treeUri.startsWith('content://')) {
@@ -403,10 +315,10 @@ export const createAndroidSafDirectoryHandle = (
             return createAndroidSafDirectoryHandle({
                 name: cleanName,
                 treeUri: init.treeUri,
-                documentId: `${rootDocId}/${childPrefix}`,
+                documentId: `${init.documentId}/${childPrefix}`,
                 relativePrefix: childPrefix,
                 virtualEntries: init.virtualEntries,
-                sharedEntriesLoader: loadAllTreeEntries,
+                sharedEntriesLoader: init.sharedEntriesLoader,
             });
         },
 
@@ -422,8 +334,8 @@ export const createAndroidSafDirectoryHandle = (
                 throw new DOMException(`File not found: ${targetRelativePath}`, 'NotFoundError');
             }
 
-            if (sharedTreeEntriesCache.has(cacheKey)) {
-                const entries = await sharedTreeEntriesCache.get(cacheKey)!;
+            if (cachedEntriesPromise) {
+                const entries = await cachedEntriesPromise;
                 const match = entries.find(
                     entry => entry.kind === 'file' && normalizeRelativePath(entry.relativePath || entry.name) === targetRelativePath,
                 );
@@ -456,9 +368,9 @@ export const createAndroidSafDirectoryHandle = (
         },
 
         [Symbol.asyncIterator]() {
-            return handle.entries();
+            return this.entries();
         },
-    } as unknown as AndroidSafDirectoryHandle;
+    } as AndroidSafDirectoryHandle;
 
     return handle;
 };
@@ -473,7 +385,6 @@ export const pickAndroidDirectoryHandle = async (): Promise<AndroidSafDirectoryH
     }
 
     if (picked.mode === 'tree') {
-        invalidateAndroidSafTreeCache(picked.directory.treeUri);
         return createAndroidSafDirectoryHandle({
             name: picked.directory.name,
             treeUri: picked.directory.treeUri,

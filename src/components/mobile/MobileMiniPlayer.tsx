@@ -1,10 +1,8 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useRef } from 'react';
 import { MotionValue, useMotionValueEvent } from 'framer-motion';
 import { Disc3, Pause, Play, SkipForward, Sparkles } from 'lucide-react';
 import { PlayerState, type SongResult, type Theme } from '../../types';
 import { detectTextDirection } from '../../utils/lyrics/arabicText';
-import { getCachedLocalCoverObjectUrl, resolveLocalCoverObjectUrl } from '../../services/localCoverRuntime';
-import { isLocalCoverAssetUrl } from '../../services/localCoverAssetUrl';
 
 // src/components/mobile/MobileMiniPlayer.tsx
 // Persistent OLED-friendly mini-player bar shown above the mobile bottom navigation tabs.
@@ -41,39 +39,6 @@ export const MobileMiniPlayer: React.FC<MobileMiniPlayerProps> = ({
     onNextTrack,
 }) => {
     const progressFillRef = useRef<HTMLDivElement>(null);
-    const [resolvedCoverUrl, setResolvedCoverUrl] = useState<string | null>(() => {
-        if (!coverUrl) return null;
-        return getCachedLocalCoverObjectUrl(coverUrl) ?? coverUrl;
-    });
-    const [coverLoadError, setCoverLoadError] = useState(false);
-
-    useEffect(() => {
-        setCoverLoadError(false);
-        if (!coverUrl) {
-            setResolvedCoverUrl(null);
-            return undefined;
-        }
-        const cached = getCachedLocalCoverObjectUrl(coverUrl);
-        if (cached) {
-            setResolvedCoverUrl(cached);
-            return undefined;
-        }
-        if (!isLocalCoverAssetUrl(coverUrl)) {
-            setResolvedCoverUrl(coverUrl);
-            return undefined;
-        }
-        setResolvedCoverUrl(coverUrl);
-        let cancelled = false;
-        void resolveLocalCoverObjectUrl(coverUrl).then((blobUrl) => {
-            if (!cancelled && blobUrl) {
-                setResolvedCoverUrl(blobUrl);
-                setCoverLoadError(false);
-            }
-        });
-        return () => {
-            cancelled = true;
-        };
-    }, [coverUrl]);
 
     useMotionValueEvent(currentTime, 'change', (latest: number) => {
         if (!progressFillRef.current) return;
@@ -89,7 +54,6 @@ export const MobileMiniPlayer: React.FC<MobileMiniPlayerProps> = ({
     const titleDir = detectTextDirection(currentSong.name || '');
     const artistDir = detectTextDirection(artistName || '');
     const accentColor = theme.accentColor || theme.primaryColor || '#f4f4f5';
-    const effectiveCover = !coverLoadError ? resolvedCoverUrl : null;
 
     return (
         <div
@@ -120,13 +84,12 @@ export const MobileMiniPlayer: React.FC<MobileMiniPlayerProps> = ({
                     aria-label={`Open player for ${currentSong.name}`}
                 >
                     <div className="relative h-11 w-11 shrink-0 overflow-hidden rounded-xl border border-white/10 bg-zinc-900 shadow-md">
-                        {effectiveCover ? (
+                        {coverUrl ? (
                             <img
-                                src={effectiveCover}
+                                src={coverUrl}
                                 alt={currentSong.name}
                                 className="h-full w-full object-cover"
                                 loading="lazy"
-                                onError={() => setCoverLoadError(true)}
                             />
                         ) : (
                             <div className="flex h-full w-full items-center justify-center text-white/40">

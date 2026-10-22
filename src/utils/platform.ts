@@ -34,7 +34,7 @@ export const runsOnWindows = (): boolean => (
 
 /** Whether the renderer is running inside the Electron desktop shell. */
 export const isElectronPlatform = (): boolean => (
-    typeof window !== 'undefined' && Boolean((window as unknown as { electron?: { isElectron?: boolean } }).electron)
+    typeof window !== 'undefined' && Boolean(window.electron?.isElectron)
 );
 
 /** Returns the active Capacitor platform identifier ('android', 'ios', or 'web'). */

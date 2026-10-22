@@ -33,8 +33,6 @@ export class FakeContainer {
     height = 0;
     position = { x: 0, y: 0, set: (x: number, y: number) => { this.position.x = x; this.position.y = y; } };
     scale = { x: 1, y: 1, set: (x: number, y = x) => { this.scale.x = x; this.scale.y = y; } };
-    skew = { x: 0, y: 0, set: (x: number, y = x) => { this.skew.x = x; this.skew.y = y; } };
-    removeChildren() { const old = this.children; this.children = []; return old; }
     anchor = { set: () => undefined };
     label = '';
     parent: FakeContainer | null = null;
@@ -70,33 +68,5 @@ export class FakeGraphics extends FakeContainer {
     stroke(style: { alpha?: number }) { this.strokes.push(style.alpha ?? 1); return this; }
 }
 
-class FakeCanvasSource {
-    resource: unknown;
-    resolution = 1;
-    constructor(opts?: { resource?: unknown; resolution?: number }) {
-        this.resource = opts?.resource;
-        this.resolution = opts?.resolution ?? 1;
-    }
-    destroy() {}
-}
-class FakeTexture {
-    source: unknown;
-    frame: unknown;
-    constructor(opts?: { source?: unknown; frame?: unknown }) {
-        this.source = opts?.source;
-        this.frame = opts?.frame;
-    }
-    destroy() {}
-}
-class FakeRectangle {
-    constructor(public x = 0, public y = 0, public width = 0, public height = 0) {}
-}
-export const fakePixi = {
-    Container: FakeContainer,
-    Sprite: FakeSprite,
-    Graphics: FakeGraphics,
-    CanvasSource: FakeCanvasSource,
-    Texture: FakeTexture,
-    Rectangle: FakeRectangle,
-} as unknown as typeof import('pixi.js');
+export const fakePixi = { Container: FakeContainer, Sprite: FakeSprite, Graphics: FakeGraphics } as unknown as typeof import('pixi.js');
 export const fakeSprites = { dot: {}, star: {}, bokeh: {}, streak: {}, destroy: () => undefined } as unknown as LightSprites;

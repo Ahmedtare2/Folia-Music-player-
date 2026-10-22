@@ -8,8 +8,6 @@ import {
     writeCoverAsset,
     type BinaryAssetWriteResult,
 } from './binaryAssetStore';
-import { readLocalCoverBinaryBlob } from './localCoverBinaryStore';
-import { extractAssetIdFromCoverUrl } from './localCoverRuntime';
 import { lyricProxyWebUrl } from './lyricProxy';
 
 interface StoredCoverDescriptor extends BinaryAssetWriteResult { }
@@ -21,13 +19,6 @@ const isStoredCoverDescriptor = (value: unknown): value is StoredCoverDescriptor
         && typeof candidate.mimeType === 'string'
         && typeof candidate.size === 'number'
         && typeof candidate.updatedAt === 'number';
-};
-
-const isValidCoverImageBlob = (blob: Blob | null | undefined): blob is Blob => {
-    if (!isBlob(blob) || blob.size <= 0) return false;
-    if (!blob.type) return true;
-    const normalizedType = blob.type.toLowerCase();
-    return normalizedType.startsWith('image/');
 };
 
 const buildCoverRequestUrl = (coverUrl: string): string => {
@@ -46,30 +37,14 @@ const buildCoverRequestUrl = (coverUrl: string): string => {
 };
 
 const fetchCoverBlob = async (coverUrl: string): Promise<Blob> => {
-    const localAssetId = extractAssetIdFromCoverUrl(coverUrl);
-    if (localAssetId) {
-        const opfsBlob = await readLocalCoverBinaryBlob(localAssetId);
-        if (isValidCoverImageBlob(opfsBlob)) {
-            return opfsBlob;
-        }
-    }
-
     const response = await fetch(buildCoverRequestUrl(coverUrl), { mode: 'cors' });
     if (response.ok === false) throw new Error(`Cover request failed: ${response.status}`);
-    const blob = await response.blob();
-    if (!isValidCoverImageBlob(blob)) {
-        throw new Error(`Cover response is not a valid image (type=${(blob as Blob)?.type || 'unknown'}, size=${(blob as Blob)?.size ?? 0})`);
-    }
-    return blob;
+    return await response.blob();
 };
 
 export async function getCachedCoverUrl(cacheKey: string): Promise<string | null> {
     const stored = await getFromCache<unknown>(cacheKey);
     if (isBlob(stored)) {
-        if (!isValidCoverImageBlob(stored)) {
-            await removeFromCache(cacheKey);
-            return null;
-        }
         const descriptor = await writeCoverAsset(cacheKey, stored).catch(() => null);
         if (!descriptor) {
             return createSafeObjectUrl(stored);
@@ -85,7 +60,7 @@ export async function getCachedCoverUrl(cacheKey: string): Promise<string | null
     }
 
     const cachedCover = await readCoverAsset(cacheKey, isStoredCoverDescriptor(stored) ? stored.mimeType : undefined);
-    if (!cachedCover || !isValidCoverImageBlob(cachedCover)) {
+    if (!cachedCover) {
         if (stored) await removeFromCache(cacheKey);
         return null;
     }
@@ -94,6 +69,11 @@ export async function getCachedCoverUrl(cacheKey: string): Promise<string | null
 
 /**
  * Whether a cover is already stored, without minting an object URL to find out.
+ *
+ * `getCachedCoverUrl` is the wrong question to ask when nothing is going to be displayed: it reads
+ * the bytes and hands back a URL that a caller checking for mere existence then has to remember to
+ * revoke. Reads the descriptor only, and accepts the legacy raw-Blob shape the same way the reader
+ * above does, so a cover written before the asset store existed still counts as cached.
  */
 export async function hasCachedCover(cacheKey: string): Promise<boolean> {
     const stored = await getFromCache<unknown>(cacheKey);
@@ -120,7 +100,6 @@ export async function loadCachedOrFetchCover(cacheKey: string, coverUrl?: string
 }
 
 export async function saveCoverBlob(cacheKey: string, coverBlob: Blob): Promise<void> {
-    if (!isValidCoverImageBlob(coverBlob)) return;
     const descriptor = await writeCoverAsset(cacheKey, coverBlob).catch(() => null);
     if (descriptor) {
         await saveToCache(cacheKey, descriptor);

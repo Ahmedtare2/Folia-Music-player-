@@ -1,6 +1,5 @@
 import { NoCopyrightRecommendation, SongPrivilege, SongResult } from "../../../types";
 import { readProviderSessionValue, removeProviderSessionValue, writeProviderSessionValue } from '../providerStorage';
-import { getStoredRuntimeApiBase } from '../runtimeApiConfig';
 import { OnlineProviderError } from '../../../types/onlineMusic';
 import type { PersonalFmRequestOptions, ProviderSongAvailability } from '../../../types/onlineMusic';
 import { withLoginRequestLimit } from '../login/loginRequestLimit';
@@ -29,10 +28,6 @@ const isElectronRuntime = () =>
   Boolean(getElectronBridge() && typeof getElectronBridge()?.getNeteasePort === 'function');
 
 const getConfiguredApiBase = () => {
-  const runtimeBase = getStoredRuntimeApiBase('netease');
-  if (runtimeBase) {
-    return runtimeBase;
-  }
   const viteEnv = typeof import.meta !== 'undefined' ? (import.meta as any).env : undefined;
   if (viteEnv && typeof viteEnv.VITE_NETEASE_API_BASE === 'string' && viteEnv.VITE_NETEASE_API_BASE) {
     return viteEnv.VITE_NETEASE_API_BASE;

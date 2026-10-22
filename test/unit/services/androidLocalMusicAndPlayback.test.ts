@@ -55,19 +55,47 @@ import {
     resolveAlbumVideoForTrack,
 } from '@/services/localAlbumVideoService';
 import {
+    ANDROID_MEDIA_CACHE_ROOT_DIR,
     ANDROID_SAF_STREAM_PATH,
     ANDROID_SAF_STREAM_READ_BUFFER_BYTES,
+    getCachedAndroidTrackPalette,
     buildAndroidSafStreamUrl,
-    prestageAndroidSafAudioTracks,
+    ANDROID_DISPLAY_REFRESH_RATE_EVENT,
+    ANDROID_PLAYBACK_CLOCK_ANCHOR_EVENT,
+    bindAudioElementToNativeExoPlayer,
+    buildAndroidVisualizerPalette,
+    getAndroidNativePlaybackPosition,
+    getInterpolatedAndroidPlaybackPositionSec,
+    hasAndroidNativeExoPlayerBridge,
+    loadAndroidNativeTrack,
+    pauseAndroidNativeAudio,
+    playAndroidNativeAudio,
+    seekAndroidNativeAudio,
+    setAndroidNativePlaybackSpeed,
+    setAndroidNativeVolume,
+    shouldRouteToAndroidNativeExoPlayer,
+    subscribeAndroidPlaybackClockAnchor,
+    getAndroidDisplayRefreshRate,
+    getCurrentDisplayRefreshRateHz,
+    hasAndroidNativeVisualizerBridge,
+    subscribeAndroidDisplayRefreshRate,
     hasFoliaAndroidBridge,
+    prestageAndroidSafAudioTracks,
     readAndroidContentUriBytes,
+    setAndroidNativeVisualizerEnergy,
+    setAndroidNativeVisualizerPalette,
+    setAndroidNativeVisualizerState,
     stopAndroidPlaybackNotification,
     subscribeAndroidMediaActions,
     syncAndroidPlaybackNotification,
     type FoliaAndroidMediaActionEvent,
     type FoliaNativeBridgePluginContract,
+    type FoliaNativeVisualizerEnergyOptions,
+    type FoliaNativeVisualizerPaletteOptions,
+    type FoliaNativeVisualizerStateOptions,
     type FoliaSafEntryDescriptor,
 } from '@/services/android/foliaAndroidBridge';
+import { resolveVisualizerBackdropBlur } from '@/components/app/presentation/playerVisualizerBackdrop';
 import type { LocalLibrarySnapshot, LocalSong } from '@/types';
 
 // test/unit/services/androidLocalMusicAndPlayback.test.ts
@@ -1094,8 +1122,8 @@ describe('Android SAF local music adapter & Media3 playback bridge', () => {
                 return {
                     ok: true,
                     assetId: resolvedId,
-                    cover256Path: `/data/user/0/top.izuna.foliamajor/files/media_cache/covers/${digest}_256.webp`,
-                    cover1024Path: `/data/user/0/top.izuna.foliamajor/files/media_cache/covers/${digest}_1024.webp`,
+                    cover256Path: `/data/user/0/top.izuna.foliamajor/files/folia_media_cache/covers/${digest}_256.webp`,
+                    cover1024Path: `/data/user/0/top.izuna.foliamajor/files/folia_media_cache/covers/${digest}_1024.webp`,
                     vibrantColors,
                     representativeColors,
                 };
@@ -1105,10 +1133,8 @@ describe('Android SAF local music adapter & Media3 playback bridge', () => {
         // 1. Pre-Parsed & Pre-Segmented Lyrics Disk Cache
         const parsedFirst = await LyricParserFactory.parse({
             type: 'embedded',
-            textContent: '[00:01.00]故事的结局
-[00:03.50]Hello world',
-            translationContent: '[00:01.00]The end of the story
-[00:03.50]你好世界',
+            textContent: '[00:01.00]故事的结局\n[00:03.50]Hello world',
+            translationContent: '[00:01.00]The end of the story\n[00:03.50]你好世界',
         });
         expect(parsedFirst).not.toBeNull();
         expect(parsedFirst!.lines).toHaveLength(2);
@@ -1131,10 +1157,8 @@ describe('Android SAF local music adapter & Media3 playback bridge', () => {
         clearPersistentDiskCacheForTests();
         const parsedFromDisk = await LyricParserFactory.parse({
             type: 'embedded',
-            textContent: '[00:01.00]故事的结局
-[00:03.50]Hello world',
-            translationContent: '[00:01.00]The end of the story
-[00:03.50]你好世界',
+            textContent: '[00:01.00]故事的结局\n[00:03.50]Hello world',
+            translationContent: '[00:01.00]The end of the story\n[00:03.50]你好世界',
         });
         expect(parsedFromDisk).not.toBeNull();
         expect(parsedFromDisk!.lines[0]!.autoWordSegments).toEqual(['故事', '的', '结局']);
@@ -1175,6 +1199,7 @@ describe('Android SAF local music adapter & Media3 playback bridge', () => {
 
     it('pre-stages the active and next queued local SAF tracks into context.getCacheDir()/saf_audio_stage with a 512 KB read buffer', async () => {
         expect(ANDROID_SAF_STREAM_READ_BUFFER_BYTES).toBe(512 * 1024);
+        expect(ANDROID_MEDIA_CACHE_ROOT_DIR).toBe('folia_media_cache');
 
         const prestagedBatches: string[][] = [];
         installAndroidEnvironment({
@@ -1183,7 +1208,7 @@ describe('Android SAF local music adapter & Media3 playback bridge', () => {
                 return {
                     ok: true,
                     stagedCount: uris.length,
-                    stagedPaths: uris.map((_, idx) => `/data/user/0/top.izuna.foliamajor/cache/saf_audio_stage/stage_${idx}.bin`),
+                    stagedPaths: uris.map((_uri: string, idx: number) => `/data/user/0/top.izuna.foliamajor/cache/saf_audio_stage/stage_${idx}.bin`),
                     cacheDir: '/data/user/0/top.izuna.foliamajor/cache/saf_audio_stage',
                 };
             }),
@@ -1217,5 +1242,286 @@ describe('Android SAF local music adapter & Media3 playback bridge', () => {
         ]);
         expect(bridgeRes?.ok).toBe(true);
         expect(bridgeRes?.stagedCount).toBe(2);
+    });
+
+    it('bridges native OpenGL background visualizer state, VSync display refresh rate (60Hz/90Hz/120Hz), palette interpolation, and audio energy while making html/body transparent and disabling WebView backdrop blur', async () => {
+        const stateCalls: FoliaNativeVisualizerStateOptions[] = [];
+        const paletteCalls: FoliaNativeVisualizerPaletteOptions[] = [];
+        const energyCalls: FoliaNativeVisualizerEnergyOptions[] = [];
+        let simulatedRefreshRate = 60;
+
+        installAndroidEnvironment({
+            getDisplayRefreshRate: vi.fn(async () => ({
+                refreshRate: simulatedRefreshRate,
+                rawRefreshRate: simulatedRefreshRate,
+                vsyncIntervalMs: 1000 / simulatedRefreshRate,
+            })),
+            setNativeVisualizerState: vi.fn(async (opts) => {
+                stateCalls.push(opts);
+                return { ok: true, ...opts };
+            }),
+            setNativeVisualizerPalette: vi.fn(async (opts) => {
+                paletteCalls.push(opts);
+                return { ok: true, colorCount: opts.colors.length, transitionMs: opts.transitionMs };
+            }),
+            setNativeVisualizerEnergy: vi.fn(async (opts) => {
+                energyCalls.push(opts);
+                return { ok: true };
+            }),
+        });
+
+        expect(hasAndroidNativeVisualizerBridge()).toBe(true);
+
+        // 1. Detect initial 60Hz display refresh rate (e.g. Battery Saver / 60Hz mode) and verify 1:2 VSync divider = 30fps
+        const initialRate = await getAndroidDisplayRefreshRate();
+        expect(initialRate.refreshRate).toBe(60);
+        expect(getCurrentDisplayRefreshRateHz()).toBe(60);
+
+        const stateOk = await setAndroidNativeVisualizerState({
+            enabled: true,
+            visible: true,
+            vsyncDivider: 2,
+            dim: 0.34,
+        });
+        expect(stateOk).toBe(true);
+        expect(stateCalls).toEqual([{ enabled: true, visible: true, fps: 30, vsyncDivider: 2, dim: 0.34 }]);
+        expect(document.documentElement.getAttribute('data-native-visualizer')).toBe('active');
+        expect(document.documentElement.style.backgroundColor).toBe('transparent');
+        expect(document.body.style.backgroundColor).toBe('transparent');
+
+        // 2. Simulate live display refresh rate change (60Hz -> 90Hz -> 120Hz) from DisplayManager.DisplayListener
+        const observedRates: number[] = [];
+        const unsubscribeRate = subscribeAndroidDisplayRefreshRate(info => {
+            observedRates.push(info.refreshRate);
+        });
+        window.dispatchEvent(
+            new CustomEvent(ANDROID_DISPLAY_REFRESH_RATE_EVENT, {
+                detail: { refreshRate: 90, rawRefreshRate: 90, vsyncIntervalMs: 11.111 },
+            }),
+        );
+        expect(getCurrentDisplayRefreshRateHz()).toBe(90);
+        await setAndroidNativeVisualizerState({
+            enabled: true,
+            visible: true,
+            vsyncDivider: 2,
+            dim: 0.34,
+        });
+        expect(stateCalls[stateCalls.length - 1]).toEqual({
+            enabled: true,
+            visible: true,
+            fps: 45,
+            vsyncDivider: 2,
+            dim: 0.34,
+        });
+
+        window.dispatchEvent(
+            new CustomEvent(ANDROID_DISPLAY_REFRESH_RATE_EVENT, {
+                detail: { refreshRate: 120, rawRefreshRate: 120, vsyncIntervalMs: 8.333 },
+            }),
+        );
+        expect(getCurrentDisplayRefreshRateHz()).toBe(120);
+        expect(observedRates).toEqual([90, 120]);
+        unsubscribeRate();
+
+        // 3. Pushing cover palette deduplicates and supplies 6 RGB/hex colors for smooth transition
+        const paletteColors = buildAndroidVisualizerPalette(
+            {
+                vibrantColors: ['#e63946', '#457b9d', '#1d3557', '#a8dadc'],
+                representativeColors: ['#2a9d8f', '#f4a261'],
+            },
+            {
+                primaryColor: '#ffffff',
+                secondaryColor: '#a1a1aa',
+                accentColor: '#e63946',
+                backgroundColor: '#09090b',
+            },
+        );
+        expect(paletteColors).toHaveLength(6);
+        const paletteOk = await setAndroidNativeVisualizerPalette({
+            colors: paletteColors,
+            transitionMs: 900,
+        });
+        expect(paletteOk).toBe(true);
+        expect(paletteCalls).toEqual([{ colors: paletteColors, transitionMs: 900 }]);
+
+        // 4. Pushing audio energy clamps normalized bands [0..1]
+        const energyOk = await setAndroidNativeVisualizerEnergy({
+            bass: 0.82,
+            mid: 0.54,
+            high: 0.31,
+            isPlaying: true,
+        });
+        expect(energyOk).toBe(true);
+        expect(energyCalls).toEqual([{ bass: 0.82, mid: 0.54, high: 0.31, isPlaying: true }]);
+
+        // 5. Full-screen CSS backdrop blur is disabled on Android when native visualizer is available
+        expect(resolveVisualizerBackdropBlur({ shouldRevealHomeSurface: true, backdropBlur: true })).toBe(false);
+
+        // 6. Hiding native visualizer drops target FPS to 0 and restores opaque #09090b root background
+        await setAndroidNativeVisualizerState({
+            enabled: true,
+            visible: false,
+            vsyncDivider: 2,
+            dim: 0.28,
+        });
+        expect(stateCalls[stateCalls.length - 1]?.fps).toBe(0);
+        expect(document.documentElement.getAttribute('data-native-visualizer')).toBe('inactive');
+    });
+
+    it('routes standard Android playback to native AndroidX Media3 (ExoPlayer) when Automix/Stem Separation are off and interpolates sub-millisecond lyric timings from clock anchors', async () => {
+        const loadedTracks: Array<{ url: string; trackId?: string; autoPlay?: boolean }> = [];
+        let nativePosMs = 0;
+        let nativePlaying = false;
+        let nativeSpeed = 1.0;
+        let nativeVolume = 1.0;
+
+        installAndroidEnvironment({
+            loadTrack: vi.fn(async (opts) => {
+                loadedTracks.push({ url: opts.url, trackId: opts.trackId, autoPlay: opts.autoPlay });
+                nativePosMs = opts.startPositionMs ?? 0;
+                nativePlaying = opts.autoPlay ?? true;
+                nativeSpeed = opts.playbackSpeed ?? 1.0;
+                return {
+                    ok: true,
+                    trackId: opts.trackId ?? 'song_1',
+                    positionMs: nativePosMs,
+                    durationMs: 215_000,
+                    elapsedRealtimeMs: 10_000,
+                    isPlaying: nativePlaying,
+                    playbackSpeed: nativeSpeed,
+                };
+            }),
+            play: vi.fn(async () => {
+                nativePlaying = true;
+                return {
+                    ok: true,
+                    positionMs: nativePosMs,
+                    durationMs: 215_000,
+                    elapsedRealtimeMs: 10_100,
+                    isPlaying: true,
+                    playbackSpeed: nativeSpeed,
+                };
+            }),
+            pause: vi.fn(async () => {
+                nativePlaying = false;
+                return {
+                    ok: true,
+                    positionMs: nativePosMs,
+                    durationMs: 215_000,
+                    elapsedRealtimeMs: 10_200,
+                    isPlaying: false,
+                    playbackSpeed: nativeSpeed,
+                };
+            }),
+            seekTo: vi.fn(async ({ positionMs }) => {
+                nativePosMs = positionMs;
+                return {
+                    ok: true,
+                    positionMs: nativePosMs,
+                    durationMs: 215_000,
+                    elapsedRealtimeMs: 10_300,
+                    isPlaying: nativePlaying,
+                    playbackSpeed: nativeSpeed,
+                };
+            }),
+            setVolume: vi.fn(async ({ volume }) => {
+                nativeVolume = volume;
+                return { ok: true, volume };
+            }),
+            setPlaybackSpeed: vi.fn(async ({ playbackSpeed }) => {
+                nativeSpeed = playbackSpeed;
+                return {
+                    ok: true,
+                    positionMs: nativePosMs,
+                    durationMs: 215_000,
+                    elapsedRealtimeMs: 10_400,
+                    isPlaying: nativePlaying,
+                    playbackSpeed: nativeSpeed,
+                };
+            }),
+            getPlaybackPosition: vi.fn(async () => ({
+                ok: true,
+                trackId: 'song_1',
+                positionMs: nativePosMs,
+                durationMs: 215_000,
+                elapsedRealtimeMs: 10_500,
+                isPlaying: nativePlaying,
+                playbackSpeed: nativeSpeed,
+            })),
+        });
+
+        expect(hasAndroidNativeExoPlayerBridge()).toBe(true);
+
+        // 1. Standard SAF and HTTPS streams route to native ExoPlayer; Automix / Stem Separation fall back to WebAudio
+        const safUrl = buildAndroidSafStreamUrl('content://saf/Fairuz/Habaytak.flac');
+        expect(shouldRouteToAndroidNativeExoPlayer({ audioSrc: safUrl, automixEnabled: false, stemSeparationEnabled: false })).toBe(true);
+        expect(shouldRouteToAndroidNativeExoPlayer({ audioSrc: 'https://cdn.example.com/track.flac', automixEnabled: false, stemSeparationEnabled: false })).toBe(true);
+        expect(shouldRouteToAndroidNativeExoPlayer({ audioSrc: safUrl, automixEnabled: true, stemSeparationEnabled: false })).toBe(false);
+        expect(shouldRouteToAndroidNativeExoPlayer({ audioSrc: safUrl, automixEnabled: false, stemSeparationEnabled: true })).toBe(false);
+
+        // 2. Load track & verify high-precision clock anchor sub-millisecond interpolation without bridge polling
+        const loadAnchor = await loadAndroidNativeTrack({
+            url: safUrl,
+            trackId: 'song_1',
+            title: 'Habaytak',
+            artist: 'Fairuz',
+            album: 'Golden Classics',
+            autoPlay: true,
+            startPositionMs: 12_000,
+        });
+        expect(loadedTracks).toEqual([{ url: safUrl, trackId: 'song_1', autoPlay: true }]);
+        expect(loadAnchor?.positionMs).toBe(12_000);
+
+        const basePerfMs = loadAnchor!.clientPerfNowMs;
+        // 8.333ms later (one 120Hz VSync tick): position advances by 8.333ms to 12.008333s without calling getPlaybackPosition
+        const interp120Hz = getInterpolatedAndroidPlaybackPositionSec(basePerfMs + 8.333);
+        expect(interp120Hz?.positionSec).toBeCloseTo(12.008333, 5);
+        // 16.667ms later (one 60Hz VSync tick): position advances by 16.667ms to 12.016667s
+        const interp60Hz = getInterpolatedAndroidPlaybackPositionSec(basePerfMs + 16.667);
+        expect(interp60Hz?.positionSec).toBeCloseTo(12.016667, 5);
+
+        // 3. Test seekTo, pause, play, setVolume, setPlaybackSpeed, and drift-sync anchor events
+        await seekAndroidNativeAudio(45_500);
+        expect(nativePosMs).toBe(45_500);
+        await setAndroidNativeVolume(0.75);
+        expect(nativeVolume).toBeCloseTo(0.75, 3);
+        await setAndroidNativePlaybackSpeed(1.25);
+        expect(nativeSpeed).toBeCloseTo(1.25, 3);
+        await pauseAndroidNativeAudio();
+        expect(nativePlaying).toBe(false);
+        await playAndroidNativeAudio();
+        expect(nativePlaying).toBe(true);
+
+        const posSnap = await getAndroidNativePlaybackPosition();
+        expect(posSnap?.positionMs).toBe(45_500);
+
+        const anchorEvents: number[] = [];
+        const unsubAnchor = subscribeAndroidPlaybackClockAnchor(a => anchorEvents.push(a.positionMs));
+        window.dispatchEvent(
+            new CustomEvent(ANDROID_PLAYBACK_CLOCK_ANCHOR_EVENT, {
+                detail: {
+                    trackId: 'song_1',
+                    positionMs: 60_000,
+                    durationMs: 215_000,
+                    elapsedRealtimeMs: 25_000,
+                    isPlaying: true,
+                    playbackSpeed: 1.0,
+                    reason: 'drift-sync',
+                },
+            }),
+        );
+        expect(anchorEvents).toContain(60_000);
+        unsubAnchor();
+
+        // 4. Verify HTMLAudioElement binding forwards transport operations to native ExoPlayer
+        const dummyAudio = document.createElement('audio');
+        bindAudioElementToNativeExoPlayer(dummyAudio, true);
+        dummyAudio.currentTime = 90;
+        expect(nativePosMs).toBe(90_000);
+        dummyAudio.volume = 0.5;
+        expect(nativeVolume).toBeCloseTo(0.5, 3);
+        dummyAudio.pause();
+        expect(dummyAudio.paused).toBe(true);
+        bindAudioElementToNativeExoPlayer(dummyAudio, false);
     });
 });
