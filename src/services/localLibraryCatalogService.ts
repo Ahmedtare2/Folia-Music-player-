@@ -17,9 +17,14 @@ import { createLocalLibraryAssignment, resolveEntityNames } from './localLibrary
 import { assignImportedSongs } from './localLibraryImportCatalog';
 import { sanitizeLocalSongForStorage } from './repositories/localSongRepository';
 import { deleteUnreferencedLocalCoverAssets } from './localCoverAssetService';
+import {
+  updatePersistedLibraryIndexSongs,
+  writeOfflineSavedLyricsForSong,
+} from './persistentDiskCacheService';
 
 // src/services/localLibraryCatalogService.ts
-// Applies every song/entity/assignment mutation in a single Dexie transaction.
+// Applies every song/entity/assignment mutation in a single Dexie transaction and mirrors
+// updated song records and matched lyrics to persistent disk cache for offline playback.
 
 export { assignImportedSongs, ensureLocalLibraryInitialized, resetLocalLibraryInitializationCache } from './localLibraryImportCatalog';
 export {
@@ -51,7 +56,7 @@ export const applyMatchedMetadata = async (
     skipIfMarkedPureMusic?: boolean;
   } = {},
 ): Promise<LocalSong | undefined> => {
-  return await appDatabase.transaction(
+  const result = await appDatabase.transaction(
     'rw',
     [appDatabase.local_music, appDatabase.local_library_entities, appDatabase.local_library_assignments],
     async () => {
@@ -107,10 +112,18 @@ export const applyMatchedMetadata = async (
           }),
         ]);
       }
-      await appDatabase.local_music.put(sanitizeLocalSongForStorage(updatedSong));
-      return updatedSong;
+      const sanitized = sanitizeLocalSongForStorage(updatedSong);
+      await appDatabase.local_music.put(sanitized);
+      return sanitized;
     },
   );
+  if (result) {
+    if (result.matchedLyrics) {
+      void writeOfflineSavedLyricsForSong(result.id, result.fileSignature, result.matchedLyrics);
+    }
+    void updatePersistedLibraryIndexSongs([result]);
+  }
+  return result;
 };
 
 export const applyManualMetadata = async (
@@ -144,43 +157,53 @@ export const applyManualMetadata = async (
 export const restoreImportedMetadata = async (
   songId: string,
   songPatch: Partial<LocalSong> = {},
-): Promise<LocalSong | undefined> => appDatabase.transaction(
-  'rw',
-  [appDatabase.local_music, appDatabase.local_library_entities, appDatabase.local_library_assignments],
-  async () => {
-    const song = await appDatabase.local_music.get(songId);
-    if (!song) return undefined;
-    const restored: LocalSong = {
-      ...song,
-      ...songPatch,
-      title: song.importedMetadata.title,
-      titleOrigin: 'import',
-    };
-    const entities = await appDatabase.local_library_entities.toArray();
-    const current = await appDatabase.local_library_assignments.get(songId);
-    const artistEntityIds = resolveEntityNames(
-      entities,
-      'artist',
-      getImportedArtistNames(restored),
-      current?.artistEntityIds,
-    );
-    const albumName = getImportedAlbumName(restored);
-    const albumEntityId = albumName
-      ? resolveEntityNames(entities, 'album', [albumName], current?.albumEntityId ? [current.albumEntityId] : [])[0]
-      : undefined;
-    await Promise.all([
-      appDatabase.local_music.put(sanitizeLocalSongForStorage(restored)),
-      appDatabase.local_library_entities.bulkPut(entities),
-      appDatabase.local_library_assignments.put(createLocalLibraryAssignment(
-        songId,
-        artistEntityIds,
-        albumEntityId,
-        'import',
-      )),
-    ]);
-    return restored;
-  },
-);
+): Promise<LocalSong | undefined> => {
+  const result = await appDatabase.transaction(
+    'rw',
+    [appDatabase.local_music, appDatabase.local_library_entities, appDatabase.local_library_assignments],
+    async () => {
+      const song = await appDatabase.local_music.get(songId);
+      if (!song) return undefined;
+      const restored: LocalSong = {
+        ...song,
+        ...songPatch,
+        title: song.importedMetadata.title,
+        titleOrigin: 'import',
+      };
+      const entities = await appDatabase.local_library_entities.toArray();
+      const current = await appDatabase.local_library_assignments.get(songId);
+      const artistEntityIds = resolveEntityNames(
+        entities,
+        'artist',
+        getImportedArtistNames(restored),
+        current?.artistEntityIds,
+      );
+      const albumName = getImportedAlbumName(restored);
+      const albumEntityId = albumName
+        ? resolveEntityNames(entities, 'album', [albumName], current?.albumEntityId ? [current.albumEntityId] : [])[0]
+        : undefined;
+      const sanitized = sanitizeLocalSongForStorage(restored);
+      await Promise.all([
+        appDatabase.local_music.put(sanitized),
+        appDatabase.local_library_entities.bulkPut(entities),
+        appDatabase.local_library_assignments.put(createLocalLibraryAssignment(
+          songId,
+          artistEntityIds,
+          albumEntityId,
+          'import',
+        )),
+      ]);
+      return sanitized;
+    },
+  );
+  if (result) {
+    if (result.matchedLyrics) {
+      void writeOfflineSavedLyricsForSong(result.id, result.fileSignature, result.matchedLyrics);
+    }
+    void updatePersistedLibraryIndexSongs([result]);
+  }
+  return result;
+};
 
 const getAssignmentEntityIds = (assignment: LocalLibraryAssignment): string[] => [
   ...assignment.artistEntityIds,
