@@ -30,7 +30,7 @@ describe('lrclibProvider', () => {
                     albumName: 'Allem Alby',
                     duration: 242,
                     instrumental: false,
-                    syncedLyrics: '[00:12.00] علم قلبي الغرام\n[00:18.50] علم قلبي الحنان',
+                    syncedLyrics: '[00:01.00] علم قلبي الغرام\n[00:03.50] علم قلبي الحنان',
                     plainLyrics: 'علم قلبي الغرام\nعلم قلبي الحنان',
                 },
             ],
@@ -74,7 +74,7 @@ describe('lrclibProvider', () => {
                         albumName: 'El Leila',
                         duration: 235,
                         instrumental: false,
-                        syncedLyrics: '[00:05.00] الليلة يا سمرا',
+                        syncedLyrics: '[00:02.00] الليلة يا سمرا',
                     },
                 ],
             });
