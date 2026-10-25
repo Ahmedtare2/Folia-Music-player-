@@ -85,9 +85,18 @@ const VisualizerRenderer: React.FC<VisualizerRendererProps> = ({ mode, animateSt
     const switchAsked = transition !== null && mode !== shownMode;
     useLayoutEffect(() => (switchAsked ? holdTurns() : undefined), [switchAsked]);
     // A style still leaving after a switch is drawn with the props tuned for it.
-    const renderStyle = (styleMode: VisualizerMode) => getVisualizerRegistryEntry(styleMode).render(
-        styleMode === shownMode ? styleProps : applyVisualizerTuning(styleMode, sharedProps, props.visualizerTunings),
-    );
+    // When the mobile player is on the scrollable Lyrics tab (`isMobileLyricsOverlay`), pause the
+    // foreground Pixi/Three.js lyric stage so 100% of the GPU budget goes to the live original
+    // Folia background (`VisualizerBackdrop` -> `VisualizerBackgroundRenderer`) and 120Hz lyrics scrolling.
+    const renderStyle = (styleMode: VisualizerMode) => {
+        const base = styleMode === shownMode
+            ? styleProps
+            : applyVisualizerTuning(styleMode, sharedProps, props.visualizerTunings);
+        const effectiveProps = isMobileLyricsOverlay
+            ? { ...base, paused: true, showText: false }
+            : base;
+        return getVisualizerRegistryEntry(styleMode).render(effectiveProps);
+    };
 
     return (
         <>
@@ -101,7 +110,12 @@ const VisualizerRenderer: React.FC<VisualizerRendererProps> = ({ mode, animateSt
               */}
             <React.Suspense fallback={null}>
                 <VisualizerBackdrop entry={entry} props={backdropProps} transition={backgroundTransition} waits={styleSwitch.waits}>
-                    <VisualizerStyleTransition styleSwitch={styleSwitch} transition={transition} renderStyle={renderStyle} />
+                    <div
+                        className="absolute inset-0 w-full h-full"
+                        style={isMobileLyricsOverlay ? { opacity: 0, pointerEvents: 'none', visibility: 'hidden' } : undefined}
+                    >
+                        <VisualizerStyleTransition styleSwitch={styleSwitch} transition={transition} renderStyle={renderStyle} />
+                    </div>
                 </VisualizerBackdrop>
             </React.Suspense>
             <VisualizerHarmonyOverlay

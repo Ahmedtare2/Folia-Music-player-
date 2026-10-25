@@ -608,8 +608,14 @@ export function useLibraryPlaybackController({
         Object.assign(localSong, preparedLocalSong);
 
         const onlineFirst = useLyricSettingsStore.getState().localLyricsPriority === 'online';
+        const hasWordByWordLocalOrEmbedded = hasKnownGoodWordByWordLocalLyric(localSong);
+        const hasAnyLocalOrEmbeddedContent = Boolean(
+            (localSong.hasLocalLyrics && localSong.localLyricsContent)
+            || (localSong.hasEmbeddedLyrics && localSong.embeddedLyricsContent)
+        );
         const needsLyricsMatch = (
-            (onlineFirst || (!localSong.hasLocalLyrics && !localSong.hasEmbeddedLyrics))
+            !hasWordByWordLocalOrEmbedded
+            && (onlineFirst || !hasAnyLocalOrEmbeddedContent || !localSong.matchedLyrics)
             && (!localSong.matchedLyrics && !localSong.matchedIsPureMusic
                 || shouldRefreshLocalSongLyricsFromMetadata(localSong))
         );

@@ -23,24 +23,147 @@ import org.json.JSONObject;
 
 /**
  * Fast, zero-copy FileChannel tag extractor for embedded synchronized/unsynchronized lyrics
- * (TTML, Enhanced LRC, LRC, QRC/YRC/KRC, and plain text) across MP3 (ID3v2.2/2.3/2.4),
- * FLAC (Vorbis comments), M4A/MP4/ALAC/AAC (iTunes ilst ©lyr and ---- freeform boxes, even when
- * moov is at the end of the file after mdat or after a multi-megabyte cover), OGG/Opus (OggS
- * Vorbis/OpusTags packets), and WAV (RIFF ID3 chunks), backed by a persistent disk cache in
- * context.getFilesDir()/media_cache/lyrics/ so container tags are never parsed twice.
+ * (TTML, Enhanced LRC, LRC, QRC/YRC/KRC, and plain text) AND core song identity tags
+ * (title, artist, albumArtist, album, genre, year, trackNumber) across MP3 (ID3v2.2/2.3/2.4),
+ * FLAC (Vorbis comments), M4A/MP4/ALAC/AAC (iTunes ilst ©lyr, ©nam, ©ART, aART, ©alb, and ----
+ * freeform boxes, even when moov is at the end of the file after mdat or after a multi-megabyte
+ * cover), OGG/Opus (OggS Vorbis/OpusTags packets), and WAV (RIFF ID3 chunks), backed by a
+ * persistent disk cache in context.getFilesDir()/folia_media_cache/lyrics/ so container tags are
+ * never parsed twice.
  */
 public final class FoliaEmbeddedLyricsExtractor {
     private static final int MAX_LYRIC_TAG_BYTES = 2 * 1024 * 1024; // 2 MiB safety cap per lyric tag
-    private static final String EMBEDDED_LYRIC_DISK_CACHE_VERSION = "v1";
+    private static final int MAX_TEXT_TAG_BYTES = 64 * 1024; // 64 KiB cap for text frames
+    private static final String EMBEDDED_LYRIC_DISK_CACHE_VERSION = "v2";
 
     public static final class ExtractedLyrics {
+        @Nullable
         public final String lyrics;
         @Nullable
         public final String translationLyrics;
+        @Nullable
+        public final String title;
+        @Nullable
+        public final String artist;
+        @Nullable
+        public final String albumArtist;
+        @Nullable
+        public final String album;
+        @Nullable
+        public final String genre;
+        public final int year;
+        public final int trackNumber;
 
-        public ExtractedLyrics(String lyrics, @Nullable String translationLyrics) {
-            this.lyrics = lyrics;
-            this.translationLyrics = translationLyrics;
+        public ExtractedLyrics(@Nullable String lyrics, @Nullable String translationLyrics) {
+            this(lyrics, translationLyrics, null, null, null, null, null, 0, 0);
+        }
+
+        public ExtractedLyrics(
+            @Nullable String lyrics,
+            @Nullable String translationLyrics,
+            @Nullable String title,
+            @Nullable String artist,
+            @Nullable String albumArtist,
+            @Nullable String album,
+            @Nullable String genre,
+            int year,
+            int trackNumber
+        ) {
+            this.lyrics = (lyrics != null && !lyrics.isEmpty()) ? lyrics : null;
+            this.translationLyrics = (translationLyrics != null && !translationLyrics.isEmpty()) ? translationLyrics : null;
+            this.title = cleanTagValue(title);
+            this.artist = cleanTagValue(artist);
+            this.albumArtist = cleanTagValue(albumArtist);
+            this.album = cleanTagValue(album);
+            this.genre = cleanTagValue(genre);
+            this.year = Math.max(0, year);
+            this.trackNumber = Math.max(0, trackNumber);
+        }
+
+        public boolean hasAnyData() {
+            return lyrics != null
+                || translationLyrics != null
+                || title != null
+                || artist != null
+                || albumArtist != null
+                || album != null
+                || genre != null
+                || year > 0
+                || trackNumber > 0;
+        }
+    }
+
+    private static final class TagAccumulator {
+        final List<LyricCandidate> lyrics = new ArrayList<>();
+        @Nullable String title;
+        @Nullable String artist;
+        @Nullable String albumArtist;
+        @Nullable String album;
+        @Nullable String genre;
+        int year;
+        int trackNumber;
+
+        void setTitleIfEmpty(@Nullable String val) {
+            String cleaned = cleanTagValue(val);
+            if (cleaned != null && (this.title == null || this.title.isEmpty())) {
+                this.title = cleaned;
+            }
+        }
+
+        void setArtistIfEmpty(@Nullable String val) {
+            String cleaned = cleanTagValue(val);
+            if (cleaned != null && (this.artist == null || this.artist.isEmpty())) {
+                this.artist = cleaned;
+            }
+        }
+
+        void setAlbumArtistIfEmpty(@Nullable String val) {
+            String cleaned = cleanTagValue(val);
+            if (cleaned != null && (this.albumArtist == null || this.albumArtist.isEmpty())) {
+                this.albumArtist = cleaned;
+            }
+        }
+
+        void setAlbumIfEmpty(@Nullable String val) {
+            String cleaned = cleanTagValue(val);
+            if (cleaned != null && (this.album == null || this.album.isEmpty())) {
+                this.album = cleaned;
+            }
+        }
+
+        void setGenreIfEmpty(@Nullable String val) {
+            String cleaned = cleanTagValue(val);
+            if (cleaned != null && (this.genre == null || this.genre.isEmpty())) {
+                this.genre = cleaned;
+            }
+        }
+
+        void setYearIfEmpty(@Nullable String val) {
+            if (this.year > 0 || val == null) return;
+            String cleaned = val.trim();
+            if (cleaned.length() >= 4) {
+                try {
+                    int parsed = Integer.parseInt(cleaned.substring(0, 4));
+                    if (parsed >= 1900 && parsed <= 2100) {
+                        this.year = parsed;
+                    }
+                } catch (NumberFormatException ignored) {}
+            }
+        }
+
+        void setTrackNumberIfEmpty(@Nullable String val) {
+            if (this.trackNumber > 0 || val == null) return;
+            String cleaned = val.trim();
+            int slash = cleaned.indexOf('/');
+            if (slash > 0) {
+                cleaned = cleaned.substring(0, slash).trim();
+            }
+            try {
+                int parsed = Integer.parseInt(cleaned);
+                if (parsed > 0 && parsed < 10000) {
+                    this.trackNumber = parsed;
+                }
+            } catch (NumberFormatException ignored) {}
         }
     }
 
@@ -57,6 +180,17 @@ public final class FoliaEmbeddedLyricsExtractor {
     }
 
     private FoliaEmbeddedLyricsExtractor() {}
+
+    @Nullable
+    private static String cleanTagValue(@Nullable String raw) {
+        if (raw == null) return null;
+        String cleaned = raw
+            .replace("\uFEFF", "")
+            .replace("\u0000", " ")
+            .replaceAll("\\s+", " ")
+            .trim();
+        return cleaned.isEmpty() ? null : cleaned;
+    }
 
     @Nullable
     public static ExtractedLyrics extract(ContentResolver resolver, Uri uri) {
@@ -85,17 +219,27 @@ public final class FoliaEmbeddedLyricsExtractor {
                         String rawJson = readUtf8File(diskCacheFile);
                         JSONObject cached = new JSONObject(rawJson);
                         if (EMBEDDED_LYRIC_DISK_CACHE_VERSION.equals(cached.optString("v"))) {
-                            if (!cached.optBoolean("hasLyrics", false)) {
-                                return null;
-                            }
                             String cachedLyrics = cached.optString("lyrics", "");
                             String cachedTrans = cached.optString("translationLyrics", "");
-                            if (!cachedLyrics.isEmpty()) {
-                                return new ExtractedLyrics(
-                                    cachedLyrics,
-                                    cachedTrans.isEmpty() ? null : cachedTrans
-                                );
-                            }
+                            String cachedTitle = cached.optString("title", "");
+                            String cachedArtist = cached.optString("artist", "");
+                            String cachedAlbumArtist = cached.optString("albumArtist", "");
+                            String cachedAlbum = cached.optString("album", "");
+                            String cachedGenre = cached.optString("genre", "");
+                            int cachedYear = cached.optInt("year", 0);
+                            int cachedTrack = cached.optInt("trackNumber", 0);
+                            ExtractedLyrics fromCache = new ExtractedLyrics(
+                                cachedLyrics.isEmpty() ? null : cachedLyrics,
+                                cachedTrans.isEmpty() ? null : cachedTrans,
+                                cachedTitle.isEmpty() ? null : cachedTitle,
+                                cachedArtist.isEmpty() ? null : cachedArtist,
+                                cachedAlbumArtist.isEmpty() ? null : cachedAlbumArtist,
+                                cachedAlbum.isEmpty() ? null : cachedAlbum,
+                                cachedGenre.isEmpty() ? null : cachedGenre,
+                                cachedYear,
+                                cachedTrack
+                            );
+                            return fromCache.hasAnyData() ? fromCache : null;
                         }
                     } catch (Exception ignored) {
                         // Corrupt cache entry; re-extract below.
@@ -108,11 +252,16 @@ public final class FoliaEmbeddedLyricsExtractor {
                         JSONObject record = new JSONObject();
                         record.put("v", EMBEDDED_LYRIC_DISK_CACHE_VERSION);
                         record.put("hasLyrics", extracted != null && extracted.lyrics != null && !extracted.lyrics.isEmpty());
-                        if (extracted != null && extracted.lyrics != null) {
-                            record.put("lyrics", extracted.lyrics);
-                            if (extracted.translationLyrics != null) {
-                                record.put("translationLyrics", extracted.translationLyrics);
-                            }
+                        if (extracted != null) {
+                            if (extracted.lyrics != null) record.put("lyrics", extracted.lyrics);
+                            if (extracted.translationLyrics != null) record.put("translationLyrics", extracted.translationLyrics);
+                            if (extracted.title != null) record.put("title", extracted.title);
+                            if (extracted.artist != null) record.put("artist", extracted.artist);
+                            if (extracted.albumArtist != null) record.put("albumArtist", extracted.albumArtist);
+                            if (extracted.album != null) record.put("album", extracted.album);
+                            if (extracted.genre != null) record.put("genre", extracted.genre);
+                            if (extracted.year > 0) record.put("year", extracted.year);
+                            if (extracted.trackNumber > 0) record.put("trackNumber", extracted.trackNumber);
                         }
                         writeUtf8FileAtomically(diskCacheFile, record.toString());
                     } catch (Exception ignored) {
@@ -181,34 +330,51 @@ public final class FoliaEmbeddedLyricsExtractor {
 
     @Nullable
     public static ExtractedLyrics extractFromChannel(FileChannel channel, long baseOffset, long totalLength) throws IOException {
-        List<LyricCandidate> candidates = new ArrayList<>();
+        TagAccumulator acc = new TagAccumulator();
         byte[] magic = readBytesAt(channel, baseOffset, (int) Math.min(16L, totalLength));
         if (magic == null || magic.length < 4) return null;
 
         long cursor = 0L;
         if (magic[0] == 'I' && magic[1] == 'D' && magic[2] == '3' && magic.length >= 10) {
             int id3Size = readSynchsafeInt(magic, 6);
-            parseId3v2(channel, baseOffset, Math.min(totalLength, 10L + id3Size), candidates);
+            parseId3v2(channel, baseOffset, Math.min(totalLength, 10L + id3Size), acc);
             cursor = 10L + id3Size;
             if (cursor + 4L < totalLength) {
                 byte[] afterId3 = readBytesAt(channel, baseOffset + cursor, 4);
                 if (afterId3 != null && afterId3.length == 4
                     && afterId3[0] == 'f' && afterId3[1] == 'L' && afterId3[2] == 'a' && afterId3[3] == 'C') {
-                    parseFlac(channel, baseOffset + cursor, totalLength - cursor, candidates);
+                    parseFlac(channel, baseOffset + cursor, totalLength - cursor, acc);
                 }
             }
         } else if (magic[0] == 'f' && magic[1] == 'L' && magic[2] == 'a' && magic[3] == 'C') {
-            parseFlac(channel, baseOffset, totalLength, candidates);
+            parseFlac(channel, baseOffset, totalLength, acc);
         } else if (magic[0] == 'O' && magic[1] == 'g' && magic[2] == 'g' && magic[3] == 'S') {
-            parseOgg(channel, baseOffset, totalLength, candidates);
+            parseOgg(channel, baseOffset, totalLength, acc);
         } else if (magic[0] == 'R' && magic[1] == 'I' && magic[2] == 'F' && magic[3] == 'F' && magic.length >= 12
             && magic[8] == 'W' && magic[9] == 'A' && magic[10] == 'V' && magic[11] == 'E') {
-            parseWavRiff(channel, baseOffset, totalLength, candidates);
+            parseWavRiff(channel, baseOffset, totalLength, acc);
         } else if (magic.length >= 8 && isMp4TopLevelAtom(magic, 4)) {
-            parseMp4Boxes(channel, baseOffset, 0L, totalLength, 0, candidates);
+            parseMp4Boxes(channel, baseOffset, 0L, totalLength, 0, acc);
         }
 
-        return selectBestCandidates(candidates);
+        // Fallback to ID3v1 at the last 128 bytes of the file if title/artist/album are still missing
+        if ((acc.title == null || acc.artist == null || acc.album == null) && totalLength >= 128L) {
+            parseId3v1Footer(channel, baseOffset + totalLength - 128L, acc);
+        }
+
+        return buildExtractedResult(acc);
+    }
+
+    private static void parseId3v1Footer(FileChannel channel, long footerPos, TagAccumulator acc) {
+        try {
+            byte[] buf = readBytesAt(channel, footerPos, 128);
+            if (buf == null || buf.length < 128) return;
+            if (buf[0] != 'T' || buf[1] != 'A' || buf[2] != 'G') return;
+            acc.setTitleIfEmpty(decodeId3String(buf, 3, 30, 0));
+            acc.setArtistIfEmpty(decodeId3String(buf, 33, 30, 0));
+            acc.setAlbumIfEmpty(decodeId3String(buf, 63, 30, 0));
+            acc.setYearIfEmpty(decodeId3String(buf, 93, 4, 0));
+        } catch (Exception ignored) {}
     }
 
     private static boolean isMp4TopLevelAtom(byte[] buf, int offset) {
@@ -219,12 +385,11 @@ public final class FoliaEmbeddedLyricsExtractor {
     }
 
     @Nullable
-    private static ExtractedLyrics selectBestCandidates(List<LyricCandidate> candidates) {
-        if (candidates.isEmpty()) return null;
+    private static ExtractedLyrics buildExtractedResult(TagAccumulator acc) {
         LyricCandidate bestMain = null;
         LyricCandidate bestTrans = null;
 
-        for (LyricCandidate c : candidates) {
+        for (LyricCandidate c : acc.lyrics) {
             if (!c.isTranslation) {
                 if (bestMain == null || c.qualityRank > bestMain.qualityRank) {
                     bestMain = c;
@@ -239,11 +404,22 @@ public final class FoliaEmbeddedLyricsExtractor {
             bestMain = bestTrans;
             bestTrans = null;
         }
-        if (bestMain == null) return null;
-        String transText = (bestTrans != null && !bestTrans.text.equals(bestMain.text))
+        String mainText = bestMain != null ? bestMain.text : null;
+        String transText = (bestTrans != null && bestMain != null && !bestTrans.text.equals(bestMain.text))
             ? bestTrans.text
             : null;
-        return new ExtractedLyrics(bestMain.text, transText);
+        ExtractedLyrics result = new ExtractedLyrics(
+            mainText,
+            transText,
+            acc.title,
+            acc.artist,
+            acc.albumArtist,
+            acc.album,
+            acc.genre,
+            acc.year,
+            acc.trackNumber
+        );
+        return result.hasAnyData() ? result : null;
     }
 
     private static void addCandidate(List<LyricCandidate> list, @Nullable String rawText, boolean isTranslation) {
@@ -289,7 +465,7 @@ public final class FoliaEmbeddedLyricsExtractor {
     // =========================================================================
     // 1. MP3 / ID3v2 (v2.2, v2.3, v2.4)
     // =========================================================================
-    private static void parseId3v2(FileChannel channel, long baseOffset, long tagLimit, List<LyricCandidate> out) throws IOException {
+    private static void parseId3v2(FileChannel channel, long baseOffset, long tagLimit, TagAccumulator acc) throws IOException {
         byte[] header = readBytesAt(channel, baseOffset, 10);
         if (header == null || header.length < 10) return;
         int versionMajor = header[3] & 0xFF;
@@ -339,7 +515,7 @@ public final class FoliaEmbeddedLyricsExtractor {
                     byte[] payload = readBytesAt(channel, payloadOffset, frameSize);
                     if (payload != null) {
                         payload = stripId3UnsyncAndDataLen(payload, versionMajor, flags, frameFlags);
-                        parseUsltPayload(payload, out);
+                        parseUsltPayload(payload, acc.lyrics);
                     }
                 }
             } else if ("TXXX".equals(frameId) || "TXX".equals(frameId)) {
@@ -347,12 +523,50 @@ public final class FoliaEmbeddedLyricsExtractor {
                     byte[] payload = readBytesAt(channel, payloadOffset, frameSize);
                     if (payload != null) {
                         payload = stripId3UnsyncAndDataLen(payload, versionMajor, flags, frameFlags);
-                        parseTxxxPayload(payload, out);
+                        parseTxxxPayload(payload, acc);
+                    }
+                }
+            } else if (frameSize <= MAX_TEXT_TAG_BYTES && isId3TextMetadataFrame(frameId)) {
+                byte[] payload = readBytesAt(channel, payloadOffset, frameSize);
+                if (payload != null && payload.length >= 2) {
+                    payload = stripId3UnsyncAndDataLen(payload, versionMajor, flags, frameFlags);
+                    if (payload.length >= 2) {
+                        int encoding = payload[0] & 0xFF;
+                        String text = decodeId3String(payload, 1, payload.length - 1, encoding);
+                        applyId3TextFrame(frameId, text, acc);
                     }
                 }
             }
 
             pos += frameHeaderLen + (long) frameSize;
+        }
+    }
+
+    private static boolean isId3TextMetadataFrame(String frameId) {
+        return "TIT2".equals(frameId) || "TT2".equals(frameId)
+            || "TPE1".equals(frameId) || "TP1".equals(frameId)
+            || "TPE2".equals(frameId) || "TP2".equals(frameId)
+            || "TALB".equals(frameId) || "TAL".equals(frameId)
+            || "TCON".equals(frameId) || "TCO".equals(frameId)
+            || "TYER".equals(frameId) || "TYE".equals(frameId) || "TDRC".equals(frameId)
+            || "TRCK".equals(frameId) || "TRK".equals(frameId);
+    }
+
+    private static void applyId3TextFrame(String frameId, String text, TagAccumulator acc) {
+        if ("TIT2".equals(frameId) || "TT2".equals(frameId)) {
+            acc.setTitleIfEmpty(text);
+        } else if ("TPE1".equals(frameId) || "TP1".equals(frameId)) {
+            acc.setArtistIfEmpty(text);
+        } else if ("TPE2".equals(frameId) || "TP2".equals(frameId)) {
+            acc.setAlbumArtistIfEmpty(text);
+        } else if ("TALB".equals(frameId) || "TAL".equals(frameId)) {
+            acc.setAlbumIfEmpty(text);
+        } else if ("TCON".equals(frameId) || "TCO".equals(frameId)) {
+            acc.setGenreIfEmpty(text);
+        } else if ("TYER".equals(frameId) || "TYE".equals(frameId) || "TDRC".equals(frameId)) {
+            acc.setYearIfEmpty(text);
+        } else if ("TRCK".equals(frameId) || "TRK".equals(frameId)) {
+            acc.setTrackNumberIfEmpty(text);
         }
     }
 
@@ -391,7 +605,7 @@ public final class FoliaEmbeddedLyricsExtractor {
         addCandidate(out, lyricText, isTranslationDescriptor(lang, desc));
     }
 
-    private static void parseTxxxPayload(byte[] payload, List<LyricCandidate> out) {
+    private static void parseTxxxPayload(byte[] payload, TagAccumulator acc) {
         if (payload.length < 3) return;
         int encoding = payload[0] & 0xFF;
         int descStart = 1;
@@ -400,9 +614,17 @@ public final class FoliaEmbeddedLyricsExtractor {
         if (textStart >= payload.length) return;
         String desc = decodeId3String(payload, descStart, descEnd - descStart, encoding);
         String lowerDesc = desc.trim().toLowerCase(Locale.ROOT);
+        String valText = decodeId3String(payload, textStart, payload.length - textStart, encoding);
         if (lowerDesc.contains("lyric") || lowerDesc.contains("ttml") || lowerDesc.contains("uslt") || lowerDesc.contains("sylt") || lowerDesc.equals("lrc")) {
-            String lyricText = decodeId3String(payload, textStart, payload.length - textStart, encoding);
-            addCandidate(out, lyricText, isTranslationDescriptor(null, lowerDesc));
+            addCandidate(acc.lyrics, valText, isTranslationDescriptor(null, lowerDesc));
+        } else if ("album".equals(lowerDesc) || "albumtitle".equals(lowerDesc)) {
+            acc.setAlbumIfEmpty(valText);
+        } else if ("artist".equals(lowerDesc)) {
+            acc.setArtistIfEmpty(valText);
+        } else if ("albumartist".equals(lowerDesc) || "album artist".equals(lowerDesc)) {
+            acc.setAlbumArtistIfEmpty(valText);
+        } else if ("title".equals(lowerDesc)) {
+            acc.setTitleIfEmpty(valText);
         }
     }
 
@@ -451,7 +673,29 @@ public final class FoliaEmbeddedLyricsExtractor {
         if (isValidUtf8(buf, offset, safeLen)) {
             return new String(buf, offset, safeLen, StandardCharsets.UTF_8);
         }
+        if (looksLikeArabicWindows1256(buf, offset, safeLen)) {
+            try {
+                return new String(buf, offset, safeLen, Charset.forName("windows-1256"));
+            } catch (Exception ignored) {}
+        }
         return new String(buf, offset, safeLen, StandardCharsets.ISO_8859_1);
+    }
+
+    private static boolean looksLikeArabicWindows1256(byte[] buf, int offset, int length) {
+        int highCount = 0;
+        int arabicRangeCount = 0;
+        int end = offset + length;
+        for (int i = offset; i < end; i++) {
+            int b = buf[i] & 0xFF;
+            if (b >= 0x80) {
+                highCount++;
+                // Common Arabic letters in Windows-1256: 0xC1..0xDA, 0xDF..0xFA
+                if ((b >= 0xC1 && b <= 0xDA) || (b >= 0xDF && b <= 0xFA)) {
+                    arabicRangeCount++;
+                }
+            }
+        }
+        return highCount >= 2 && arabicRangeCount * 2 >= highCount;
     }
 
     private static boolean isValidUtf8(byte[] buf, int offset, int length) {
@@ -480,7 +724,7 @@ public final class FoliaEmbeddedLyricsExtractor {
     // =========================================================================
     // 2. FLAC (Vorbis Comments, skipping PICTURE blocks in O(1))
     // =========================================================================
-    private static void parseFlac(FileChannel channel, long baseOffset, long totalLength, List<LyricCandidate> out) throws IOException {
+    private static void parseFlac(FileChannel channel, long baseOffset, long totalLength, TagAccumulator acc) throws IOException {
         long pos = 4L;
         while (pos + 4L <= totalLength) {
             byte[] bh = readBytesAt(channel, baseOffset + pos, 4);
@@ -494,7 +738,7 @@ public final class FoliaEmbeddedLyricsExtractor {
             if (blockType == 4 && blockLen > 8 && blockLen <= MAX_LYRIC_TAG_BYTES * 2) {
                 byte[] commentBlock = readBytesAt(channel, baseOffset + pos, blockLen);
                 if (commentBlock != null) {
-                    parseVorbisCommentBlock(commentBlock, 0, commentBlock.length, out);
+                    parseVorbisCommentBlock(commentBlock, 0, commentBlock.length, acc);
                 }
             }
             pos += blockLen;
@@ -502,7 +746,7 @@ public final class FoliaEmbeddedLyricsExtractor {
         }
     }
 
-    private static void parseVorbisCommentBlock(byte[] buf, int offset, int length, List<LyricCandidate> out) {
+    private static void parseVorbisCommentBlock(byte[] buf, int offset, int length, TagAccumulator acc) {
         int end = offset + length;
         if (offset + 8 > end) return;
         ByteBuffer bb = ByteBuffer.wrap(buf, offset, length).order(ByteOrder.LITTLE_ENDIAN);
@@ -529,15 +773,29 @@ public final class FoliaEmbeddedLyricsExtractor {
             }
             if (eqIdx <= cPos) continue;
             String key = new String(buf, cPos, eqIdx - cPos, StandardCharsets.US_ASCII).trim().toLowerCase(Locale.ROOT);
+            String val = new String(buf, eqIdx + 1, (cPos + cLen) - (eqIdx + 1), StandardCharsets.UTF_8);
             if (key.contains("lyric") || key.equals("ttml") || key.equals("uslt") || key.equals("lrc")) {
-                String val = new String(buf, eqIdx + 1, (cPos + cLen) - (eqIdx + 1), StandardCharsets.UTF_8);
-                addCandidate(out, val, isTranslationDescriptor(null, key));
+                addCandidate(acc.lyrics, val, isTranslationDescriptor(null, key));
+            } else if ("title".equals(key)) {
+                acc.setTitleIfEmpty(val);
+            } else if ("artist".equals(key)) {
+                acc.setArtistIfEmpty(val);
+            } else if ("albumartist".equals(key) || "album artist".equals(key) || "album_artist".equals(key)) {
+                acc.setAlbumArtistIfEmpty(val);
+            } else if ("album".equals(key)) {
+                acc.setAlbumIfEmpty(val);
+            } else if ("genre".equals(key)) {
+                acc.setGenreIfEmpty(val);
+            } else if ("date".equals(key) || "year".equals(key)) {
+                acc.setYearIfEmpty(val);
+            } else if ("tracknumber".equals(key) || "track".equals(key)) {
+                acc.setTrackNumberIfEmpty(val);
             }
         }
     }
 
     // =========================================================================
-    // 3. M4A / MP4 / ALAC / AAC (moov -> udta -> meta -> ilst -> ©lyr & ----)
+    // 3. M4A / MP4 / ALAC / AAC (moov -> udta -> meta -> ilst -> ©lyr, ©nam, ©ART, ©alb & ----)
     // =========================================================================
     private static void parseMp4Boxes(
         FileChannel channel,
@@ -545,7 +803,7 @@ public final class FoliaEmbeddedLyricsExtractor {
         long startRel,
         long endRel,
         int depth,
-        List<LyricCandidate> out
+        TagAccumulator acc
     ) throws IOException {
         if (depth > 8) return;
         long pos = startRel;
@@ -577,7 +835,7 @@ public final class FoliaEmbeddedLyricsExtractor {
             long boxEnd = pos + boxSize;
 
             if ("moov".equals(boxType) || "udta".equals(boxType) || "ilst".equals(boxType)) {
-                parseMp4Boxes(channel, baseOffset, boxContentStart, boxEnd, depth + 1, out);
+                parseMp4Boxes(channel, baseOffset, boxContentStart, boxEnd, depth + 1, acc);
             } else if ("meta".equals(boxType)) {
                 long childStart = boxContentStart + 4L;
                 if (childStart + 8L <= boxEnd) {
@@ -585,22 +843,67 @@ public final class FoliaEmbeddedLyricsExtractor {
                     if (probe != null && probe.length == 8) {
                         String childType = new String(probe, 4, 4, StandardCharsets.ISO_8859_1);
                         if ("hdlr".equals(childType) || "ilst".equals(childType) || "keys".equals(childType) || "free".equals(childType)) {
-                            parseMp4Boxes(channel, baseOffset, childStart, boxEnd, depth + 1, out);
+                            parseMp4Boxes(channel, baseOffset, childStart, boxEnd, depth + 1, acc);
                         } else {
-                            parseMp4Boxes(channel, baseOffset, boxContentStart, boxEnd, depth + 1, out);
+                            parseMp4Boxes(channel, baseOffset, boxContentStart, boxEnd, depth + 1, acc);
                         }
                     }
                 }
             } else if ((type0 == 0xA9 && type1 == 'l' && type2 == 'y' && type3 == 'r')
                 || "lyr ".equalsIgnoreCase(boxType)
                 || "ttml".equalsIgnoreCase(boxType)) {
-                extractMp4IlstDataBox(channel, baseOffset, boxContentStart, boxEnd, false, out);
+                extractMp4IlstDataBox(channel, baseOffset, boxContentStart, boxEnd, false, acc.lyrics);
+            } else if (type0 == 0xA9 && type1 == 'n' && type2 == 'a' && type3 == 'm') {
+                acc.setTitleIfEmpty(extractMp4IlstFirstString(channel, baseOffset, boxContentStart, boxEnd));
+            } else if (type0 == 0xA9 && type1 == 'A' && type2 == 'R' && type3 == 'T') {
+                acc.setArtistIfEmpty(extractMp4IlstFirstString(channel, baseOffset, boxContentStart, boxEnd));
+            } else if ("aART".equals(boxType)) {
+                acc.setAlbumArtistIfEmpty(extractMp4IlstFirstString(channel, baseOffset, boxContentStart, boxEnd));
+            } else if (type0 == 0xA9 && type1 == 'a' && type2 == 'l' && type3 == 'b') {
+                acc.setAlbumIfEmpty(extractMp4IlstFirstString(channel, baseOffset, boxContentStart, boxEnd));
+            } else if (type0 == 0xA9 && type1 == 'g' && type2 == 'e' && type3 == 'n') {
+                acc.setGenreIfEmpty(extractMp4IlstFirstString(channel, baseOffset, boxContentStart, boxEnd));
+            } else if (type0 == 0xA9 && type1 == 'd' && type2 == 'a' && type3 == 'y') {
+                acc.setYearIfEmpty(extractMp4IlstFirstString(channel, baseOffset, boxContentStart, boxEnd));
             } else if ("----".equals(boxType)) {
-                extractMp4FreeformBox(channel, baseOffset, boxContentStart, boxEnd, out);
+                extractMp4FreeformBox(channel, baseOffset, boxContentStart, boxEnd, acc);
             }
 
             pos = boxEnd;
         }
+    }
+
+    @Nullable
+    private static String extractMp4IlstFirstString(
+        FileChannel channel,
+        long baseOffset,
+        long startRel,
+        long endRel
+    ) throws IOException {
+        long pos = startRel;
+        while (pos + 16L <= endRel) {
+            byte[] dh = readBytesAt(channel, baseOffset + pos, 16);
+            if (dh == null || dh.length < 16) break;
+            long dSize = readBigEndianInt(dh, 0) & 0xFFFFFFFFL;
+            String dType = new String(dh, 4, 4, StandardCharsets.ISO_8859_1);
+            if (dSize < 16L || pos + dSize > endRel) break;
+
+            if ("data".equals(dType)) {
+                int payloadLen = (int) Math.min(dSize - 16L, (long) MAX_TEXT_TAG_BYTES);
+                if (payloadLen > 0) {
+                    byte[] payload = readBytesAt(channel, baseOffset + pos + 16L, payloadLen);
+                    if (payload != null) {
+                        int typeIndicator = readBigEndianInt(dh, 8);
+                        Charset cs = (typeIndicator == 2) ? StandardCharsets.UTF_16BE : StandardCharsets.UTF_8;
+                        String text = decodeId3String(payload, 0, payload.length, cs == StandardCharsets.UTF_16BE ? 2 : 3);
+                        String cleaned = cleanTagValue(text);
+                        if (cleaned != null) return cleaned;
+                    }
+                }
+            }
+            pos += dSize;
+        }
+        return null;
     }
 
     private static void extractMp4IlstDataBox(
@@ -640,7 +943,7 @@ public final class FoliaEmbeddedLyricsExtractor {
         long baseOffset,
         long startRel,
         long endRel,
-        List<LyricCandidate> out
+        TagAccumulator acc
     ) throws IOException {
         long pos = startRel;
         String atomName = "";
@@ -662,7 +965,7 @@ public final class FoliaEmbeddedLyricsExtractor {
                     byte[] payload = readBytesAt(channel, baseOffset + pos + 16L, payloadLen);
                     if (payload != null) {
                         String text = decodeId3String(payload, 0, payload.length, 3);
-                        addCandidate(out, text, isTranslationDescriptor(null, atomName));
+                        addCandidate(acc.lyrics, text, isTranslationDescriptor(null, atomName));
                     }
                 }
             }
@@ -673,7 +976,7 @@ public final class FoliaEmbeddedLyricsExtractor {
     // =========================================================================
     // 4. OGG / Opus (OggS pages containing Vorbis or OpusTags comments)
     // =========================================================================
-    private static void parseOgg(FileChannel channel, long baseOffset, long totalLength, List<LyricCandidate> out) throws IOException {
+    private static void parseOgg(FileChannel channel, long baseOffset, long totalLength, TagAccumulator acc) throws IOException {
         long maxScan = Math.min(totalLength, 512L * 1024L);
         byte[] chunk = readBytesAt(channel, baseOffset, (int) maxScan);
         if (chunk == null || chunk.length < 36) return;
@@ -698,12 +1001,12 @@ public final class FoliaEmbeddedLyricsExtractor {
                     packetOut.reset();
                     if (pkt.length > 16) {
                         if (pkt[0] == 3 && pkt[1] == 'v' && pkt[2] == 'o' && pkt[3] == 'r' && pkt[4] == 'b' && pkt[5] == 'i' && pkt[6] == 's') {
-                            parseVorbisCommentBlock(pkt, 7, pkt.length - 7, out);
+                            parseVorbisCommentBlock(pkt, 7, pkt.length - 7, acc);
                             return;
                         }
                         if (pkt[0] == 'O' && pkt[1] == 'p' && pkt[2] == 'u' && pkt[3] == 's'
                             && pkt[4] == 'T' && pkt[5] == 'a' && pkt[6] == 'g' && pkt[7] == 's') {
-                            parseVorbisCommentBlock(pkt, 8, pkt.length - 8, out);
+                            parseVorbisCommentBlock(pkt, 8, pkt.length - 8, acc);
                             return;
                         }
                     }
@@ -717,7 +1020,7 @@ public final class FoliaEmbeddedLyricsExtractor {
     // =========================================================================
     // 5. WAV (RIFF 'ID3 ' or 'id3 ' chunk)
     // =========================================================================
-    private static void parseWavRiff(FileChannel channel, long baseOffset, long totalLength, List<LyricCandidate> out) throws IOException {
+    private static void parseWavRiff(FileChannel channel, long baseOffset, long totalLength, TagAccumulator acc) throws IOException {
         long pos = 12L;
         while (pos + 8L <= totalLength) {
             byte[] ch = readBytesAt(channel, baseOffset + pos, 8);
@@ -730,7 +1033,7 @@ public final class FoliaEmbeddedLyricsExtractor {
             pos += 8L;
             if (chunkSize < 0 || pos + chunkSize > totalLength) break;
             if ("ID3 ".equalsIgnoreCase(chunkId) && chunkSize > 10L) {
-                parseId3v2(channel, baseOffset + pos, chunkSize, out);
+                parseId3v2(channel, baseOffset + pos, chunkSize, acc);
                 return;
             }
             pos += chunkSize + (chunkSize & 1L);

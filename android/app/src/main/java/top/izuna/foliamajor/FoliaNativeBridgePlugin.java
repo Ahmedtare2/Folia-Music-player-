@@ -878,6 +878,9 @@ public class FoliaNativeBridgePlugin extends Plugin {
                                     queue.addLast(new FolderQueueItem(docId, relPath));
                                 }
                             } else if (isRelevantMusicOrLyricOrCoverFile(name)) {
+                                if (size > 0L) {
+                                    FoliaSafStreamHandler.cacheResolvedSize(contentUri.toString(), size);
+                                }
                                 JSObject fileEntry = new JSObject();
                                 fileEntry.put("name", name);
                                 fileEntry.put("relativePath", relPath);
@@ -1159,19 +1162,61 @@ public class FoliaNativeBridgePlugin extends Plugin {
             JSObject res = new JSObject();
             try {
                 Uri uri = Uri.parse(rawContentUri);
-                retriever.setDataSource(context, uri);
+                boolean dataSourceSet = false;
+                try (android.content.res.AssetFileDescriptor afd = context.getContentResolver().openAssetFileDescriptor(uri, "r")) {
+                    if (afd != null && afd.getFileDescriptor() != null) {
+                        long startOffset = Math.max(0L, afd.getStartOffset());
+                        long declaredLen = afd.getLength();
+                        if (declaredLen > 0L) {
+                            retriever.setDataSource(afd.getFileDescriptor(), startOffset, declaredLen);
+                        } else {
+                            retriever.setDataSource(afd.getFileDescriptor());
+                        }
+                        dataSourceSet = true;
+                    }
+                } catch (Exception ignored) {
+                    // Fall back to context + URI below.
+                }
+                if (!dataSourceSet) {
+                    try {
+                        retriever.setDataSource(context, uri);
+                        dataSourceSet = true;
+                    } catch (Exception ignored) {
+                        dataSourceSet = false;
+                    }
+                }
 
-                String title = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE);
-                String artist = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST);
-                String albumArtist = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUMARTIST);
-                String album = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM);
-                String durationStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
-                String bitrateStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE);
-                String trackStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CD_TRACK_NUMBER);
-                String discStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DISC_NUMBER);
-                String yearStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_YEAR);
-                String genreStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_GENRE);
-                String mimeStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE);
+                FoliaEmbeddedLyricsExtractor.ExtractedLyrics extractedTags = null;
+                try {
+                    extractedTags = FoliaEmbeddedLyricsExtractor.extract(context, context.getContentResolver(), uri);
+                } catch (Exception ignored) {}
+
+                String title = preferCleanTag(
+                    dataSourceSet ? retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE) : null,
+                    extractedTags != null ? extractedTags.title : null
+                );
+                String artist = preferCleanTag(
+                    dataSourceSet ? retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST) : null,
+                    extractedTags != null ? extractedTags.artist : null
+                );
+                String albumArtist = preferCleanTag(
+                    dataSourceSet ? retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUMARTIST) : null,
+                    extractedTags != null ? extractedTags.albumArtist : null
+                );
+                String album = preferCleanTag(
+                    dataSourceSet ? retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM) : null,
+                    extractedTags != null ? extractedTags.album : null
+                );
+                String durationStr = dataSourceSet ? retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION) : null;
+                String bitrateStr = dataSourceSet ? retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE) : null;
+                String trackStr = dataSourceSet ? retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CD_TRACK_NUMBER) : null;
+                String discStr = dataSourceSet ? retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DISC_NUMBER) : null;
+                String yearStr = dataSourceSet ? retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_YEAR) : null;
+                String genreStr = preferCleanTag(
+                    dataSourceSet ? retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_GENRE) : null,
+                    extractedTags != null ? extractedTags.genre : null
+                );
+                String mimeStr = dataSourceSet ? retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE) : null;
 
                 if (title != null && !title.trim().isEmpty()) res.put("title", title.trim());
                 if (artist != null && !artist.trim().isEmpty()) {
@@ -1193,12 +1238,18 @@ public class FoliaNativeBridgePlugin extends Plugin {
                 if (bitrate > 0L) res.put("bitrate", bitrate);
 
                 int trackNumber = (int) parseLeadingLong(trackStr, 0L);
+                if (trackNumber <= 0 && extractedTags != null && extractedTags.trackNumber > 0) {
+                    trackNumber = extractedTags.trackNumber;
+                }
                 if (trackNumber > 0) res.put("trackNumber", trackNumber);
 
                 int discNumber = (int) parseLeadingLong(discStr, 0L);
                 if (discNumber > 0) res.put("discNumber", discNumber);
 
                 int year = (int) parseLeadingLong(yearStr, 0L);
+                if (year <= 0 && extractedTags != null && extractedTags.year > 0) {
+                    year = extractedTags.year;
+                }
                 if (year > 0) res.put("year", year);
 
                 String resolvedAlbumLookupKey = (albumIdParam != null && !albumIdParam.trim().isEmpty())
@@ -1229,7 +1280,7 @@ public class FoliaNativeBridgePlugin extends Plugin {
                         res.put("vibrantColors", vibrantArr);
                         res.put("representativeColors", repArr);
                     } else {
-                        byte[] rawArt = retriever.getEmbeddedPicture();
+                        byte[] rawArt = dataSourceSet ? retriever.getEmbeddedPicture() : null;
                         if (rawArt != null && rawArt.length > 0) {
                             res.put("hasEmbeddedCover", true);
                             EncodedCoverResult coverResult = downscaleCoverIfNeeded(rawArt, maxCoverDimension);
@@ -1271,20 +1322,14 @@ public class FoliaNativeBridgePlugin extends Plugin {
                     }
                 }
 
-                try {
-                    FoliaEmbeddedLyricsExtractor.ExtractedLyrics extractedLyrics =
-                        FoliaEmbeddedLyricsExtractor.extract(context, context.getContentResolver(), uri);
-                    if (extractedLyrics != null && extractedLyrics.lyrics != null && !extractedLyrics.lyrics.isEmpty()) {
-                        res.put("hasEmbeddedLyrics", true);
-                        res.put("lyrics", extractedLyrics.lyrics);
-                        if (extractedLyrics.translationLyrics != null && !extractedLyrics.translationLyrics.isEmpty()) {
-                            res.put("translationLyrics", extractedLyrics.translationLyrics);
-                        }
-                    } else {
-                        res.put("hasEmbeddedLyrics", false);
+                if (extractedTags != null && extractedTags.lyrics != null && !extractedTags.lyrics.isEmpty()) {
+                    res.put("hasEmbeddedLyrics", true);
+                    res.put("lyrics", extractedTags.lyrics);
+                    if (extractedTags.translationLyrics != null && !extractedTags.translationLyrics.isEmpty()) {
+                        res.put("translationLyrics", extractedTags.translationLyrics);
                     }
-                } catch (Exception ignored) {
-                    // Ignore lyric extraction error and resolve basic metadata.
+                } else {
+                    res.put("hasEmbeddedLyrics", false);
                 }
 
                 call.resolve(res);
@@ -1598,6 +1643,31 @@ public class FoliaNativeBridgePlugin extends Plugin {
         JSObject res = new JSObject();
         res.put("ok", surfaceView != null);
         call.resolve(res);
+    }
+
+    @Nullable
+    private static String preferCleanTag(@Nullable String primary, @Nullable String fallback) {
+        String p = primary != null ? primary.trim() : "";
+        String f = fallback != null ? fallback.trim() : "";
+        if (p.isEmpty()) return f.isEmpty() ? null : f;
+        if (f.isEmpty()) return p;
+        // If MediaMetadataRetriever produced Latin-1 mojibake (0x80..0xFF chars) while
+        // FoliaEmbeddedLyricsExtractor decoded UTF-8 or Arabic CP1256, prefer the clean tag.
+        if (looksLikeLatin1Mojibake(p) && !looksLikeLatin1Mojibake(f)) {
+            return f;
+        }
+        return p;
+    }
+
+    private static boolean looksLikeLatin1Mojibake(String s) {
+        int latin1High = 0;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c >= 0x0080 && c <= 0x00FF) {
+                latin1High++;
+            }
+        }
+        return latin1High >= 2;
     }
 
     private static long parseLeadingLong(@Nullable String raw, long fallback) {
@@ -2260,10 +2330,18 @@ public class FoliaNativeBridgePlugin extends Plugin {
         return lower.endsWith(".mp3")
             || lower.endsWith(".flac")
             || lower.endsWith(".m4a")
+            || lower.endsWith(".alac")
             || lower.endsWith(".wav")
+            || lower.endsWith(".aif")
+            || lower.endsWith(".aiff")
+            || lower.endsWith(".caf")
             || lower.endsWith(".ogg")
             || lower.endsWith(".opus")
             || lower.endsWith(".aac")
+            || lower.endsWith(".wma")
+            || lower.endsWith(".wv")
+            || lower.endsWith(".ape")
+            || lower.endsWith(".tta")
             || lower.endsWith(".lrc")
             || lower.endsWith(".vtt")
             || lower.endsWith(".ttml")

@@ -6,6 +6,8 @@ import {
     getCachedLocalCoverObjectUrl,
     resolveLocalCoverObjectUrl,
 } from '../../../../services/localCoverRuntime';
+import { isAppForegroundVisible, subscribeAppForegroundVisibility } from '../../../../utils/visualizerVisibilityGate';
+import { buildMonetDriftTrack } from '../monet/monetBackgroundDrift';
 import { ARRIVING_MARK } from '../../preview/frozenPicture';
 import { useFirstFrameDrawn, useLayerUnseen } from '../../styleTransition/firstFrame';
 import { useBlendedColors } from '../useBlendedColors';
@@ -330,16 +332,73 @@ const CoverCanvas: React.FC<CoverCanvasProps> = ({ image, primaryColor, secondar
         return () => cancelAnimationFrame(frame);
     }, [box, image, primaryColor, secondaryColor]);
 
-    return <canvas ref={canvasRef} aria-hidden="true" className="absolute inset-0 w-full h-full" style={{ imageRendering: 'auto' }} />;
+    return (
+        <canvas
+            ref={canvasRef}
+            aria-hidden="true"
+            className="absolute inset-0 w-full h-full"
+            style={{
+                imageRendering: 'auto',
+                transform: 'translate3d(0, 0, 0)',
+                backfaceVisibility: 'hidden',
+                WebkitBackfaceVisibility: 'hidden',
+            }}
+        />
+    );
 };
 
 const FluidBackground: React.FC<FluidBackgroundProps> = memo(({ coverUrl, theme }) => {
     const isIOSSafari = useMemo(detectIOSSafari, []);
     const [softFocusCoverUrl, setSoftFocusCoverUrl] = useState<string | null>(null);
+    const [coverExtractTick, setCoverExtractTick] = useState(0);
+    const gpuDriftRef = useRef<HTMLDivElement>(null);
     // A theme that arrives for the song on screen blends the overlay gradient in, as the backdrop colour
     // does, instead of switching it at once. A gradient cannot take a CSS transition, so its colours are
     // blended here; a cover canvas redraws with them each frame of that second.
     const [overlayPrimary, overlaySecondary] = useBlendedColors([theme.primaryColor, theme.secondaryColor], OVERLAY_BLEND_MS);
+
+    // Listen for lazy local cover extraction completion so newly extracted covers appear immediately.
+    useEffect(() => {
+        if (typeof window === 'undefined' || !coverUrl) return undefined;
+        const targetAssetId = extractAssetIdFromCoverUrl(coverUrl);
+        if (!targetAssetId) return undefined;
+        const onExtracted = (event: Event) => {
+            const detail = (event as CustomEvent<{ assetId?: string }>).detail;
+            if (!detail?.assetId || detail.assetId === targetAssetId) {
+                setCoverExtractTick(t => t + 1);
+            }
+        };
+        window.addEventListener('folia:local-cover-extracted', onExtracted);
+        return () => window.removeEventListener('folia:local-cover-extracted', onExtracted);
+    }, [coverUrl]);
+
+    // Pure GPU Compositor Drift: animates the small 288px pre-blurred canvas texture on the
+    // hardware RenderThread via Web Animations API (translate3d + scale) with 0% main-thread CPU cost,
+    // and pauses immediately when the screen is off or backgrounded.
+    useEffect(() => {
+        const element = gpuDriftRef.current;
+        if (!element || typeof element.animate !== 'function') return undefined;
+        const track = buildMonetDriftTrack(0.28);
+        const animation = element.animate(track.keyframes, {
+            duration: track.durationMs,
+            iterations: Infinity,
+            easing: 'linear',
+        });
+        if (!isAppForegroundVisible()) {
+            animation.pause();
+        }
+        const unsubscribe = subscribeAppForegroundVisibility((visible) => {
+            if (visible) {
+                animation.play();
+            } else {
+                animation.pause();
+            }
+        });
+        return () => {
+            unsubscribe();
+            animation.cancel();
+        };
+    }, []);
 
     useEffect(() => {
         let cancelled = false;
@@ -367,7 +426,7 @@ const FluidBackground: React.FC<FluidBackgroundProps> = memo(({ coverUrl, theme 
         return () => {
             cancelled = true;
         };
-    }, [coverUrl, isIOSSafari]);
+    }, [coverUrl, isIOSSafari, coverExtractTick]);
 
     // A copy for a new song is ready once its cover is drawn: the background layer around it starts
     // the change then. Without a cover (or on iOS, which draws the cover itself) it is ready at once.
@@ -418,10 +477,10 @@ const FluidBackground: React.FC<FluidBackgroundProps> = memo(({ coverUrl, theme 
                 openBitmapsRef.current.add(bitmap);
                 setCoverLayers((prev) => {
                     const top = prev[prev.length - 1];
-                    if (top && top.sourceCover === coverUrl) return prev;
+                    if (top && top.sourceCover === coverUrl && top.image !== null) return prev;
                     coverKeyRef.current += 1;
                     // Keep only the current top (to fade out beneath the newcomer) plus the newcomer.
-                    return [...(top ? [top] : []), { image: bitmap, sourceCover: coverUrl, key: coverKeyRef.current }];
+                    return [...(top && top.image !== null ? [top] : []), { image: bitmap, sourceCover: coverUrl, key: coverKeyRef.current }];
                 });
             }, () => {
                 if (cancelled) return;
@@ -451,7 +510,7 @@ const FluidBackground: React.FC<FluidBackgroundProps> = memo(({ coverUrl, theme 
         }
 
         return () => { cancelled = true; };
-    }, [coverUrl, isIOSSafari, coverDrawn]);
+    }, [coverUrl, isIOSSafari, coverDrawn, coverExtractTick]);
     const unseen = useLayerUnseen();
     // Read when a cover becomes ready, not in the render that fades it in: that render also starts the
     // change, so the copy is seen there already, and the cover faded in for 1.5s over the copy coming in.
@@ -493,7 +552,8 @@ const FluidBackground: React.FC<FluidBackgroundProps> = memo(({ coverUrl, theme 
             style={{
                 isolation: 'isolate',
                 contain: 'paint',
-                transform: 'translateZ(0)',
+                transform: 'translate3d(0, 0, 0)',
+                backfaceVisibility: 'hidden',
             }}
             {...(isCoverArriving ? { [ARRIVING_MARK]: '' } : {})}
         >
@@ -518,40 +578,51 @@ const FluidBackground: React.FC<FluidBackgroundProps> = memo(({ coverUrl, theme 
                             className="absolute inset-0 w-full h-full transition-colors duration-1000"
                             style={{ backgroundColor: theme.backgroundColor, opacity: 0.8 }}
                         />
-                        {/* Cross-fade the cover on song change instead of hard-swapping the <img src>: the
-                            outgoing cover fades out while the incoming one fades in (both mounted during the
-                            change), so the world's backdrop glides between songs like the camera does.
-                            The opacity is animated on a wrapper div; the canvas in it, with the blur and the
-                            overlay gradient baked in, is drawn only when its cover, colours or size change. */}
-                        {coverLayers.map((layer, index) => {
-                            const isTop = index === coverLayers.length - 1;
-                            const ready = readyCoverKeys.has(layer.key);
-                            return (
-                                <motion.div
-                                    key={layer.key}
-                                    className="absolute inset-0 w-full h-full"
-                                    style={{ willChange: 'opacity' }}
-                                    initial={{ opacity: isTop ? 0 : 1 }}
-                                    animate={{ opacity: isTop && !ready ? 0 : 1 }}
-                                    transition={{ duration: layer.key === atOnceCoverKey ? 0 : 1.5, ease: 'easeInOut' }}
-                                    onAnimationComplete={() => {
-                                        // Once the newcomer has fully faded in, drop the layers beneath it.
-                                        if (isTop && ready) {
-                                            setCoverLayers((prev) => prev.filter((l) => l.key === layer.key));
-                                            setReadyCoverKeys((prev) => (prev.has(layer.key) ? new Set([layer.key]) : prev));
-                                            setArrivedCoverKey(layer.key);
-                                        }
-                                    }}
-                                >
-                                    <CoverCanvas
-                                        image={layer.image}
-                                        primaryColor={overlayPrimary}
-                                        secondaryColor={overlaySecondary}
-                                        onDrawn={() => markCoverReady(layer.key)}
-                                    />
-                                </motion.div>
-                            );
-                        })}
+                        <div
+                            ref={gpuDriftRef}
+                            className="absolute inset-0 w-full h-full"
+                            style={{
+                                willChange: 'transform',
+                                transform: 'translate3d(0, 0, 0)',
+                                backfaceVisibility: 'hidden',
+                                WebkitBackfaceVisibility: 'hidden',
+                            }}
+                        >
+                            {/* Cross-fade the cover on song change instead of hard-swapping the <img src>: the
+                                outgoing cover fades out while the incoming one fades in (both mounted during the
+                                change), so the world's backdrop glides between songs like the camera does.
+                                The opacity is animated on a wrapper div; the canvas in it, with the blur and the
+                                overlay gradient baked in, is drawn only when its cover, colours or size change. */}
+                            {coverLayers.map((layer, index) => {
+                                const isTop = index === coverLayers.length - 1;
+                                const ready = readyCoverKeys.has(layer.key);
+                                return (
+                                    <motion.div
+                                        key={layer.key}
+                                        className="absolute inset-0 w-full h-full"
+                                        style={{ willChange: 'opacity', transform: 'translate3d(0, 0, 0)' }}
+                                        initial={{ opacity: isTop ? 0 : 1 }}
+                                        animate={{ opacity: isTop && !ready ? 0 : 1 }}
+                                        transition={{ duration: layer.key === atOnceCoverKey ? 0 : 1.5, ease: 'easeInOut' }}
+                                        onAnimationComplete={() => {
+                                            // Once the newcomer has fully faded in, drop the layers beneath it.
+                                            if (isTop && ready) {
+                                                setCoverLayers((prev) => prev.filter((l) => l.key === layer.key));
+                                                setReadyCoverKeys((prev) => (prev.has(layer.key) ? new Set([layer.key]) : prev));
+                                                setArrivedCoverKey(layer.key);
+                                            }
+                                        }}
+                                    >
+                                        <CoverCanvas
+                                            image={layer.image}
+                                            primaryColor={overlayPrimary}
+                                            secondaryColor={overlaySecondary}
+                                            onDrawn={() => markCoverReady(layer.key)}
+                                        />
+                                    </motion.div>
+                                );
+                            })}
+                        </div>
                         </>
                     )}
 

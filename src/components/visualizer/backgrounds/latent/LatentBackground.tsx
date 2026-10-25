@@ -9,6 +9,7 @@ import {
     type LatentBackgroundTuning,
     type Theme,
 } from '../../../../types';
+import { extractAssetIdFromCoverUrl } from '../../../../services/localCoverRuntime';
 import { extractRepresentativeColors } from '../../../../utils/colorExtractor';
 import { AMBIENT_BACKGROUND_DPR_SCALE, AMBIENT_BACKGROUND_MAX_PIXELS } from '../../../../utils/mobileVisualizerBudget';
 import { isAppForegroundVisible, subscribeAppForegroundVisibility } from '../../../../utils/visualizerVisibilityGate';
@@ -22,9 +23,12 @@ import { BEAT_EFFECT_IDS } from '../../../../services/beatFx/beatEffects';
 
 // src/components/visualizer/backgrounds/latent/LatentBackground.tsx
 // Layers two cover-colored Paper shaders and drives their uniforms without React frame updates.
-// Renders the heavily diffused ambient shaders at 0.30x DPR (max 384x256 internal pixels) with
-// smooth bilinear CSS upscaling, cutting fragment shader GPU load by ~89% while preserving the
-// exact visual look. Strictly pauses both shaders and rAF when hidden or when the screen is off.
+// Hardware GPU Acceleration & Low-Power Optimizations:
+// 1. Renders internal WebGL framebuffers at 0.30x DPR (max 384x256 = 98,304 px) and relies on the
+//    hardware display compositor's bilinear texture filtering (`translate3d(0,0,0)`) to upscale to full screen.
+// 2. Eliminates per-frame CSS `filter: saturate() brightness()` mutations so Chromium/Skia never
+//    allocates a full-screen 1080x2400 offscreen render-pass texture per frame.
+// 3. Paces audio-uniform updates to ~30Hz (32ms) and completely halts the rAF loop once paused has eased to rest.
 
 interface LatentBackgroundProps {
     theme: Theme;
@@ -45,6 +49,8 @@ const AMBIENT_SHADER_MIN_PIXEL_RATIO = AMBIENT_BACKGROUND_DPR_SCALE;
 const PAUSED_SPEED_SCALE = 0.12;
 // How fast the speed goes from playing to paused or back, as a time constant: settled in about a second.
 const PAUSE_EASE_MS = 300;
+const AUDIO_UNIFORM_INTERVAL_MS = 32;
+
 const normalizeAudio = (value: number) => Math.min(1, Math.max(0, value / 255));
 const clampShaderSpeed = (value: number) => Math.min(2, Math.max(0, value));
 const clampAudioAmount = (value: number) => Math.min(1, Math.max(0, value));
@@ -146,16 +152,32 @@ const LatentBackground: React.FC<LatentBackgroundProps> = ({
     const ditheringLayerRef = useRef<HTMLDivElement | null>(null);
     const meshLayerRef = useRef<HTMLDivElement | null>(null);
     const pausedRef = useRef(paused);
+    const wakeAudioLoopRef = useRef<(() => void) | null>(null);
     // How far the loop below has eased between paused (0) and playing (1). Outside the loop's effect,
     // so a re-run of it (a setting changed mid-ease) goes on from there.
     const playingRef = useRef(paused ? 0 : 1);
     const [coverColors, setCoverColors] = useState<string[]>([]);
+    const [coverExtractTick, setCoverExtractTick] = useState(0);
     const tuning = tuningOverride ?? DEFAULT_LATENT_BACKGROUND_TUNING;
     const showDithering = tuning.displayMode !== 'mesh';
     const showMesh = tuning.displayMode !== 'dithering';
     pausedRef.current = paused;
     // A copy mounted for a change of type is ready once the cover's colours are read.
     const colorsDrawn = useFirstFrameDrawn();
+
+    useEffect(() => {
+        if (typeof window === 'undefined' || !coverUrl) return undefined;
+        const targetAssetId = extractAssetIdFromCoverUrl(coverUrl);
+        if (!targetAssetId) return undefined;
+        const onExtracted = (event: Event) => {
+            const detail = (event as CustomEvent<{ assetId?: string }>).detail;
+            if (!detail?.assetId || detail.assetId === targetAssetId) {
+                setCoverExtractTick(t => t + 1);
+            }
+        };
+        window.addEventListener('folia:local-cover-extracted', onExtracted);
+        return () => window.removeEventListener('folia:local-cover-extracted', onExtracted);
+    }, [coverUrl]);
 
     useEffect(() => {
         let active = true;
@@ -178,7 +200,7 @@ const LatentBackground: React.FC<LatentBackgroundProps> = ({
         return () => {
             active = false;
         };
-    }, [coverUrl, colorsDrawn]);
+    }, [coverUrl, colorsDrawn, coverExtractTick]);
 
     // A new song's colours blend in where the host plays transitions: a second copy for the soft focus
     // would mount and compile both shaders again on every song change.
@@ -204,12 +226,13 @@ const LatentBackground: React.FC<LatentBackgroundProps> = ({
         if (staticMode) {
             ditheringMount?.setSpeed(0);
             meshMount?.setSpeed(0);
+            wakeAudioLoopRef.current = null;
             return;
         }
 
         let animationFrame = 0;
-        const writtenStyles = new WeakMap<HTMLElement, Partial<Record<'opacity' | 'transform' | 'filter', string>>>();
-        const writeLayerStyle = (element: HTMLElement, property: 'opacity' | 'transform' | 'filter', value: string) => {
+        const writtenStyles = new WeakMap<HTMLElement, Partial<Record<'opacity' | 'transform', string>>>();
+        const writeLayerStyle = (element: HTMLElement, property: 'opacity' | 'transform', value: string) => {
             let written = writtenStyles.get(element);
             if (!written) {
                 written = {};
@@ -226,6 +249,7 @@ const LatentBackground: React.FC<LatentBackgroundProps> = ({
         let previousBeatEnergy = 0;
         let latentOnsetPulse = 0;
         let lastFrameAt: number | null = null;
+        let lastUniformUpdateAt = -Infinity;
         const speedOf = (baseSpeed: number, audioSpeed: number) => easeTowards(
             resolveLatentShaderSpeed(baseSpeed, audioSpeed, smoothedBeatSpeed, true),
             resolveLatentShaderSpeed(baseSpeed, audioSpeed, smoothedBeatSpeed, false),
@@ -244,17 +268,32 @@ const LatentBackground: React.FC<LatentBackgroundProps> = ({
 
         // Keep audio-rate changes inside the shader/DOM layer so React only rerenders on palette changes.
         const updateAudioResponse = (frameAt: number) => {
+            animationFrame = 0;
             if (!isAppForegroundVisible()) {
+                freezeShaders();
+                return;
+            }
+
+            const isPaused = pausedRef.current;
+            const pauseStep = lastFrameAt === null ? 0 : 1 - Math.exp((lastFrameAt - frameAt) / PAUSE_EASE_MS);
+            lastFrameAt = frameAt;
+            playingRef.current = easeTowards(playingRef.current, isPaused ? 0 : 1, pauseStep);
+
+            // When paused and the ease-down has settled, drop to 0% CPU/GPU by stopping the rAF loop
+            // and freezing the Paper shader speeds until playback resumes.
+            if (isPaused && playingRef.current < 0.006 && smoothedPower < 0.006 && smoothedBass < 0.006) {
+                playingRef.current = 0;
                 freezeShaders();
                 return;
             }
 
             animationFrame = requestAnimationFrame(updateAudioResponse);
 
-            const isPaused = pausedRef.current;
-            const pauseStep = lastFrameAt === null ? 0 : 1 - Math.exp((lastFrameAt - frameAt) / PAUSE_EASE_MS);
-            lastFrameAt = frameAt;
-            playingRef.current = easeTowards(playingRef.current, isPaused ? 0 : 1, pauseStep);
+            if (frameAt - lastUniformUpdateAt < AUDIO_UNIFORM_INTERVAL_MS) {
+                return;
+            }
+            lastUniformUpdateAt = frameAt;
+
             const targetPower = isPaused ? 0 : normalizeAudio(audioPower.get());
             const targetBass = isPaused ? 0 : normalizeAudio(audioBands.bass.get());
             const targetBeatEnergy = isPaused
@@ -269,12 +308,12 @@ const LatentBackground: React.FC<LatentBackgroundProps> = ({
             const targetMid = isPaused
                 ? 0
                 : normalizeAudio(Math.max(audioBands.mid.get(), audioBands.vocal.get()));
-            smoothedPower = easeTowards(smoothedPower, targetPower, 0.12);
-            smoothedBass = easeTowards(smoothedBass, targetBass, 0.16);
+            smoothedPower = easeTowards(smoothedPower, targetPower, 0.22);
+            smoothedBass = easeTowards(smoothedBass, targetBass, 0.26);
             smoothedMid = easeTowards(
                 smoothedMid,
                 targetMid,
-                0.13,
+                0.22,
             );
             latentOnsetPulse = tuning.enhancedBeatResponse
                 ? resolveLatentOnsetPulse(
@@ -297,7 +336,7 @@ const LatentBackground: React.FC<LatentBackgroundProps> = ({
             smoothedBeatSpeed = easeTowards(
                 smoothedBeatSpeed,
                 beatSpeedTarget,
-                beatSpeedTarget > smoothedBeatSpeed ? 0.42 : 0.14,
+                beatSpeedTarget > smoothedBeatSpeed ? 0.48 : 0.22,
             );
 
             const currentDitheringMount = ditheringRef.current?.paperShaderMount;
@@ -319,52 +358,90 @@ const LatentBackground: React.FC<LatentBackgroundProps> = ({
                 }, meshSpeed !== 0);
             }
 
+            // Pure GPU Compositor Path: mutate only `transform: translate3d/scale3d` and `opacity`
+            // (never CSS `filter`), avoiding full-screen Skia offscreen render-pass allocations.
             if (ditheringLayerRef.current) {
-                writeLayerStyle(ditheringLayerRef.current, 'opacity', showMesh
-                    ? `${Math.min(1, tuning.ditheringOpacity + smoothedBass * 0.25)}`
-                    : '1');
-                writeLayerStyle(ditheringLayerRef.current, 'transform', `scale(${1.015 + smoothedBass * 0.025}) translateZ(0)`);
+                const nextOpacity = showMesh
+                    ? Math.min(1, tuning.ditheringOpacity + smoothedBass * 0.22).toFixed(3)
+                    : '1';
+                const nextScale = (1.015 + smoothedBass * 0.022).toFixed(3);
+                writeLayerStyle(ditheringLayerRef.current, 'opacity', nextOpacity);
+                writeLayerStyle(ditheringLayerRef.current, 'transform', `translate3d(0, 0, 0) scale3d(${nextScale}, ${nextScale}, 1)`);
             }
             if (meshLayerRef.current) {
-                writeLayerStyle(meshLayerRef.current, 'filter', `saturate(${1.04 + smoothedMid * 0.34}) brightness(${0.94 + smoothedPower * 0.16})`);
-                writeLayerStyle(meshLayerRef.current, 'transform', `scale(${1.025 + smoothedPower * 0.018}) translateZ(0)`);
+                const nextMeshScale = (1.025 + smoothedPower * 0.018).toFixed(3);
+                writeLayerStyle(meshLayerRef.current, 'transform', `translate3d(0, 0, 0) scale3d(${nextMeshScale}, ${nextMeshScale}, 1)`);
             }
         };
+
+        const wakeLoop = () => {
+            if (!isAppForegroundVisible() || staticMode) return;
+            if (!animationFrame) {
+                lastFrameAt = null;
+                animationFrame = requestAnimationFrame(updateAudioResponse);
+            }
+        };
+        wakeAudioLoopRef.current = wakeLoop;
 
         const unsubscribeVisibility = subscribeAppForegroundVisibility((visible) => {
             if (!visible) {
                 freezeShaders();
-            } else if (!animationFrame) {
-                animationFrame = requestAnimationFrame(updateAudioResponse);
+            } else {
+                wakeLoop();
             }
         });
 
         if (isAppForegroundVisible()) {
-            animationFrame = requestAnimationFrame(updateAudioResponse);
+            wakeLoop();
         } else {
             freezeShaders();
         }
         return () => {
+            wakeAudioLoopRef.current = null;
             unsubscribeVisibility();
             cancelAnimationFrame(animationFrame);
         };
     }, [audioBands, audioPower, showMesh, staticMode, tuning]);
 
+    useEffect(() => {
+        if (!paused) {
+            wakeAudioLoopRef.current?.();
+        }
+    }, [paused]);
+
     const shaderStyle = useMemo<React.CSSProperties>(
-        () => ({ width: '100%', height: '100%', imageRendering: 'auto' }),
+        () => ({
+            width: '100%',
+            height: '100%',
+            imageRendering: 'auto',
+            transform: 'translate3d(0, 0, 0)',
+            backfaceVisibility: 'hidden',
+        }),
         [],
     );
 
     return (
         <div
             className="absolute inset-0 z-0 overflow-hidden"
-            style={{ backgroundColor, pointerEvents: 'none' }}
+            style={{
+                backgroundColor,
+                pointerEvents: 'none',
+                contain: 'layout paint style',
+                transform: 'translate3d(0, 0, 0)',
+                backfaceVisibility: 'hidden',
+            }}
         >
             {showMesh && (
                 <div
                     ref={meshLayerRef}
                     className="absolute inset-0"
-                    style={{ transform: 'scale(1.025) translateZ(0)', transformOrigin: 'center' }}
+                    style={{
+                        willChange: 'transform',
+                        transform: 'translate3d(0, 0, 0) scale3d(1.025, 1.025, 1)',
+                        transformOrigin: 'center',
+                        backfaceVisibility: 'hidden',
+                        WebkitBackfaceVisibility: 'hidden',
+                    }}
                 >
                     <MeshGradient
                         ref={meshShaderRef}
@@ -375,7 +452,7 @@ const LatentBackground: React.FC<LatentBackgroundProps> = ({
                         swirl={tuning.meshSwirl}
                         grainMixer={0}
                         grainOverlay={0.01}
-                        speed={staticMode ? 0 : tuning.meshSpeed}
+                        speed={staticMode || paused ? 0 : tuning.meshSpeed}
                         minPixelRatio={AMBIENT_SHADER_MIN_PIXEL_RATIO}
                         maxPixelCount={MAX_SHADER_PIXELS}
                         webGlContextAttributes={PAPER_SHADER_CONTEXT_ATTRIBUTES}
@@ -388,10 +465,12 @@ const LatentBackground: React.FC<LatentBackgroundProps> = ({
                     ref={ditheringLayerRef}
                     className="absolute inset-0"
                     style={{
-                        mixBlendMode: showMesh ? 'soft-light' : 'normal',
+                        willChange: 'transform, opacity',
                         opacity: showMesh ? tuning.ditheringOpacity : 1,
-                        transform: 'scale(1.015) translateZ(0)',
+                        transform: 'translate3d(0, 0, 0) scale3d(1.015, 1.015, 1)',
                         transformOrigin: 'center',
+                        backfaceVisibility: 'hidden',
+                        WebkitBackfaceVisibility: 'hidden',
                     }}
                 >
                     <Dithering
@@ -403,7 +482,7 @@ const LatentBackground: React.FC<LatentBackgroundProps> = ({
                         shape="warp"
                         type="4x4"
                         size={tuning.ditheringSize}
-                        speed={staticMode ? 0 : tuning.ditheringSpeed}
+                        speed={staticMode || paused ? 0 : tuning.ditheringSpeed}
                         minPixelRatio={AMBIENT_SHADER_MIN_PIXEL_RATIO}
                         maxPixelCount={MAX_SHADER_PIXELS}
                         webGlContextAttributes={PAPER_SHADER_CONTEXT_ATTRIBUTES}

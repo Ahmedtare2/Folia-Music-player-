@@ -14,7 +14,8 @@ import {
 // Persistent internal disk cache coordinator backed by Android's context.getFilesDir()/media_cache/
 // (with an in-memory hot tier for synchronous/zero-latency hits and test environments):
 //   1. Pre-Parsed & Pre-Segmented Lyrics (media_cache/lyrics/): full LyricData timeline, word/syllable
-//      timing structures, Jieba/ICU autoWordSegments, Pinyin/romanization, and translation rows.
+//      timing structures, Jieba/ICU autoWordSegments, Pinyin/romanization, and translation rows, plus
+//      song-keyed offline saved online lyrics (TTML, QRC, YRC, KRC, LRC, VTT) for 100% offline playback.
 //   2. Cover Art Mipmaps & Theme Palettes (media_cache/covers/ & media_cache/palettes/): 256x256 WebP
 //      (for grids/Bravais lattice walls), 1024x1024 WebP (for the player), vibrant/representative
 //      hex color palettes, and Monet/dynamic DualTheme palettes.
@@ -75,7 +76,7 @@ export const computeParsedLyricsContentDigest = (lyrics: LyricData | null | unde
         Boolean(lyrics.isWordByWord),
         first?.startTime ?? 0,
         first?.fullText ?? '',
-         first?.translation ?? '',
+        first?.translation ?? '',
         mid?.startTime ?? 0,
         mid?.fullText ?? '',
         last?.startTime ?? 0,
@@ -98,9 +99,6 @@ export const computeLyricSourceCacheKey = (source: RawLyricSource, optionsSignat
         case 'local':
             rawPayload = `local|${str('formatHint')}|${str('lrcContent')}|${str('tLrcContent')}|${str('yrcContent')}`;
             break;
-        case 'netease':
-            rawPayload = `netease|${str('lrc')}|${str('tLrc', 'tlrc')}|${str('yrc')}|${str('romaLrc', 'romalrc')}|${str('ttml')}`;
-            break;
         case 'qrc':
             rawPayload = `qrc|${str('qrc', 'qrcContent')}|${str('tLrc', 'tlrc')}|${str('romaLrc', 'romalrc')}`;
             break;
@@ -108,7 +106,9 @@ export const computeLyricSourceCacheKey = (source: RawLyricSource, optionsSignat
             rawPayload = `navidrome|${JSON.stringify(rec.structured ?? rec.lines ?? null)}|${str('rawText', 'lrcContent')}`;
             break;
         default:
-            rawPayload = JSON.stringify(source);
+            rawPayload = (rec.lrc !== undefined || rec.yrc !== undefined || rec.ttml !== undefined)
+                ? `${String(rec.type ?? '')}|${str('lrc')}|${str('tLrc', 'tlrc')}|${str('yrc')}|${str('romaLrc', 'romalrc')}|${str('ttml')}`
+                : JSON.stringify(source);
             break;
     }
     return `lyric_v1_${fnv1a64Hex(`${optionsSignature}|${rawPayload}`)}_${rawPayload.length}`;
@@ -169,6 +169,50 @@ export const writePreParsedLyricsToDisk = async (
     } catch {
         // Ignore disk write failure.
     }
+};
+
+/**
+ * Permanently saves online-fetched lyrics (TTML, QRC, YRC, KRC, LRC, VTT) keyed by both
+ * songId and fileSignature in context.getFilesDir()/media_cache/lyrics/ so they are always
+ * available for offline playback even if the song record is re-hydrated or played without internet.
+ */
+export const writeOfflineSavedLyricsForSong = async (
+    songId: string | undefined | null,
+    fileSignature: string | undefined | null,
+    lyrics: LyricData | null | undefined,
+): Promise<void> => {
+    if (!lyrics || !Array.isArray(lyrics.lines) || lyrics.lines.length === 0) return;
+    const tasks: Promise<void>[] = [];
+    if (songId && songId.trim()) {
+        tasks.push(writePreParsedLyricsToDisk(`offline_song_${fnv1a64Hex(songId.trim())}`, lyrics));
+    }
+    if (fileSignature && fileSignature.trim()) {
+        tasks.push(writePreParsedLyricsToDisk(`offline_sig_${fnv1a64Hex(fileSignature.trim())}`, lyrics));
+    }
+    const digest = computeParsedLyricsContentDigest(lyrics);
+    if (digest) {
+        tasks.push(writePreParsedLyricsToDisk(`matched_${digest}`, lyrics));
+    }
+    await Promise.all(tasks);
+};
+
+export const readOfflineSavedLyricsForSong = async (
+    songId: string | undefined | null,
+    fileSignature?: string | null,
+): Promise<LyricData | null> => {
+    if (songId && songId.trim()) {
+        const byId = await readPreParsedLyricsFromDisk(`offline_song_${fnv1a64Hex(songId.trim())}`);
+        if (byId && Array.isArray(byId.lines) && byId.lines.length > 0) {
+            return byId;
+        }
+    }
+    if (fileSignature && fileSignature.trim()) {
+        const bySig = await readPreParsedLyricsFromDisk(`offline_sig_${fnv1a64Hex(fileSignature.trim())}`);
+        if (bySig && Array.isArray(bySig.lines) && bySig.lines.length > 0) {
+            return bySig;
+        }
+    }
+    return null;
 };
 
 /**
@@ -420,7 +464,25 @@ export const updatePersistedLibraryIndexSongs = async (upsertedSongs: LocalSong[
         (current?.songs ?? []).map(song => [song.id, song]),
     );
     for (const song of upsertedSongs) {
-        byId.set(song.id, song);
+        const existing = byId.get(song.id);
+        if (existing && song.matchedLyrics === undefined && !song.markedPureMusic && existing.matchedLyrics) {
+            byId.set(song.id, {
+                ...song,
+                matchedLyrics: existing.matchedLyrics,
+                matchedLyricsSongId: song.matchedLyricsSongId ?? existing.matchedLyricsSongId,
+                matchedLyricsSource: song.matchedLyricsSource ?? existing.matchedLyricsSource,
+                matchedLyricsProviderPlatform: song.matchedLyricsProviderPlatform ?? existing.matchedLyricsProviderPlatform,
+                matchedIsPureMusic: song.matchedIsPureMusic ?? existing.matchedIsPureMusic,
+                matchedLyricsFetchedAt: song.matchedLyricsFetchedAt ?? existing.matchedLyricsFetchedAt,
+                matchedLyricsQuerySignature: song.matchedLyricsQuerySignature ?? existing.matchedLyricsQuerySignature,
+                onlineMetadata: song.onlineMetadata ?? existing.onlineMetadata,
+                useOnlineCover: song.useOnlineCover ?? existing.useOnlineCover,
+                lyricsSource: song.lyricsSource ?? existing.lyricsSource,
+                hasManualLyricSelection: song.hasManualLyricSelection || existing.hasManualLyricSelection,
+            });
+        } else {
+            byId.set(song.id, song);
+        }
     }
     await writePersistedLibraryIndex({
         songs: Array.from(byId.values()),

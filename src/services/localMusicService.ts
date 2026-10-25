@@ -51,13 +51,13 @@ import { readLyricFile } from '../utils/lyrics/lyricFileDecoding';
 import { isLocalFolderIgnored, normalizeLocalFolderPath, runLocalFolderMutation, setLocalFolderIgnored } from './localLibraryFolderIgnore';
 import { isAlbumVideoFileName, reconcileVideosForRootFolder, type VideoSnapshotFileDescriptor } from './localAlbumVideoService';
 import { buildBuiltinDualTheme } from '../hooks/themeControllerState';
-import { stageCachedCoverPalette, writeCachedCoverPalette } from './persistentDiskCacheService';
+import { readOfflineSavedLyricsForSong, stageCachedCoverPalette, writeCachedCoverPalette, writeOfflineSavedLyricsForSong } from './persistentDiskCacheService';
 import { LyricParserFactory } from '../utils/lyrics/LyricParserFactory';
 
 
 type EmbeddedMetadata = EmbeddedMetadataResult;
 
-export const EMBEDDED_METADATA_VERSION = 8;
+export const EMBEDDED_METADATA_VERSION = 9;
 
 interface ImportPreparationMetrics {
     getFileMs: number;
@@ -294,15 +294,21 @@ export function extractMetadataFromFilename(fileName: string): { title?: string;
     // 去掉扩展名
     let nameWithoutExt = fileName.replace(KNOWN_AUDIO_EXTENSIONS, '');
 
+    // Strip common downloader site watermarks like [MaTb3aA.CoM], (Sm3na.com), (320 kbps), etc.
+    nameWithoutExt = nameWithoutExt
+        .replace(/\s*\[(?:[^\]]*(?:\.(?:com|net|org|me|io|cc)|\b(?:mp3|kbps|official|matb3aa|sm3na|dandanha|nogomi|arab|mawaly)\b)[^\]]*)\]/gi, '')
+        .replace(/\s*\((?:[^)]*(?:\.(?:com|net|org|me|io|cc)|\b(?:320\s*kbps|128\s*kbps|official\s+audio|official\s+lyric\s+video|matb3aa|sm3na|dandanha|nogomi|mawaly)\b)[^)]*)\)/gi, '')
+        .trim();
+
     // 去掉开头的cue切分产生的序号 "01. ", "01 - ", or "1-01 " 
     nameWithoutExt = nameWithoutExt.replace(/^\d{1,3}(?:[-.]\d{1,3})?(?:\s*[-.]\s*|\s+)/, '');
 
-    // 分割艺术家和标题 - 尝试 " - " (带空格)
-    let parts = nameWithoutExt.split(' - ');
-    if (parts.length === 2) {
+    // 分割艺术家和标题 - 尝试 " - " / " – " / " — " (带空格)
+    const spacedParts = nameWithoutExt.split(/\s+[-–—]\s+/);
+    if (spacedParts.length === 2) {
         return {
-            artist: parts[0].trim(),
-            title: parts[1].trim()
+            artist: spacedParts[0].trim(),
+            title: spacedParts[1].trim()
         };
     }
 
@@ -325,6 +331,165 @@ export function extractMetadataFromFilename(fileName: string): { title?: string;
     return {
         title: nameWithoutExt.trim()
     };
+}
+
+/**
+ * Automatically detects and repairs swapped Title <-> Artist fields across a folder or library
+ * (e.g., when files are named "Song Title - Artist Name.mp3" or tagged with the Artist name in
+ * TIT2 and the Song Title in TPE1, causing 2+ tracks to have the same artist name as their
+ * `title` such as "Amr Diab" while their unique track titles sit in `artistNames` such as
+ * "Al Leila", "Allem Alby", "Amaken El Sahar"), and propagates known album names across tracks
+ * that share the exact same embedded album cover hash (`localCoverAssetId`).
+ */
+export function repairSwappedTitleArtistAndAlbumMetadata(
+    targetSongs: LocalSong[],
+    contextSongs?: readonly LocalSong[],
+): LocalSong[] {
+    if (targetSongs.length === 0) return [];
+    const pool: readonly LocalSong[] = contextSongs && contextSongs.length > 0
+        ? contextSongs
+        : targetSongs;
+
+    const norm = (value: string | undefined): string =>
+        (value || '').normalize('NFKC').trim().replace(/\s+/gu, ' ').toLowerCase();
+
+    const byNormTitle = new Map<string, LocalSong[]>();
+    const artistFrequency = new Map<string, number>();
+    const knownFolderTokens = new Set<string>();
+
+    for (const song of pool) {
+        const rawTitle = (song.importedMetadata?.title || song.title || '').trim();
+        const rawArtist = (song.importedMetadata?.artistNames || []).filter(Boolean).join(', ').trim();
+        const nt = norm(rawTitle);
+        const na = norm(rawArtist);
+        if (nt) {
+            const list = byNormTitle.get(nt);
+            if (list) list.push(song);
+            else byNormTitle.set(nt, [song]);
+        }
+        if (na && na !== 'unknown artist') {
+            artistFrequency.set(na, (artistFrequency.get(na) || 0) + 1);
+        }
+        if (song.albumArtist) {
+            const naa = norm(song.albumArtist);
+            if (naa) artistFrequency.set(naa, (artistFrequency.get(naa) || 0) + 2);
+        }
+        if (song.folderName) {
+            for (const seg of song.folderName.split('/')) {
+                const ns = norm(seg);
+                if (ns && ns.length >= 2) knownFolderTokens.add(ns);
+            }
+        }
+    }
+
+    const titlesThatAreActuallyArtists = new Set<string>();
+    for (const [nt, group] of byNormTitle.entries()) {
+        if (group.length < 2) continue;
+        const distinctArtists = new Set<string>();
+        let singleOccurrenceArtists = 0;
+        for (const song of group) {
+            const rawArtist = (song.importedMetadata?.artistNames || []).filter(Boolean).join(', ').trim();
+            const na = norm(rawArtist);
+            if (na && na !== nt && na !== 'unknown artist') {
+                distinctArtists.add(na);
+                if ((artistFrequency.get(na) || 0) <= 2) {
+                    singleOccurrenceArtists++;
+                }
+            }
+        }
+        // If >= 3 tracks share the exact same title while having >= 3 distinct artist strings,
+        // or >= 2 tracks share the same title and at least 2 have unique 1-off "artist" strings
+        // (or the repeated title matches a folder name / known artist), the title & artist are swapped.
+        if (
+            distinctArtists.size >= 3
+            || (distinctArtists.size >= 2 && (singleOccurrenceArtists >= 2 || knownFolderTokens.has(nt) || (artistFrequency.get(nt) || 0) >= 2))
+        ) {
+            titlesThatAreActuallyArtists.add(nt);
+        }
+    }
+
+    // Build shared cover hash -> consensus album name map
+    const coverAlbums = new Map<string, Map<string, string>>();
+    for (const song of pool) {
+        const assetId = song.localCoverAssetId;
+        if (!assetId || !assetId.startsWith('sha256:') || song.localCoverSource === 'folder') continue;
+        const album = (song.importedMetadata?.albumName || song.onlineMetadata?.album?.name || '').trim();
+        const normAlbum = norm(album);
+        if (!normAlbum || normAlbum === 'unknown album') continue;
+        let mapForCover = coverAlbums.get(assetId);
+        if (!mapForCover) {
+            mapForCover = new Map<string, string>();
+            coverAlbums.set(assetId, mapForCover);
+        }
+        if (!mapForCover.has(normAlbum)) {
+            mapForCover.set(normAlbum, album);
+        }
+    }
+    const consensusAlbumByCover = new Map<string, string>();
+    for (const [assetId, albumMap] of coverAlbums.entries()) {
+        if (albumMap.size === 1) {
+            const [onlyAlbum] = albumMap.values();
+            if (onlyAlbum) consensusAlbumByCover.set(assetId, onlyAlbum);
+        }
+    }
+
+    const modifiedSongs: LocalSong[] = [];
+    for (const song of targetSongs) {
+        let changed = false;
+        const rawTitle = (song.importedMetadata?.title || song.title || '').trim();
+        const rawArtists = (song.importedMetadata?.artistNames || []).map(a => a.trim()).filter(Boolean);
+        const joinedArtist = rawArtists.join(', ').trim();
+        const nt = norm(rawTitle);
+        const na = norm(joinedArtist);
+
+        const shouldSwap = Boolean(
+            nt
+            && na
+            && nt !== na
+            && na !== 'unknown artist'
+            && (
+                titlesThatAreActuallyArtists.has(nt)
+                || (
+                    (artistFrequency.get(nt) || 0) >= 3
+                    && (artistFrequency.get(na) || 0) <= 1
+                    && (byNormTitle.get(nt)?.length || 0) >= 1
+                )
+            )
+        );
+
+        if (shouldSwap) {
+            const newTitle = joinedArtist;
+            const newArtists = rawTitle
+                .split(/[;；/／]/u)
+                .map(part => part.trim())
+                .filter(Boolean);
+            song.importedMetadata = {
+                ...song.importedMetadata,
+                title: newTitle,
+                artistNames: newArtists.length > 0 ? newArtists : [rawTitle],
+            };
+            if (song.titleOrigin === 'import' || !song.titleOrigin) {
+                song.title = newTitle;
+            }
+            changed = true;
+        }
+
+        // Propagate consensus album name from shared embedded cover assetId when albumName is missing
+        const currentAlbum = (song.importedMetadata?.albumName || '').trim();
+        if (!currentAlbum && song.localCoverAssetId && consensusAlbumByCover.has(song.localCoverAssetId)) {
+            song.importedMetadata = {
+                ...song.importedMetadata,
+                albumName: consensusAlbumByCover.get(song.localCoverAssetId),
+            };
+            changed = true;
+        }
+
+        if (changed) {
+            modifiedSongs.push(song);
+        }
+    }
+
+    return modifiedSongs;
 }
 
 // Get audio duration from file
@@ -354,7 +519,8 @@ async function getAudioDuration(file: File): Promise<number> {
 }
 
 function canImportElectronFallbackAudio(): boolean {
-    return typeof window !== 'undefined' && typeof window.electron?.requestTranscodeFallback === 'function';
+    return (typeof window !== 'undefined' && typeof window.electron?.requestTranscodeFallback === 'function')
+        || hasFoliaAndroidBridge();
 }
 
 function isAudioFile(file: File): boolean {
@@ -1462,6 +1628,7 @@ async function hydrateImportedSongsInBackground(
                 if (removedRootGenerations.get(normalizedRoot) !== rootGeneration) return;
                 const ignoredPaths = (await getLocalLibrarySnapshot(rootFolderName))?.ignoredFolderPaths || [];
                 const visibleBatch = batch.filter(song => !isLocalFolderIgnored(song.folderName || song.filePath, ignoredPaths));
+                repairSwappedTitleArtistAndAlbumMetadata(visibleBatch, songs);
                 if (visibleBatch.length > 0) await saveLocalSongs(visibleBatch);
             });
             savedCount += batch.length;
@@ -1555,6 +1722,16 @@ async function hydrateImportedSongsInBackground(
  */
 export async function resumeInterruptedLocalLibraryScans(): Promise<number> {
     const allSongs = await getLocalSongs();
+    const repairedOnStartup = repairSwappedTitleArtistAndAlbumMetadata(allSongs, allSongs);
+    if (repairedOnStartup.length > 0) {
+        try {
+            await saveLocalSongs(repairedOnStartup);
+            notifyLocalMusicUpdated();
+            console.log(`[LocalMusic] Auto-repaired swapped title/artist or shared-cover album metadata for ${repairedOnStartup.length} tracks.`);
+        } catch (repairErr) {
+            console.warn('[LocalMusic] Failed to persist startup metadata repairs:', repairErr);
+        }
+    }
     const unhydratedByRoot = new Map<string, LocalSong[]>();
     for (const song of allSongs) {
         if (song.embeddedMetadataVersion === EMBEDDED_METADATA_VERSION && !song.localCoverNeedsAssetMigration) {
@@ -1821,6 +1998,7 @@ async function importFolderContents(dirHandle: FileSystemDirectoryHandle, expect
             try {
                 const persistStartedAt = performance.now();
                 if (songsToPersist.length > 0) {
+                    repairSwappedTitleArtistAndAlbumMetadata(songsToPersist, [...diffPlan.reusedSongs, ...songsToPersist]);
                     await saveLocalSongs(songsToPersist);
                 }
                 if (!checkCancelled()) {
@@ -1928,7 +2106,13 @@ export async function matchLyrics(
     options: { forceRefresh?: boolean } = {},
 ): Promise<LyricData | null> {
     if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-        return null;
+        if (!song.matchedLyrics && !song.markedPureMusic && !song.matchedIsPureMusic) {
+            const offlineSaved = await readOfflineSavedLyricsForSong(song.id, song.fileSignature);
+            if (offlineSaved) {
+                song.matchedLyrics = offlineSaved;
+            }
+        }
+        return song.matchedLyrics ?? null;
     }
     await hydrateNegativeLyricMatchCache();
     if (options.forceRefresh) {
@@ -2005,10 +2189,10 @@ export async function matchLyrics(
 
                 if (bestMatch && 'lyrics' in bestMatch) {
                     const isOnlineWordOrTtml = Boolean(bestMatch.lyrics.isWordByWord || bestMatch.lyrics.ttml);
-                    // When the song already has local/embedded lyrics (e.g. LRC), only accept a better TTML/word-by-word match!
+                    // Protect songs that ALREADY have local/embedded TTML / word-by-word lyrics from being downgraded to line-by-line LRC.
                     if (
                         !options.forceRefresh
-                        && hasLocalOrEmbeddedLyrics
+                        && hasWordByWordLocalOrEmbedded
                         && !isOnlineWordOrTtml
                     ) {
                         await recordAutomaticLyricMatchFailure(song);
@@ -2019,6 +2203,7 @@ export async function matchLyrics(
                     song.matchedLyricsProviderPlatform = bestMatch.matchedLyricsProviderPlatform;
                     song.matchedLyrics = bestMatch.lyrics;
                     song.matchedIsPureMusic = false;
+                    void writeOfflineSavedLyricsForSong(song.id, song.fileSignature, bestMatch.lyrics);
                     await recordAutomaticLyricMatchSuccess(song);
 
                     if (matchContext.metadataCandidate) {
@@ -2037,6 +2222,10 @@ export async function matchLyrics(
                         },
                     );
                     const coverUrl = matchedMetadata.coverUrl;
+                    const enrichedImportedMetadata = (!song.importedMetadata?.albumName && matchedMetadata.album?.name)
+                        ? { ...song.importedMetadata, albumName: matchedMetadata.album.name }
+                        : song.importedMetadata;
+                    song.importedMetadata = enrichedImportedMetadata;
                     await applyMatchedMetadata(song.id, {
                         source: matchedMetadata.source,
                         songId: matchedMetadata.songId,
@@ -2047,6 +2236,7 @@ export async function matchLyrics(
                     }, {
                         songPatch: {
                             ...song,
+                            importedMetadata: enrichedImportedMetadata,
                             useOnlineCover: Boolean(coverUrl && !hasLocalSongCover(song)),
                         },
                         protectOrigins: ['manual', 'manual-match', 'split'],
@@ -2059,7 +2249,7 @@ export async function matchLyrics(
             return null;
         }
 
-        // If the song already has local/embedded lyrics (TTML or LRC) and already has a cover, do not fall back to plain-LRC NetEase search.
+        // If the song already has local/embedded lyrics (TTML or LRC) and already has a cover, do not fall back to plain-LRC catalog search.
         if (hasLocalOrEmbeddedLyrics && !options.forceRefresh && hasLocalSongCover(song)) {
             await recordAutomaticLyricMatchFailure(song);
             return null;
@@ -2127,6 +2317,9 @@ export async function matchLyrics(
         song.matchedLyricsSource = 'netease';
         song.matchedLyrics = processed.lyrics || undefined;
         song.matchedIsPureMusic = processed.isPureMusic;
+        if (processed.lyrics) {
+            void writeOfflineSavedLyricsForSong(song.id, song.fileSignature, processed.lyrics);
+        }
         await recordAutomaticLyricMatchSuccess(song);
 
         if (matchContext.metadataCandidate) {
@@ -2429,12 +2622,52 @@ async function extractAndPersistSongCover(
     }
     const foundLyrics = Boolean(metadata.lyrics && metadata.lyrics.trim());
     const foundTranslationLyrics = Boolean(metadata.translationLyrics && metadata.translationLyrics.trim());
+    const hasEmbeddedTagMetadata = Boolean(
+        metadata.title
+        || metadata.artist
+        || metadata.artists?.length
+        || metadata.album
+        || metadata.albumArtist
+        || metadata.year
+        || metadata.genre
+    );
+    const filenameMetadata = extractMetadataFromFilename(song.fileName);
+    const nextImportedMetadata = hasEmbeddedTagMetadata
+        ? buildImportedMetadataSnapshot({
+            fileName: song.fileName,
+            embeddedTitle: metadata.title || (song.importedMetadata?.titleSource === 'embedded' ? song.importedMetadata.title : undefined),
+            fallbackTitle: filenameMetadata.title || song.importedMetadata?.title,
+            embeddedArtist: metadata.artist,
+            embeddedArtists: metadata.artists?.length ? metadata.artists : song.importedMetadata?.artistNames,
+            fallbackArtist: filenameMetadata.artist,
+            embeddedAlbum: metadata.album || song.importedMetadata?.albumName,
+            embeddedAlbumArtist: metadata.albumArtist || song.importedMetadata?.albumArtist,
+            embeddedYear: metadata.year ?? song.importedMetadata?.year,
+            embeddedGenre: metadata.genre || song.importedMetadata?.genre,
+            embeddedCodec: metadata.codec || song.importedMetadata?.codec,
+        })
+        : song.importedMetadata;
+    const nextTitle = song.titleOrigin === 'import' && nextImportedMetadata
+        ? nextImportedMetadata.title
+        : song.title;
+    const nextDuration = metadata.duration || song.duration || 0;
+
     if (!metadata.cover || !metadata.coverAssetId) {
         songsWithoutEmbeddedCover.set(song.id, fileRevision);
         song.hasNoEmbeddedCover = true;
-        if (foundLyrics || foundTranslationLyrics || needsEmbeddedLyrics) {
+        if (foundLyrics || foundTranslationLyrics || hasEmbeddedTagMetadata || needsEmbeddedLyrics) {
             const updatedNoCoverSong: LocalSong = {
                 ...song,
+                title: nextTitle,
+                duration: nextDuration,
+                importedMetadata: nextImportedMetadata,
+                albumArtist: metadata.albumArtist || song.albumArtist,
+                trackNumber: metadata.trackNumber ?? song.trackNumber,
+                discNumber: metadata.discNumber ?? song.discNumber,
+                year: metadata.year ?? song.year,
+                genre: metadata.genre || song.genre,
+                codec: metadata.codec || song.codec,
+                bitrate: metadata.bitrate || song.bitrate,
                 hasNoEmbeddedCover: true,
                 hasEmbeddedLyrics: foundLyrics || Boolean(song.hasEmbeddedLyrics),
                 embeddedLyricsContent: foundLyrics ? metadata.lyrics : song.embeddedLyricsContent,
@@ -2454,6 +2687,16 @@ async function extractAndPersistSongCover(
 
     const updatedSong: LocalSong = {
         ...song,
+        title: nextTitle,
+        duration: nextDuration,
+        importedMetadata: nextImportedMetadata,
+        albumArtist: metadata.albumArtist || song.albumArtist,
+        trackNumber: metadata.trackNumber ?? song.trackNumber,
+        discNumber: metadata.discNumber ?? song.discNumber,
+        year: metadata.year ?? song.year,
+        genre: metadata.genre || song.genre,
+        codec: metadata.codec || song.codec,
+        bitrate: metadata.bitrate || song.bitrate,
         localCoverAssetId: metadata.coverAssetId,
         localCoverSource: 'embedded',
         hasNoEmbeddedCover: false,

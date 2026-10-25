@@ -786,13 +786,18 @@ public class FoliaPlaybackService extends Service {
 
         if (trimmed.startsWith("content://") && context != null) {
             File stagedFile = FoliaSafStreamHandler.getStagedAudioFileIfReady(context, trimmed);
+            if (stagedFile == null) {
+                stagedFile = FoliaSafStreamHandler.stageAudioUriToCache(context, trimmed);
+            }
             if (stagedFile != null && stagedFile.isFile() && stagedFile.length() > 0L) {
+                if (FoliaAlacAndPcmTranscoder.needsWavTranscode(stagedFile, null, trimmed, false)) {
+                    File wavFile = FoliaAlacAndPcmTranscoder.transcodeToCachedWav(context, stagedFile, stagedFile.getName());
+                    if (wavFile != null && wavFile.isFile() && wavFile.length() > 44L) {
+                        return Uri.fromFile(wavFile);
+                    }
+                }
                 return Uri.fromFile(stagedFile);
             }
-            // Trigger background pre-staging for subsequent seeks/replays while ExoPlayer starts streaming immediately
-            final Context appCtx = context.getApplicationContext();
-            final String uriToStage = trimmed;
-            new Thread(() -> FoliaSafStreamHandler.stageAudioUriToCache(appCtx, uriToStage)).start();
             return Uri.parse(trimmed);
         }
 

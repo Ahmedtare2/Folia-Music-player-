@@ -30,17 +30,27 @@ import {
 import {
     type LyricData,
     type LyricLine,
+    type LyricProviderSource,
     PlayerState,
     type SongResult,
     type Theme,
     type VisualizerMode,
 } from '../../types';
+import { useLyricSettingsStore } from '../../stores/useLyricSettingsStore';
+import { LYRIC_SOURCES } from '../../utils/lyrics/lyricSources';
 import { detectTextDirection, resolveTokenDirection, type TextDirection } from '../../utils/lyrics/arabicText';
 import type { Word as WordType } from '../../types';
 import { getCachedLocalCoverObjectUrl, resolveLocalCoverObjectUrl } from '../../services/localCoverRuntime';
 import { isLocalCoverAssetUrl } from '../../services/localCoverAssetUrl';
 import { VISUALIZER_REGISTRY, getVisualizerModeLabel } from '../visualizer/registry';
+import {
+    DEFAULT_VISUALIZER_BACKGROUND_MODE,
+    VISUALIZER_BACKGROUND_REGISTRY,
+    getVisualizerBackgroundModeLabel,
+} from '../visualizer/backgrounds/registry';
 import { useAudioSettingsStore } from '../../stores/useAudioSettingsStore';
+import { useVisualizerSettingsStore } from '../../stores/useVisualizerSettingsStore';
+import { useThemeSettingsStore } from '../../stores/useThemeSettingsStore';
 import { useDynamicAlbumArtworkStore } from '../../stores/useDynamicAlbumArtworkStore';
 import {
     ANDROID_VISIBILITY_EVENT,
@@ -516,6 +526,35 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
             setFullScreenLyricsMode: state.setFullScreenLyricsMode,
         })),
     );
+    const {
+        visualizerBackgroundMode,
+        disableVisualizerGeometricBackground,
+        handleSetVisualizerBackgroundMode,
+        handleToggleDisableVisualizerGeometricBackground,
+    } = useVisualizerSettingsStore(
+        useShallow(state => ({
+            visualizerBackgroundMode: state.visualizerBackgroundMode,
+            disableVisualizerGeometricBackground: state.disableVisualizerGeometricBackground,
+            handleSetVisualizerBackgroundMode: state.handleSetVisualizerBackgroundMode,
+            handleToggleDisableVisualizerGeometricBackground: state.handleToggleDisableVisualizerGeometricBackground,
+        })),
+    );
+    const { useCoverColorBg, handleToggleCoverColorBg } = useThemeSettingsStore(
+        useShallow(state => ({
+            useCoverColorBg: state.useCoverColorBg,
+            handleToggleCoverColorBg: state.handleToggleCoverColorBg,
+        })),
+    );
+    const {
+        preferredAlternativeLyricSource,
+        handleSetPreferredAlternativeLyricSource,
+    } = useLyricSettingsStore(
+        useShallow(state => ({
+            preferredAlternativeLyricSource: state.preferredAlternativeLyricSource,
+            handleSetPreferredAlternativeLyricSource: state.handleSetPreferredAlternativeLyricSource,
+        })),
+    );
+    const activeBackgroundMode = visualizerBackgroundMode ?? DEFAULT_VISUALIZER_BACKGROUND_MODE;
     const progressFillRef = useRef<HTMLDivElement>(null);
     const progressThumbRef = useRef<HTMLDivElement>(null);
     const currentTimeTextRef = useRef<HTMLSpanElement>(null);
@@ -942,7 +981,8 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
     useEffect(() => {
         if (!hasAndroidNativeVisualizerBridge()) return;
         const isVideoCovering = displayMode === 'cover' && videoStageState.shouldShowVideo && Boolean(effectiveAlbumVideoUrl);
-        const enabled = Boolean(isOpen && currentSong && !isVideoCovering);
+        const usesWebViewOriginalBackground = displayMode === 'lyrics' || displayMode === 'stage';
+        const enabled = Boolean(isOpen && currentSong && !isVideoCovering && !usesWebViewOriginalBackground);
         const visible = Boolean(enabled && isPageVisible);
         const isPlayingNow = playerState === PlayerState.PLAYING;
         const vsyncDivider: 1 | 2 = 2;
@@ -1135,14 +1175,15 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
 
             {/* OLED Artwork-Derived Ambient Background Layer:
                 - Rich multi-stop atmospheric blend + softly blurred album cover in 'cover' mode
-                - Semi-translucent scrim in 'lyrics' mode so the live VisualizerRenderer (Monet/Latent/Cover background) shines through while keeping lyrics crisp
+                - Light GPU-composited readability scrim in 'lyrics' mode so Folia's original background styles
+                  (Common Fluid + Geometric, Latent, Monet, Sora, Nomand) shine through clearly behind the lyrics
                 - Hidden in 'stage' mode so the full-screen Visualizer shines at 100% */}
-            {displayMode !== 'stage' && (
+            {displayMode === 'cover' && (
                 <div
                     aria-hidden="true"
                     className="pointer-events-none absolute inset-0 -z-10 overflow-hidden transition-opacity duration-500"
                     style={{
-                        opacity: displayMode === 'lyrics' ? 0.56 : 1,
+                        opacity: 1,
                         background: `
                             radial-gradient(circle at 50% 24%, color-mix(in srgb, ${accentColor} 42%, transparent) 0%, transparent 66%),
                             radial-gradient(circle at 22% 72%, color-mix(in srgb, ${primaryColor} 26%, transparent) 0%, transparent 60%),
@@ -1157,10 +1198,21 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                             alt=""
                             aria-hidden="true"
                             className="absolute inset-0 h-full w-full scale-125 object-cover blur-3xl saturate-150 transition-opacity duration-700"
-                            style={{ opacity: displayMode === 'lyrics' ? 0.34 : 0.44 }}
+                            style={{ opacity: 0.44 }}
                         />
                     )}
                 </div>
+            )}
+            {displayMode === 'lyrics' && (
+                <div
+                    aria-hidden="true"
+                    data-testid="mobile-lyrics-background-scrim"
+                    className="pointer-events-none absolute inset-0 -z-10 overflow-hidden"
+                    style={{
+                        background: 'linear-gradient(180deg, rgba(4, 4, 8, 0.28) 0%, rgba(4, 4, 8, 0.14) 50%, rgba(4, 4, 8, 0.34) 100%)',
+                        transform: 'translate3d(0, 0, 0)',
+                    }}
+                />
             )}
 
             {/* Top Header Bar: Collapse + Mode Switcher (Cover / Lyrics / Visualizer) + Active Visualizer Quick Button + EQ + Lyric Tools + Queue */}
@@ -1979,6 +2031,72 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                         </div>
                     </div>
 
+                    {/* 1b. Original Folia Background Style Selector (GPU-Accelerated) */}
+                    <div className="space-y-2 rounded-2xl border border-white/10 bg-white/[0.04] p-3.5">
+                        <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs font-semibold uppercase tracking-wider text-zinc-300">
+                                {t('options.visualizerBackgroundMode', 'Background Style')} ({getVisualizerBackgroundModeLabel(activeBackgroundMode, t)})
+                            </span>
+                            <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                                GPU Accelerated
+                            </span>
+                        </div>
+                        <div
+                            data-testid="mobile-drawer-background-mode-grid"
+                            className="grid grid-cols-3 sm:grid-cols-5 gap-2"
+                        >
+                            {VISUALIZER_BACKGROUND_REGISTRY.filter(entry => entry.mode !== 'url').map(entry => {
+                                const active = activeBackgroundMode === entry.mode;
+                                return (
+                                    <button
+                                        key={entry.mode}
+                                        type="button"
+                                        data-testid={`drawer-background-option-${entry.mode}`}
+                                        aria-pressed={active}
+                                        onClick={() => handleSetVisualizerBackgroundMode(entry.mode)}
+                                        className={`min-h-[36px] rounded-xl border px-2.5 py-1.5 text-xs font-medium truncate transition-all active:scale-95 ${
+                                            active
+                                                ? 'border-white bg-white text-zinc-950 font-semibold shadow-sm'
+                                                : 'border-white/10 bg-white/[0.05] text-zinc-200 hover:bg-white/10'
+                                        }`}
+                                    >
+                                        {getVisualizerBackgroundModeLabel(entry.mode, t)}
+                                    </button>
+                                );
+                            })}
+                        </div>
+                        {activeBackgroundMode === 'common' && (
+                            <div className="flex flex-wrap items-center gap-2 pt-1">
+                                <button
+                                    type="button"
+                                    data-testid="drawer-toggle-cover-color-bg"
+                                    aria-pressed={useCoverColorBg}
+                                    onClick={() => handleToggleCoverColorBg(!useCoverColorBg)}
+                                    className={`h-8 rounded-xl border px-3 text-xs font-medium transition-all ${
+                                        useCoverColorBg
+                                            ? 'border-white bg-white/15 text-white'
+                                            : 'border-white/10 bg-white/[0.03] text-zinc-400'
+                                    }`}
+                                >
+                                    {t('theme.addCoverColor', 'Cover Fluid Color')}: {useCoverColorBg ? 'On' : 'Off'}
+                                </button>
+                                <button
+                                    type="button"
+                                    data-testid="drawer-toggle-geometric-shapes"
+                                    aria-pressed={!disableVisualizerGeometricBackground}
+                                    onClick={() => handleToggleDisableVisualizerGeometricBackground(!disableVisualizerGeometricBackground)}
+                                    className={`h-8 rounded-xl border px-3 text-xs font-medium transition-all ${
+                                        !disableVisualizerGeometricBackground
+                                            ? 'border-white bg-white/15 text-white'
+                                            : 'border-white/10 bg-white/[0.03] text-zinc-400'
+                                    }`}
+                                >
+                                    {t('options.visualizerGeometricBackground', 'Geometric Shapes')}: {!disableVisualizerGeometricBackground ? 'On' : 'Off'}
+                                </button>
+                            </div>
+                        )}
+                    </div>
+
                     {/* 2. Full-Screen Local Album Video Cover & Manual Album-Video Association Selector */}
                     <div
                         data-testid="drawer-album-video-card"
@@ -2242,6 +2360,44 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                                         {src}
                                     </button>
                                 ))}
+                            </div>
+                            <div className="pt-1 space-y-1.5">
+                                <div className="flex items-center justify-between text-[11px] text-zinc-400">
+                                    <span>Preferred Auto Lyric Service (No API Key)</span>
+                                    <span className="font-semibold text-zinc-200 uppercase">
+                                        {preferredAlternativeLyricSource}
+                                    </span>
+                                </div>
+                                <div
+                                    data-testid="drawer-preferred-lyric-provider-strip"
+                                    className="grid grid-cols-5 gap-1.5"
+                                >
+                                    {LYRIC_SOURCES.filter(source => !source.needsAccount).map(source => {
+                                        const provider = { id: source.id, label: t(source.labelKey, source.id.toUpperCase()) };
+                                        const active = preferredAlternativeLyricSource === provider.id;
+                                        return (
+                                            <button
+                                                key={provider.id}
+                                                type="button"
+                                                data-testid={`drawer-lyric-provider-${provider.id}`}
+                                                aria-pressed={active}
+                                                onClick={() => {
+                                                    handleSetPreferredAlternativeLyricSource(provider.id);
+                                                    if (onAutoMatchLyrics) {
+                                                        onAutoMatchLyrics();
+                                                    }
+                                                }}
+                                                className={`rounded-lg py-1.5 text-[11px] font-medium border transition-colors ${
+                                                    active
+                                                        ? 'border-white bg-white text-zinc-950 font-semibold'
+                                                        : 'border-white/10 bg-white/[0.04] text-zinc-300'
+                                                }`}
+                                            >
+                                                {provider.label}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
                             </div>
                         </div>
 

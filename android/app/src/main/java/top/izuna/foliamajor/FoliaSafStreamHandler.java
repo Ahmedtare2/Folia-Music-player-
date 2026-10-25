@@ -19,6 +19,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URLDecoder;
+import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -37,12 +38,18 @@ import java.util.concurrent.Executors;
 /**
  * Serves Storage Access Framework (SAF) content:// URIs over same-origin https://localhost/__folia_saf/stream
  * with:
- *   1. Fast temporary local file pre-staging in context.getCacheDir()/saf_audio_stage/ for the currently
- *      playing and next queued local SAF tracks so playback and HTTP 206 seeks read from a contiguous local
- *      file with zero SAF ContentProvider IPC wakeups during lyrics rendering.
- *   2. A 512 KB (524,288-byte) in-memory read buffer inside SafSeekableInputStream so any un-staged or
- *      in-progress SAF stream coalesces small WebView media demuxer reads into 512 KB chunks.
- *   3. Direct WebP cover mipmap serving (256x256 for grids/Bravais lattice walls and 1024x1024 for the player)
+ *   1. Synchronous & pre-staged local file caching in context.getCacheDir()/saf_audio_stage/ for active
+ *      and queued local SAF tracks so playback and HTTP 206 byte-range seeks read from a contiguous local
+ *      file with exact Content-Length / Content-Range headers and zero SAF ContentProvider IPC wakeups.
+ *   2. Automatic on-the-fly ALAC (.m4a/.alac), AIFF (.aif/.aiff), CAF, WMA, WavPack, Monkey's Audio,
+ *      and TTA decoding to seekable 16-bit PCM WAV in saf_audio_stage/ via FoliaAlacAndPcmTranscoder.
+ *   3. Chromium AndroidStreamReaderURLLoader / InputStreamReader-compatible SafSeekableInputStream:
+ *      - Reports full totalLength in available() prior to InputStreamReader::Seek so VerifyRequestedRange
+ *        (byte_range_.ComputeBounds(size)) succeeds for every seek position 0..totalLength-1.
+ *      - Handles InputStreamReader::Seek's initial skip(rangeStart) from offset 0 -> rangeStart without
+ *        double-skipping to 2 * rangeStart, while also positioning automatically if read() is called directly.
+ *      - Reads via stateless FileChannel.read(ByteBuffer, physicalOffset) (pread) with a 512 KB buffer.
+ *   4. Direct WebP cover mipmap serving (256x256 for grids/Bravais lattice walls and 1024x1024 for the player)
  *      from context.getFilesDir()/media_cache/covers/ over https://localhost/__folia_cover/{assetId}.
  */
 public final class FoliaSafStreamHandler {
@@ -52,13 +59,15 @@ public final class FoliaSafStreamHandler {
     public static final int STREAM_READ_BUFFER_BYTES = 512 * 1024;
     /** Subdirectory inside context.getCacheDir() holding contiguous pre-staged active + next SAF audio files. */
     public static final String STAGED_AUDIO_CACHE_DIR = "saf_audio_stage";
-    private static final int MAX_STAGED_AUDIO_FILES = 6;
-    private static final long MAX_STAGED_AUDIO_TOTAL_BYTES = 256L * 1024L * 1024L;
+    private static final int MAX_STAGED_AUDIO_FILES = 10;
+    private static final long MAX_STAGED_AUDIO_TOTAL_BYTES = 384L * 1024L * 1024L;
+    private static final long MAX_SYNC_STAGE_BYTES = 96L * 1024L * 1024L;
     private static final int MAX_SIZE_CACHE_ENTRIES = 2048;
 
     private static final ConcurrentHashMap<String, Long> resolvedSizeCache = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<String, File> stagedUriFileMap = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<String, String> cachedMimeTypeMap = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, Object> uriStageLocks = new ConcurrentHashMap<>();
     private static final Set<String> inFlightStagingUris = ConcurrentHashMap.newKeySet();
     private static final ExecutorService stageExecutor = Executors.newFixedThreadPool(2);
 
@@ -107,14 +116,15 @@ public final class FoliaSafStreamHandler {
     @Nullable
     public static File getStagedAudioFileIfReady(Context context, @Nullable String rawUri) {
         if (context == null || rawUri == null || rawUri.isEmpty()) return null;
-        File mapped = stagedUriFileMap.get(rawUri);
+        String normalizedUri = rawUri.trim();
+        File mapped = stagedUriFileMap.get(normalizedUri);
         if (mapped != null && mapped.isFile() && mapped.length() > 0L) {
             return mapped;
         }
-        File target = new File(getStagedAudioCacheDir(context), computeStageFileName(rawUri));
+        File target = new File(getStagedAudioCacheDir(context), computeStageFileName(normalizedUri));
         if (target.isFile() && target.length() > 0L) {
-            stagedUriFileMap.put(rawUri, target);
-            cacheResolvedSize(rawUri, target.length());
+            stagedUriFileMap.put(normalizedUri, target);
+            cacheResolvedSize(normalizedUri, target.length());
             return target;
         }
         return null;
@@ -135,79 +145,92 @@ public final class FoliaSafStreamHandler {
 
         File existing = getStagedAudioFileIfReady(context, normalizedUri);
         if (existing != null) {
-            // Touch lastModified to keep active/next track hot in LRU cache.
             //noinspection ResultOfMethodCallIgnored
             existing.setLastModified(System.currentTimeMillis());
             return existing;
         }
 
-        if (!inFlightStagingUris.add(normalizedUri)) {
-            return getStagedAudioFileIfReady(context, normalizedUri);
+        if (uriStageLocks.size() > 512) {
+            uriStageLocks.clear();
         }
+        Object uriLock = uriStageLocks.computeIfAbsent(normalizedUri, k -> new Object());
 
-        File stageDir = getStagedAudioCacheDir(context);
-        File targetFile = new File(stageDir, computeStageFileName(normalizedUri));
-        File tempFile = new File(stageDir, targetFile.getName() + ".tmp." + Thread.currentThread().getId());
-
-        try {
-            ContentResolver resolver = context.getContentResolver();
-            Uri contentUri = Uri.parse(normalizedUri);
-            String resolvedMime = resolver.getType(contentUri);
-            if (resolvedMime != null && !resolvedMime.isEmpty()) {
-                cachedMimeTypeMap.put(normalizedUri, resolvedMime);
+        synchronized (uriLock) {
+            File readyAfterWait = getStagedAudioFileIfReady(context, normalizedUri);
+            if (readyAfterWait != null) {
+                //noinspection ResultOfMethodCallIgnored
+                readyAfterWait.setLastModified(System.currentTimeMillis());
+                return readyAfterWait;
             }
 
-            try (AssetFileDescriptor afd = resolver.openAssetFileDescriptor(contentUri, "r")) {
-                if (afd == null) return null;
-                try (InputStream in = afd.createInputStream();
-                     FileOutputStream out = new FileOutputStream(tempFile)) {
-                    byte[] copyBuffer = new byte[STREAM_READ_BUFFER_BYTES];
-                    long totalCopied = 0L;
-                    int read;
-                    while ((read = in.read(copyBuffer)) != -1) {
-                        out.write(copyBuffer, 0, read);
-                        totalCopied += read;
+            inFlightStagingUris.add(normalizedUri);
+            File stageDir = getStagedAudioCacheDir(context);
+            File targetFile = new File(stageDir, computeStageFileName(normalizedUri));
+            File tempFile = new File(stageDir, targetFile.getName() + ".tmp." + Thread.currentThread().getId());
+
+            try {
+                ContentResolver resolver = context.getContentResolver();
+                Uri contentUri = Uri.parse(normalizedUri);
+                String resolvedMime = resolver.getType(contentUri);
+                if (resolvedMime != null && !resolvedMime.isEmpty()) {
+                    cachedMimeTypeMap.put(normalizedUri, resolvedMime);
+                }
+
+                try (AssetFileDescriptor afd = resolver.openAssetFileDescriptor(contentUri, "r")) {
+                    if (afd == null) return null;
+                    try (InputStream in = afd.createInputStream();
+                         FileOutputStream out = new FileOutputStream(tempFile)) {
+                        byte[] copyBuffer = new byte[STREAM_READ_BUFFER_BYTES];
+                        long totalCopied = 0L;
+                        int read;
+                        while ((read = in.read(copyBuffer)) != -1) {
+                            out.write(copyBuffer, 0, read);
+                            totalCopied += read;
+                        }
+                        out.flush();
+                        if (totalCopied <= 0L) {
+                            //noinspection ResultOfMethodCallIgnored
+                            tempFile.delete();
+                            return null;
+                        }
                     }
-                    out.flush();
-                    if (totalCopied <= 0L) {
+                }
+
+                if (!tempFile.renameTo(targetFile)) {
+                    try (FileInputStream in = new FileInputStream(tempFile);
+                         FileOutputStream out = new FileOutputStream(targetFile)) {
+                        byte[] copyBuffer = new byte[STREAM_READ_BUFFER_BYTES];
+                        int read;
+                        while ((read = in.read(copyBuffer)) != -1) {
+                            out.write(copyBuffer, 0, read);
+                        }
+                        out.flush();
+                    } finally {
                         //noinspection ResultOfMethodCallIgnored
                         tempFile.delete();
-                        return null;
                     }
                 }
-            }
 
-            if (!tempFile.renameTo(targetFile)) {
-                // Fallback copy if rename across filesystem boundary fails.
-                try (FileInputStream in = new FileInputStream(tempFile);
-                     FileOutputStream out = new FileOutputStream(targetFile)) {
-                    byte[] copyBuffer = new byte[STREAM_READ_BUFFER_BYTES];
-                    int read;
-                    while ((read = in.read(copyBuffer)) != -1) {
-                        out.write(copyBuffer, 0, read);
-                    }
-                    out.flush();
-                } finally {
+                if (targetFile.isFile() && targetFile.length() > 0L) {
                     //noinspection ResultOfMethodCallIgnored
-                    tempFile.delete();
+                    targetFile.setLastModified(System.currentTimeMillis());
+                    stagedUriFileMap.put(normalizedUri, targetFile);
+                    cacheResolvedSize(normalizedUri, targetFile.length());
+                    // Pre-transcode ALAC/AIFF tracks to WAV immediately when staged so playback starts instantly
+                    if (FoliaAlacAndPcmTranscoder.needsWavTranscode(targetFile, cachedMimeTypeMap.get(normalizedUri), normalizedUri, false)) {
+                        FoliaAlacAndPcmTranscoder.transcodeToCachedWav(context, targetFile, targetFile.getName());
+                    }
+                    pruneStagedAudioCache(stageDir, targetFile);
+                    return targetFile;
                 }
-            }
-
-            if (targetFile.isFile() && targetFile.length() > 0L) {
+            } catch (Exception ignored) {
                 //noinspection ResultOfMethodCallIgnored
-                targetFile.setLastModified(System.currentTimeMillis());
-                stagedUriFileMap.put(normalizedUri, targetFile);
-                cacheResolvedSize(normalizedUri, targetFile.length());
-                pruneStagedAudioCache(stageDir, targetFile);
-                return targetFile;
+                tempFile.delete();
+            } finally {
+                inFlightStagingUris.remove(normalizedUri);
             }
-        } catch (Exception ignored) {
-            //noinspection ResultOfMethodCallIgnored
-            tempFile.delete();
-        } finally {
-            inFlightStagingUris.remove(normalizedUri);
+            return null;
         }
-        return null;
     }
 
     /**
@@ -215,11 +238,12 @@ public final class FoliaSafStreamHandler {
      */
     public static void prestageAudioUriAsync(final Context context, @Nullable final String rawUri) {
         if (context == null || rawUri == null || !rawUri.startsWith("content://")) return;
-        if (getStagedAudioFileIfReady(context, rawUri) != null || inFlightStagingUris.contains(rawUri)) {
+        String normalized = rawUri.trim();
+        if (getStagedAudioFileIfReady(context, normalized) != null || inFlightStagingUris.contains(normalized)) {
             return;
         }
         final Context appContext = context.getApplicationContext() != null ? context.getApplicationContext() : context;
-        stageExecutor.execute(() -> stageAudioUriToCache(appContext, rawUri));
+        stageExecutor.execute(() -> stageAudioUriToCache(appContext, normalized));
     }
 
     /**
@@ -244,7 +268,7 @@ public final class FoliaSafStreamHandler {
         File[] files = stageDir.listFiles();
         if (files == null || files.length == 0) return;
 
-        List<File> binFiles = new ArrayList<>();
+        List<File> cachedFiles = new ArrayList<>();
         long totalBytes = 0L;
         long now = System.currentTimeMillis();
         for (File f : files) {
@@ -257,25 +281,26 @@ public final class FoliaSafStreamHandler {
                 }
                 continue;
             }
-            if (name.startsWith("stage_") && name.endsWith(".bin")) {
-                binFiles.add(f);
+            if (name.startsWith("stage_") && (name.endsWith(".bin") || name.endsWith("_pcm.wav"))) {
+                cachedFiles.add(f);
                 totalBytes += f.length();
             }
         }
 
-        if (binFiles.size() <= MAX_STAGED_AUDIO_FILES && totalBytes <= MAX_STAGED_AUDIO_TOTAL_BYTES) {
+        if (cachedFiles.size() <= MAX_STAGED_AUDIO_FILES && totalBytes <= MAX_STAGED_AUDIO_TOTAL_BYTES) {
             return;
         }
 
-        File[] sorted = binFiles.toArray(new File[0]);
+        File[] sorted = cachedFiles.toArray(new File[0]);
         Arrays.sort(sorted, Comparator.comparingLong(File::lastModified));
 
+        String protectedPrefix = protectedFile != null ? protectedFile.getName() : null;
         int remainingCount = sorted.length;
         for (File candidate : sorted) {
             if (remainingCount <= MAX_STAGED_AUDIO_FILES && totalBytes <= MAX_STAGED_AUDIO_TOTAL_BYTES) {
                 break;
             }
-            if (protectedFile != null && candidate.equals(protectedFile)) {
+            if (protectedPrefix != null && candidate.getName().startsWith(protectedPrefix)) {
                 continue;
             }
             long len = candidate.length();
@@ -355,6 +380,7 @@ public final class FoliaSafStreamHandler {
         String rawUri = requestUrl.getQueryParameter("uri");
         String explicitMime = requestUrl.getQueryParameter("mime");
         String sizeParam = requestUrl.getQueryParameter("size");
+        String transcodeParam = requestUrl.getQueryParameter("transcode");
         String method = request.getMethod() != null ? request.getMethod().toUpperCase(Locale.ROOT) : "GET";
 
         Map<String, String> headers = new HashMap<>();
@@ -363,7 +389,7 @@ public final class FoliaSafStreamHandler {
         headers.put("Access-Control-Allow-Headers", "Range, Content-Type, Accept");
         headers.put("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges, Content-Type, X-Folia-Saf-Source");
         headers.put("Accept-Ranges", "bytes");
-        headers.put("Cache-Control", "no-store");
+        headers.put("Cache-Control", "private, max-age=3600");
 
         if ("OPTIONS".equals(method)) {
             return new WebResourceResponse("text/plain", "UTF-8", 200, "OK", headers, null);
@@ -373,19 +399,38 @@ public final class FoliaSafStreamHandler {
             return new WebResourceResponse("text/plain", "UTF-8", 400, "Bad Request", headers, null);
         }
 
+        String normalizedUri = rawUri.trim();
         ContentResolver resolver = context.getContentResolver();
-        Uri contentUri = Uri.parse(rawUri);
+        Uri contentUri = Uri.parse(normalizedUri);
         String mimeType = (explicitMime != null && !explicitMime.isEmpty())
             ? explicitMime
-            : cachedMimeTypeMap.get(rawUri);
+            : cachedMimeTypeMap.get(normalizedUri);
         if (mimeType == null || mimeType.isEmpty()) {
             mimeType = resolver.getType(contentUri);
             if (mimeType != null && !mimeType.isEmpty()) {
-                cachedMimeTypeMap.put(rawUri, mimeType);
+                cachedMimeTypeMap.put(normalizedUri, mimeType);
             }
         }
         if (mimeType == null || mimeType.isEmpty()) {
             mimeType = "application/octet-stream";
+        }
+
+        long hintedSize = -1L;
+        if (sizeParam != null && !sizeParam.isEmpty()) {
+            try {
+                hintedSize = Long.parseLong(sizeParam.trim());
+                if (hintedSize > 0L) {
+                    cacheResolvedSize(normalizedUri, hintedSize);
+                }
+            } catch (NumberFormatException ignored) {
+                hintedSize = -1L;
+            }
+        }
+        if (hintedSize <= 0L) {
+            Long cached = resolvedSizeCache.get(normalizedUri);
+            if (cached != null && cached > 0L) {
+                hintedSize = cached;
+            }
         }
 
         String rangeHeader = null;
@@ -398,19 +443,47 @@ public final class FoliaSafStreamHandler {
             }
         }
 
-        // Fast path: serve directly from the contiguous pre-staged local file in context.getCacheDir()/saf_audio_stage/
-        // when available so playback makes zero IPC calls to Android's SAF ContentProvider.
-        File stagedFile = getStagedAudioFileIfReady(context, rawUri);
+        boolean forceWavTranscode = "wav".equalsIgnoreCase(transcodeParam) || "1".equals(transcodeParam);
+        boolean isAudioStream = mimeType.startsWith("audio/")
+            || "application/ogg".equals(mimeType)
+            || "application/octet-stream".equals(mimeType)
+            || forceWavTranscode;
+
+        File stagedFile = getStagedAudioFileIfReady(context, normalizedUri);
+        if (stagedFile == null && isAudioStream && normalizedUri.startsWith("content://")) {
+            if (hintedSize <= 0L || hintedSize <= MAX_SYNC_STAGE_BYTES) {
+                stagedFile = stageAudioUriToCache(context, normalizedUri);
+            } else {
+                prestageAudioUriAsync(context, normalizedUri);
+            }
+        }
+
         if (stagedFile != null && stagedFile.isFile() && stagedFile.length() > 0L) {
+            File fileToServe = stagedFile;
+            String mimeToServe = mimeType;
+            String sourceTag = "staged-cache";
+
+            if (FoliaAlacAndPcmTranscoder.needsWavTranscode(stagedFile, mimeType, normalizedUri, forceWavTranscode)) {
+                File wavFile = FoliaAlacAndPcmTranscoder.transcodeToCachedWav(
+                    context,
+                    stagedFile,
+                    stagedFile.getName()
+                );
+                if (wavFile != null && wavFile.isFile() && wavFile.length() > 44L) {
+                    fileToServe = wavFile;
+                    mimeToServe = "audio/wav";
+                    sourceTag = "transcoded-wav-cache";
+                }
+            }
+
             FileInputStream stagedFis = null;
-            SafSeekableInputStream stagedStream = null;
             try {
-                long totalLength = stagedFile.length();
-                stagedFis = new FileInputStream(stagedFile);
-                headers.put("X-Folia-Saf-Source", "staged-cache");
+                long totalLength = fileToServe.length();
+                stagedFis = new FileInputStream(fileToServe);
+                headers.put("X-Folia-Saf-Source", sourceTag);
                 return buildStreamResponse(
                     method,
-                    mimeType,
+                    mimeToServe,
                     headers,
                     rangeHeader,
                     null,
@@ -418,13 +491,8 @@ public final class FoliaSafStreamHandler {
                     totalLength
                 );
             } catch (Exception ignored) {
-                closeQuietly(stagedStream);
                 closeQuietly(stagedFis);
-                // Fall through to direct SAF descriptor streaming with 512 KB read buffer.
             }
-        } else if (mimeType.startsWith("audio/") || "application/ogg".equals(mimeType) || "application/octet-stream".equals(mimeType)) {
-            // Trigger background staging into context.getCacheDir()/saf_audio_stage/ for subsequent reads/seeks.
-            prestageAudioUriAsync(context, rawUri);
         }
 
         AssetFileDescriptor afd = null;
@@ -436,7 +504,7 @@ public final class FoliaSafStreamHandler {
             }
 
             rawFis = new FileInputStream(afd.getFileDescriptor());
-            long totalLength = resolveTotalLength(resolver, contentUri, rawUri, afd, rawFis, sizeParam);
+            long totalLength = resolveTotalLength(resolver, contentUri, normalizedUri, afd, rawFis, sizeParam);
             headers.put("X-Folia-Saf-Source", "buffered-saf-512k");
 
             return buildStreamResponse(
@@ -541,7 +609,7 @@ public final class FoliaSafStreamHandler {
         return new WebResourceResponse(mimeType, null, 200, "OK", headers, seekableStream);
     }
 
-    private static void cacheResolvedSize(String rawUri, long size) {
+    public static void cacheResolvedSize(String rawUri, long size) {
         if (rawUri == null || size <= 0L) return;
         if (resolvedSizeCache.size() >= MAX_SIZE_CACHE_ENTRIES) {
             resolvedSizeCache.clear();
@@ -572,9 +640,7 @@ public final class FoliaSafStreamHandler {
                     return statSize;
                 }
             }
-        } catch (Exception ignored) {
-            // Fall through to FileChannel.size().
-        }
+        } catch (Exception ignored) {}
 
         try {
             FileChannel channel = rawFis.getChannel();
@@ -587,20 +653,16 @@ public final class FoliaSafStreamHandler {
                     return resolved;
                 }
             }
-        } catch (Exception ignored) {
-            // Fall through to cached or query param size.
-        }
+        } catch (Exception ignored) {}
 
         if (sizeParam != null && !sizeParam.isEmpty()) {
             try {
-                long parsedSize = Long.parseLong(sizeParam);
+                long parsedSize = Long.parseLong(sizeParam.trim());
                 if (parsedSize > 0L) {
                     cacheResolvedSize(rawUri, parsedSize);
                     return parsedSize;
                 }
-            } catch (NumberFormatException ignored) {
-                // Fall through.
-            }
+            } catch (NumberFormatException ignored) {}
         }
 
         Long cachedSize = rawUri != null ? resolvedSizeCache.get(rawUri) : null;
@@ -616,9 +678,7 @@ public final class FoliaSafStreamHandler {
                     return queriedSize;
                 }
             }
-        } catch (Exception ignored) {
-            // Unknown length.
-        }
+        } catch (Exception ignored) {}
 
         return -1L;
     }
@@ -627,29 +687,34 @@ public final class FoliaSafStreamHandler {
         if (stream == null) return;
         try {
             stream.close();
-        } catch (IOException ignored) {
-            // Ignore close error.
-        }
+        } catch (IOException ignored) {}
     }
 
     private static void closeAfdQuietly(@Nullable AssetFileDescriptor afd) {
         if (afd == null) return;
         try {
             afd.close();
-        } catch (IOException ignored) {
-            // Ignore close error.
-        }
+        } catch (IOException ignored) {}
     }
 
     /**
-     * Seekable stream wrapper with a 512 KB (524,288-byte) internal read buffer so small WebView
-     * media demuxer reads are satisfied from contiguous RAM without triggering hundreds of SAF IPC
-     * calls during lyrics visualization.
+     * Seekable stream wrapper compatible with Chromium's AndroidStreamReaderURLLoader / InputStreamReader:
+     *   1. When a Range request `bytes=rangeStart-rangeEnd` is intercepted by WebView's shouldInterceptRequest,
+     *      Chromium's InputStreamReader::VerifyRequestedRange first calls `inputStream.available()` and checks
+     *      `byte_range_.ComputeBounds(available)` (requiring `available > rangeStart`), and then
+     *      InputStreamReader::Seek calls `inputStream.skip(rangeStart)` to advance from byte 0 to `rangeStart`.
+     *   2. Starting `currentOffset` at 0L with `positionedToRangeStart = (rangeStart == 0L)` allows
+     *      Chromium's `available()` check to see the full `totalLength` and `skip(rangeStart)` to advance
+     *      `currentOffset` cleanly to `rangeStart` without double-skipping to `2 * rangeStart`.
+     *   3. If a direct caller calls `read()` without calling `skip(rangeStart)` first, `ensurePositionedForRead()`
+     *      automatically advances `currentOffset` to `rangeStart` before the first read.
      */
     private static final class SafSeekableInputStream extends InputStream {
         @Nullable
         private final AssetFileDescriptor afd;
         private final FileInputStream fis;
+        @Nullable
+        private final FileChannel channel;
         private final long baseOffset;
         private final long totalLength;
         private final long rangeStart;
@@ -658,7 +723,9 @@ public final class FoliaSafStreamHandler {
         private int bufferPos = 0;
         private int bufferLimit = 0;
         private long currentOffset = 0L;
-        private boolean hasSkippedOrRead = false;
+        private boolean positionedToRangeStart;
+        private boolean fallbackDescriptorPositioned = false;
+        private boolean usePositionalChannelRead = true;
         private boolean closed = false;
 
         SafSeekableInputStream(
@@ -667,23 +734,22 @@ public final class FoliaSafStreamHandler {
             long totalLength,
             long rangeStart,
             long rangeEndInclusive
-        ) throws IOException {
+        ) {
             this.afd = afd;
             this.fis = fis;
+            this.channel = fis.getChannel();
             this.baseOffset = afd != null ? Math.max(0L, afd.getStartOffset()) : 0L;
             this.totalLength = totalLength;
             this.rangeStart = Math.max(0L, rangeStart);
             this.rangeEndInclusive = rangeEndInclusive;
-            if (this.baseOffset > 0L) {
-                seekKernelDescriptor(this.baseOffset);
-            }
+            this.currentOffset = 0L;
+            this.positionedToRangeStart = (this.rangeStart == 0L);
         }
 
-        private void ensurePositionedForRead() throws IOException {
-            if (!hasSkippedOrRead) {
-                hasSkippedOrRead = true;
+        private void ensurePositionedForRead() {
+            if (!positionedToRangeStart) {
+                positionedToRangeStart = true;
                 if (currentOffset < rangeStart) {
-                    seekKernelDescriptor(baseOffset + rangeStart);
                     currentOffset = rangeStart;
                     bufferPos = 0;
                     bufferLimit = 0;
@@ -691,7 +757,14 @@ public final class FoliaSafStreamHandler {
             }
         }
 
-        private void seekKernelDescriptor(long targetPhysicalPosition) throws IOException {
+        private void ensurePositionedForFallbackRead() throws IOException {
+            if (!fallbackDescriptorPositioned) {
+                fallbackDescriptorPositioned = true;
+                seekKernelDescriptor(baseOffset + currentOffset, 0L);
+            }
+        }
+
+        private void seekKernelDescriptor(long targetPhysicalPosition, long currentPhysicalPosition) throws IOException {
             try {
                 FileDescriptor fd = afd != null ? afd.getFileDescriptor() : fis.getFD();
                 if (fd != null && fd.valid()) {
@@ -700,17 +773,23 @@ public final class FoliaSafStreamHandler {
                         return;
                     }
                 }
-            } catch (Exception ignored) {
-                // Fall back to FileChannel.position().
-            }
+            } catch (Exception ignored) {}
             try {
-                FileChannel channel = fis.getChannel();
                 if (channel != null) {
                     channel.position(targetPhysicalPosition);
                     return;
                 }
-            } catch (IOException ignored) {
-                // Pipe-backed descriptor: fall back to stream skip.
+            } catch (IOException ignored) {}
+            long delta = targetPhysicalPosition - currentPhysicalPosition;
+            if (delta > 0L) {
+                byte[] skipScratch = new byte[16 * 1024];
+                long remaining = delta;
+                while (remaining > 0L) {
+                    int toRead = (int) Math.min((long) skipScratch.length, remaining);
+                    int got = fis.read(skipScratch, 0, toRead);
+                    if (got <= 0) break;
+                    remaining -= got;
+                }
             }
         }
 
@@ -723,17 +802,37 @@ public final class FoliaSafStreamHandler {
             }
             int maxToFill = (int) Math.min((long) readBuffer.length, remainingInRange);
             int totalFilled = 0;
-            // Coalesce underlying reads up to 512 KB (or EOF/end-of-range) in one burst.
+
+            if (usePositionalChannelRead && channel != null) {
+                try {
+                    long physicalStart = baseOffset + currentOffset;
+                    while (totalFilled < maxToFill) {
+                        ByteBuffer dst = ByteBuffer.wrap(readBuffer, totalFilled, maxToFill - totalFilled);
+                        int count = channel.read(dst, physicalStart + totalFilled);
+                        if (count <= 0) {
+                            break;
+                        }
+                        totalFilled += count;
+                    }
+                    if (totalFilled > 0) {
+                        bufferLimit = totalFilled;
+                        return totalFilled;
+                    }
+                    if (totalLength > 0L && currentOffset >= totalLength) {
+                        return -1;
+                    }
+                } catch (Exception ignored) {
+                    usePositionalChannelRead = false;
+                }
+            }
+
+            ensurePositionedForFallbackRead();
             while (totalFilled < maxToFill) {
                 int count = fis.read(readBuffer, totalFilled, maxToFill - totalFilled);
                 if (count <= 0) {
                     break;
                 }
                 totalFilled += count;
-                // If backed by a pipe that returned partial data and has no more immediately available, break.
-                if (totalFilled < maxToFill && fis.available() <= 0 && afd != null) {
-                    break;
-                }
             }
             if (totalFilled <= 0) {
                 return -1;
@@ -745,7 +844,6 @@ public final class FoliaSafStreamHandler {
         @Override
         public long skip(long n) throws IOException {
             if (closed || n <= 0L) return 0L;
-            ensurePositionedForRead();
             long maxOffsetExclusive = totalLength > 0L
                 ? Math.min(totalLength, rangeEndInclusive + 1L)
                 : Long.MAX_VALUE;
@@ -757,15 +855,24 @@ public final class FoliaSafStreamHandler {
             if (toSkip <= bufferedRemaining) {
                 bufferPos += (int) toSkip;
                 currentOffset += toSkip;
+                if (currentOffset >= rangeStart) {
+                    positionedToRangeStart = true;
+                }
                 return toSkip;
             }
 
+            long oldPhysical = baseOffset + currentOffset + bufferedRemaining;
             long targetOffset = currentOffset + toSkip;
             long physicalOffset = baseOffset + targetOffset;
             bufferPos = 0;
             bufferLimit = 0;
-            seekKernelDescriptor(physicalOffset);
+            if (!usePositionalChannelRead && fallbackDescriptorPositioned) {
+                seekKernelDescriptor(physicalOffset, oldPhysical);
+            }
             currentOffset = targetOffset;
+            if (currentOffset >= rangeStart) {
+                positionedToRangeStart = true;
+            }
             return toSkip;
         }
 
@@ -817,6 +924,12 @@ public final class FoliaSafStreamHandler {
         public int available() throws IOException {
             if (closed) return 0;
             if (totalLength > 0L) {
+                // Before InputStreamReader::Seek has skipped to rangeStart, report full totalLength
+                // so Chromium's VerifyRequestedRange (byte_range_.ComputeBounds(size)) succeeds
+                // for every seek target 0..totalLength-1 (including bounded Range: bytes=X-Y requests).
+                if (!positionedToRangeStart) {
+                    return (int) Math.min(totalLength, (long) Integer.MAX_VALUE);
+                }
                 long remaining = Math.max(0L, (rangeEndInclusive + 1L) - currentOffset);
                 return (int) Math.min(remaining, (long) Integer.MAX_VALUE);
             }

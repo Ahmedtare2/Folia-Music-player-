@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type { PaperShaderElement } from '@paper-design/shaders';
 import {
     FlutedGlass,
@@ -8,6 +8,11 @@ import {
     PaperTexture,
 } from '@paper-design/shaders-react';
 import { DEFAULT_NOMAND_BACKGROUND_TUNING, type MonetBackgroundImage, type NomandBackgroundTuning, type Theme } from '../../../../types';
+import {
+    extractAssetIdFromCoverUrl,
+    getCachedLocalCoverObjectUrl,
+    resolveLocalCoverObjectUrl,
+} from '../../../../services/localCoverRuntime';
 import { AMBIENT_BACKGROUND_DPR_SCALE, AMBIENT_BACKGROUND_MAX_DIMENSION_PX } from '../../../../utils/mobileVisualizerBudget';
 import {
     getLensDistortionOverscan,
@@ -22,7 +27,7 @@ import { PAPER_SHADER_CONTEXT_ATTRIBUTES } from '../../../../utils/paperShaderCo
 
 // src/components/visualizer/backgrounds/nomand/NomandBackgroundLayer.tsx
 // Renders the selected Paper image shader with the current theme palette at a reduced
-// ambient resolution (0.30x DPR / max 384x384) with smooth bilinear CSS upscaling.
+// ambient resolution (0.30x DPR / max 384x384) with smooth bilinear GPU upscaling.
 
 interface NomandBackgroundLayerProps {
     coverUrl?: string | null;
@@ -74,8 +79,53 @@ const NomandBackgroundLayer: React.FC<NomandBackgroundLayerProps> = ({
     isDaylight,
 }) => {
     const tuning = { ...DEFAULT_NOMAND_BACKGROUND_TUNING, ...tuningOverride };
-    const sourceUrl = resolveNomandSourceUrl(coverUrl, monetBackgroundImage, tuning);
+    const rawSourceUrl = resolveNomandSourceUrl(coverUrl, monetBackgroundImage, tuning);
+    const [resolvedSourceUrl, setResolvedSourceUrl] = useState<string | null>(() => (
+        rawSourceUrl ? (getCachedLocalCoverObjectUrl(rawSourceUrl) ?? rawSourceUrl) : null
+    ));
+    const [coverExtractTick, setCoverExtractTick] = useState(0);
     const shaderRef = useRef<PaperShaderElement | null>(null);
+
+    useEffect(() => {
+        if (typeof window === 'undefined' || !rawSourceUrl) return undefined;
+        const targetAssetId = extractAssetIdFromCoverUrl(rawSourceUrl);
+        if (!targetAssetId) return undefined;
+        const onExtracted = (event: Event) => {
+            const detail = (event as CustomEvent<{ assetId?: string }>).detail;
+            if (!detail?.assetId || detail.assetId === targetAssetId) {
+                setCoverExtractTick(t => t + 1);
+            }
+        };
+        window.addEventListener('folia:local-cover-extracted', onExtracted);
+        return () => window.removeEventListener('folia:local-cover-extracted', onExtracted);
+    }, [rawSourceUrl]);
+
+    useEffect(() => {
+        if (!rawSourceUrl) {
+            setResolvedSourceUrl(null);
+            return undefined;
+        }
+        const cached = getCachedLocalCoverObjectUrl(rawSourceUrl);
+        if (cached) {
+            setResolvedSourceUrl(cached);
+            return undefined;
+        }
+        setResolvedSourceUrl(rawSourceUrl);
+        if (!extractAssetIdFromCoverUrl(rawSourceUrl)) {
+            return undefined;
+        }
+        let cancelled = false;
+        void resolveLocalCoverObjectUrl(rawSourceUrl).then((blobUrl) => {
+            if (!cancelled && blobUrl) {
+                setResolvedSourceUrl(blobUrl);
+            }
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [rawSourceUrl, coverExtractTick]);
+
+    const sourceUrl = resolvedSourceUrl || rawSourceUrl;
     useShaderDrawn(shaderRef, sourceUrl ? `${sourceUrl}:${tuning.effect}` : null);
 
     if (!sourceUrl) {
@@ -98,7 +148,13 @@ const NomandBackgroundLayer: React.FC<NomandBackgroundLayerProps> = ({
             minPixelRatio: AMBIENT_BACKGROUND_DPR_SCALE,
             maxPixelCount: NOMAND_MAX_SHADER_PIXELS,
             webGlContextAttributes: PAPER_SHADER_CONTEXT_ATTRIBUTES,
-            style: { width: '100%', height: '100%', imageRendering: 'auto' as const },
+            style: {
+                width: '100%',
+                height: '100%',
+                imageRendering: 'auto' as const,
+                transform: 'translate3d(0, 0, 0)',
+                backfaceVisibility: 'hidden' as const,
+            },
         };
 
         switch (tuning.effect) {
@@ -190,7 +246,13 @@ const NomandBackgroundLayer: React.FC<NomandBackgroundLayerProps> = ({
     return (
         <div
             className="absolute inset-0 z-0 overflow-hidden"
-            style={{ backgroundColor: theme.backgroundColor, pointerEvents: 'none' }}
+            style={{
+                backgroundColor: theme.backgroundColor,
+                pointerEvents: 'none',
+                contain: 'layout paint style',
+                transform: 'translate3d(0, 0, 0)',
+                backfaceVisibility: 'hidden',
+            }}
         >
             {renderShader()}
             {tuning.overlayEnabled && tuning.overlayOpacity > 0 && (

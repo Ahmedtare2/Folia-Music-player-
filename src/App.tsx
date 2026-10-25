@@ -2064,22 +2064,32 @@ export default function App() {
                 timestampMs: Date.now(),
                 recoveredOnce: false,
             };
+            if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+                void audioContextRef.current.resume().catch(() => {});
+            }
             element.currentTime = targetTime;
             if (wasPlaying) {
                 setPlayerState(PlayerState.PLAYING);
             }
-            if (element.paused && (wasPlaying || shouldAutoPlay.current)) {
-                setPlayerState(PlayerState.PLAYING);
-                const playPromise = element.play();
-                if (playPromise !== undefined) {
-                    playPromise.catch((err: unknown) => {
-                        const errName = (err as { name?: string })?.name;
-                        if (errName === 'AbortError') {
-                            shouldAutoPlay.current = true;
-                        }
-                    });
+            const ensurePlayingAfterSeek = () => {
+                if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+                    void audioContextRef.current.resume().catch(() => {});
                 }
-            }
+                if (element.paused && !element.ended && !element.error && (wasPlaying || shouldAutoPlay.current)) {
+                    setPlayerState(PlayerState.PLAYING);
+                    const playPromise = element.play();
+                    if (playPromise !== undefined) {
+                        playPromise.catch((err: unknown) => {
+                            const errName = (err as { name?: string })?.name;
+                            if (errName === 'AbortError') {
+                                shouldAutoPlay.current = true;
+                            }
+                        });
+                    }
+                }
+            };
+            ensurePlayingAfterSeek();
+            window.setTimeout(ensurePlayingAfterSeek, 120);
             void publishStagePlayerPlaybackUpdate();
         }
     }, [currentTime, duration, playerState, publishStagePlayerPlaybackUpdate]);
@@ -2164,14 +2174,13 @@ export default function App() {
 
     useEffect(() => {
         if (isMobileShellActive || !hasAndroidNativeVisualizerBridge()) return;
-        const visible = Boolean(isActivityVisible && isDocumentVisible && currentView === 'player');
-        const isPlayingNow = playerState === PlayerState.PLAYING;
-        const vsyncDivider: 1 | 2 = 2;
+        // WebView's own GPU-accelerated VisualizerBackgroundRenderer renders all original Folia
+        // background styles (Common, Latent, Monet, Sora, Nomand), so keep the native surface paused.
         void setAndroidNativeVisualizerState({
-            enabled: currentView === 'player',
-            visible,
-            fps: (visible && isPlayingNow) ? Math.max(15, Math.round(displayRefreshRateHz / vsyncDivider)) : 0,
-            vsyncDivider,
+            enabled: false,
+            visible: false,
+            fps: 0,
+            vsyncDivider: 2,
             dim: 0.24,
         });
     }, [currentView, displayRefreshRateHz, isActivityVisible, isDocumentVisible, isMobileShellActive, playerState]);
@@ -2603,6 +2612,14 @@ export default function App() {
                 // Ignore stale queued pause events if playback has already resumed on this element.
                 if (!e.currentTarget.paused) return;
                 if (e.currentTarget.error) return;
+                // Ignore transient internal media decoder pause emitted during byte-range seeking.
+                const seekIntent = lastSeekIntentRef.current;
+                if (
+                    e.currentTarget.seeking
+                    || (seekIntent && seekIntent.wasPlaying && Date.now() - seekIntent.timestampMs < 850)
+                ) {
+                    return;
+                }
                 shouldAutoPlay.current = false;
                 if (!e.currentTarget.ended) {
                     setPlayerState(PlayerState.PAUSED);
@@ -2739,6 +2756,11 @@ export default function App() {
                         const resumeTarget = seekIntent.timeSec > 0 ? seekIntent.timeSec : audioElement.currentTime;
                         pendingResumeTimeRef.current = resumeTarget;
                         shouldAutoPlay.current = true;
+                        if (isAndroidSafStreamUrl(audioSrc) && !audioSrc.includes("transcode=wav")) {
+                            const wavStreamUrl = `${audioSrc}${audioSrc.includes("?") ? "&" : "?"}transcode=wav`;
+                            setAudioSrc(wavStreamUrl);
+                            return;
+                        }
                         audioElement.load();
                         void audioElement.play().then(() => {
                             setPlayerState(PlayerState.PLAYING);
@@ -2878,18 +2900,35 @@ export default function App() {
                     return;
                 }
 
-                // For local songs: if an Android SAF stream URL failed once (e.g., a FLAC header needing repairFlacMetadata),
-                // attempt one in-place fallback to a repaired Blob URL on the SAME track before reporting an error.
+                // For local songs: if an Android SAF stream URL failed (e.g., an ALAC/AIFF/WMA file or container needing
+                // native on-the-fly PCM WAV transcoding or FLAC header repair), first try native &transcode=wav streaming,
+                // then fall back to a repaired Blob URL on the SAME track before reporting an error.
                 if (currentSong && isLocalPlaybackSong(currentSong)) {
                     const localSongId = currentSong.localRef.songId;
                     const localRecord = localSongs.find(item => item.id === localSongId);
+                    const resumeAtSec = Math.max(
+                        0,
+                        audioElement.currentTime || currentTime.get() || pendingResumeTimeRef.current || 0,
+                    );
+                    if (
+                        localRecord
+                        && isAndroidSafStreamUrl(failedSrc)
+                        && !failedSrc.includes("transcode=wav")
+                        && lastAudioRecoverySourceRef.current !== `${failedSrc}#wav`
+                    ) {
+                        lastAudioRecoverySourceRef.current = `${failedSrc}#wav`;
+                        const wavStreamUrl = `${failedSrc}${failedSrc.includes("?") ? "&" : "?"}transcode=wav`;
+                        pendingResumeTimeRef.current = resumeAtSec;
+                        shouldAutoPlay.current = true;
+                        setAudioSrc(wavStreamUrl);
+                        return;
+                    }
                     if (
                         localRecord
                         && isAndroidSafStreamUrl(failedSrc)
                         && lastAudioRecoverySourceRef.current !== failedSrc
                     ) {
                         lastAudioRecoverySourceRef.current = failedSrc;
-                        const resumeAtSec = Math.max(0, audioElement.currentTime || currentTime.get());
                         void (async () => {
                             try {
                                 const file = await getFileFromLocalSong(localRecord);

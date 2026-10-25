@@ -1,19 +1,21 @@
 import type { ActiveLocalLyricsSource, LocalLyricsPriority, LocalSong, LyricData } from '../../types';
 import { LyricParserFactory } from './LyricParserFactory';
-import { hasKnownGoodWordByWordLocalLyric } from './lyricAutoMatchState';
+import { hasKnownGoodWordByWordLocalLyric, hasTimedLocalOrEmbeddedLyric } from './lyricAutoMatchState';
 import {
     clearPersistentDiskCacheForTests,
     computeParsedLyricsContentDigest,
     isPreSegmentedLyricsReady,
+    readOfflineSavedLyricsForSong,
     readPreParsedLyricsFromDisk,
+    writeOfflineSavedLyricsForSong,
     writePreParsedLyricsToDisk,
 } from '../../services/persistentDiskCacheService';
 
 // src/utils/lyrics/localSongLyrics.ts
 // Resolves the lyric payload and its actual source from one local-song snapshot, caching parsed
 // and pre-segmented TTML/LRC/VTT/QRC timing trees in memory and on persistent internal disk
-// (context.getFilesDir()/media_cache/lyrics/) so track switches and subsequent plays load
-// ready-to-render lyrics with zero XML/TTML parsing or Jieba/ICU segmentation overhead.
+// (context.getFilesDir()/media_cache/lyrics/) so track switches and offline playback load
+// ready-to-render lyrics with zero XML/TTML parsing or network requirement.
 
 export type ResolvedLocalSongLyrics = {
     lyrics: LyricData | null;
@@ -84,14 +86,20 @@ export const selectLocalSongLyricsSource = (
         if (hasEmbedded) return 'embedded';
     }
 
-    // 2. When the song has local or embedded LRC lyrics, show them first and only upgrade to
-    // online matchedLyrics if a better TTML / word-by-word lyric was matched (or priority === 'online').
+    // 2. When the song has local or embedded non-TTML lyrics:
+    //    - Upgrade to online matchedLyrics whenever online matchedLyrics is TTML / word-by-word,
+    //      or when embedded/local text is untimed plain text, or when priority === 'online'.
     if (hasLocal || hasEmbedded) {
+        const hasTimedLocalOrEmbedded = hasTimedLocalOrEmbeddedLyric(song);
         const onlineIsBetterTtmlOrWord = Boolean(
             song.matchedLyrics
             && (song.matchedLyrics.isWordByWord || song.matchedLyrics.ttml)
         );
-        if (onlineIsBetterTtmlOrWord || (priority === 'online' && song.matchedLyrics)) {
+        if (
+            onlineIsBetterTtmlOrWord
+            || (!hasTimedLocalOrEmbedded && Boolean(song.matchedLyrics))
+            || (priority === 'online' && Boolean(song.matchedLyrics))
+        ) {
             return 'online';
         }
         if (hasLocal) return 'local';
@@ -102,15 +110,23 @@ export const selectLocalSongLyricsSource = (
     return null;
 };
 
-/** Parses the payload selected by the explicit source or current automatic priority. */
+/** Parses the payload selected by the explicit source or current automatic priority, recovering offline-saved online lyrics if needed. */
 export const resolveLocalSongLyrics = async (
     song: LocalSong,
     priority: LocalLyricsPriority,
 ): Promise<ResolvedLocalSongLyrics> => {
+    if (!song.matchedLyrics && !song.markedPureMusic && !song.matchedIsPureMusic) {
+        const recoveredOffline = await readOfflineSavedLyricsForSong(song.id, song.fileSignature);
+        if (recoveredOffline) {
+            song.matchedLyrics = recoveredOffline;
+        }
+    }
+
     const source = selectLocalSongLyricsSource(song, priority);
     if (source === 'online') {
         const matched = song.matchedLyrics ?? null;
         if (matched) {
+            void writeOfflineSavedLyricsForSong(song.id, song.fileSignature, matched);
             const digest = computeParsedLyricsContentDigest(matched);
             if (digest) {
                 const diskCached = await readPreParsedLyricsFromDisk(`matched_${digest}`);

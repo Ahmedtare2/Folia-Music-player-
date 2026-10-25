@@ -6,13 +6,14 @@ import {
   readPersistedLibraryIndex,
   removePersistedLibraryIndexSongs,
   updatePersistedLibraryIndexSongs,
+  writeOfflineSavedLyricsForSong,
   writePersistedLibraryIndex,
 } from '../persistentDiskCacheService';
 
 // src/services/repositories/localSongRepository.ts
-// Stores sanitized local-song records while retaining the existing read-time lyric migrations
-// and mirroring the scanned SAF library metadata index to persistent internal disk cache
-// (context.getFilesDir()/media_cache/index/) for instant app launch.
+// Stores sanitized local-song records while retaining read-time lyric migrations,
+// protecting online-matched lyrics from being overwritten by stale background hydration
+// or cover-extraction saves, and mirroring the library metadata index to persistent disk cache.
 
 export const sanitizeLocalSongForStorage = (song: LocalSong): LocalSong => {
   const normalizedSong = migrateMatchedLyricsCarrierRenderHints(song).value ?? song;
@@ -20,6 +21,28 @@ export const sanitizeLocalSongForStorage = (song: LocalSong): LocalSong => {
     embeddedCover?: unknown;
   };
   return persistedSong;
+};
+
+const mergePreservedMatchedLyrics = (incoming: LocalSong, existing?: LocalSong): LocalSong => {
+  if (!existing || incoming.markedPureMusic) return incoming;
+  if (incoming.matchedLyrics !== undefined) return incoming;
+  if (!existing.matchedLyrics && !existing.matchedIsPureMusic && !existing.onlineMetadata) {
+    return incoming;
+  }
+  return {
+    ...incoming,
+    matchedLyrics: existing.matchedLyrics,
+    matchedLyricsSongId: incoming.matchedLyricsSongId ?? existing.matchedLyricsSongId,
+    matchedLyricsSource: incoming.matchedLyricsSource ?? existing.matchedLyricsSource,
+    matchedLyricsProviderPlatform: incoming.matchedLyricsProviderPlatform ?? existing.matchedLyricsProviderPlatform,
+    matchedIsPureMusic: incoming.matchedIsPureMusic ?? existing.matchedIsPureMusic,
+    matchedLyricsFetchedAt: incoming.matchedLyricsFetchedAt ?? existing.matchedLyricsFetchedAt,
+    matchedLyricsQuerySignature: incoming.matchedLyricsQuerySignature ?? existing.matchedLyricsQuerySignature,
+    onlineMetadata: incoming.onlineMetadata ?? existing.onlineMetadata,
+    useOnlineCover: incoming.useOnlineCover ?? existing.useOnlineCover,
+    lyricsSource: incoming.lyricsSource ?? existing.lyricsSource,
+    hasManualLyricSelection: incoming.hasManualLyricSelection || existing.hasManualLyricSelection,
+  };
 };
 
 const normalizeLocalSongFromStorage = (song: LocalSong): { value: LocalSong; changed: boolean } => {
@@ -31,15 +54,48 @@ const normalizeLocalSongFromStorage = (song: LocalSong): { value: LocalSong; cha
 };
 
 export const putLocalSong = async (song: LocalSong): Promise<void> => {
-  const sanitized = sanitizeLocalSongForStorage(song);
+  const existing = await appDatabase.local_music.get(song.id).catch(() => undefined);
+  const merged = mergePreservedMatchedLyrics(song, existing);
+  if (merged.matchedLyrics && !song.matchedLyrics) {
+    song.matchedLyrics = merged.matchedLyrics;
+    song.matchedLyricsSongId = merged.matchedLyricsSongId;
+    song.matchedLyricsSource = merged.matchedLyricsSource;
+    song.matchedLyricsProviderPlatform = merged.matchedLyricsProviderPlatform;
+    song.matchedIsPureMusic = merged.matchedIsPureMusic;
+  }
+  const sanitized = sanitizeLocalSongForStorage(merged);
   await appDatabase.local_music.put(sanitized);
+  if (sanitized.matchedLyrics) {
+    void writeOfflineSavedLyricsForSong(sanitized.id, sanitized.fileSignature, sanitized.matchedLyrics);
+  }
   void updatePersistedLibraryIndexSongs([sanitized]);
 };
 
 export const putLocalSongs = async (songs: LocalSong[]): Promise<void> => {
   if (songs.length > 0) {
-    const sanitized = songs.map(sanitizeLocalSongForStorage);
+    const ids = songs.map(s => s.id);
+    const existingList = await appDatabase.local_music.bulkGet(ids).catch(() => []);
+    const existingById = new Map<string, LocalSong>();
+    for (const item of existingList) {
+      if (item) existingById.set(item.id, item);
+    }
+    const sanitized = songs.map((song) => {
+      const merged = mergePreservedMatchedLyrics(song, existingById.get(song.id));
+      if (merged.matchedLyrics && !song.matchedLyrics) {
+        song.matchedLyrics = merged.matchedLyrics;
+        song.matchedLyricsSongId = merged.matchedLyricsSongId;
+        song.matchedLyricsSource = merged.matchedLyricsSource;
+        song.matchedLyricsProviderPlatform = merged.matchedLyricsProviderPlatform;
+        song.matchedIsPureMusic = merged.matchedIsPureMusic;
+      }
+      return sanitizeLocalSongForStorage(merged);
+    });
     await appDatabase.local_music.bulkPut(sanitized);
+    for (const s of sanitized) {
+      if (s.matchedLyrics) {
+        void writeOfflineSavedLyricsForSong(s.id, s.fileSignature, s.matchedLyrics);
+      }
+    }
     void updatePersistedLibraryIndexSongs(sanitized);
   }
 };

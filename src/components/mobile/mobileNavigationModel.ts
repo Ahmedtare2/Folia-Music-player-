@@ -193,18 +193,22 @@ export const resolveLocalSongCoverThumb = (song: LocalSong, size = 512): string 
 };
 
 export const resolveLocalSongArtistText = (song: LocalSong, unknownArtistLabel = 'Unknown Artist'): string => {
+    const importedNames = (song.importedMetadata?.artistNames || []).filter(Boolean);
+    const onlineNames = (song.onlineMetadata?.artists?.map(a => a.name) || []).filter(Boolean);
     const names = song.titleOrigin === 'import'
-        ? song.importedMetadata.artistNames
-        : (song.onlineMetadata?.artists?.map(a => a.name) || song.importedMetadata.artistNames);
-    const joined = (names || []).filter(Boolean).join(', ').trim();
-    return joined || unknownArtistLabel;
+        ? (importedNames.length > 0 ? importedNames : onlineNames)
+        : (onlineNames.length > 0 ? onlineNames : importedNames);
+    const joined = names.join(', ').trim();
+    return joined || song.albumArtist?.trim() || unknownArtistLabel;
 };
 
 export const resolveLocalSongAlbumText = (song: LocalSong, unknownAlbumLabel = 'Unknown Album'): string => {
+    const importedAlbum = (song.importedMetadata?.albumName || '').trim();
+    const onlineAlbum = (song.onlineMetadata?.album?.name || '').trim();
     const album = song.titleOrigin === 'import'
-        ? song.importedMetadata.albumName
-        : (song.onlineMetadata?.album?.name || song.importedMetadata.albumName);
-    return (album || '').trim() || unknownAlbumLabel;
+        ? (importedAlbum || onlineAlbum)
+        : (onlineAlbum || importedAlbum);
+    return album || unknownAlbumLabel;
 };
 
 export const filterAndSortLocalSongs = (

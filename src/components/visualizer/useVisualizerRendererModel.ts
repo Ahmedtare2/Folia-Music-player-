@@ -31,7 +31,6 @@ import { useShownTheme } from './useShownTheme';
 import { NO_LYRIC_LINES } from '../../utils/lyrics/noLyricLines';
 import { selectLibraryPlayerBackdrop, useLibraryPlayerOcclusionStore } from '../../stores/useLibraryPlayerOcclusionStore';
 import { resolveVisualizerShowText } from '../app/presentation/playerVisualizerBackdrop';
-import { hasAndroidNativeVisualizerBridge } from '../../services/android/foliaAndroidBridge';
 
 // src/components/visualizer/useVisualizerRendererModel.ts
 //
@@ -139,6 +138,7 @@ export const useVisualizerRendererModel = ({
     }), [backgroundConfig, isPlayerPageTransparent, disableGeometricBackground, isSettingsSubviewOpen]);
 
     const mode: VisualizerMode = resolveMainWindowVisualizerMode(visualizerMode, isObsBrowserSourceRendering, obsKeepMainWindowAnimation);
+    const isInActivePlayerSurface = currentView === 'player' || isMobileVisualizerActive;
 
     return {
         mode,
@@ -159,12 +159,12 @@ export const useVisualizerRendererModel = ({
         seed,
         songHandoff,
         staticMode,
-        backgroundStaticMode: shouldPauseVisualizerBackground
+        backgroundStaticMode: (shouldPauseVisualizerBackground && !isMobileVisualizerActive)
             || suspendAnimation
             || (
                 background.mode === 'latent'
                 && background.latent?.tuning?.dynamicOnlyInPlayer
-                && currentView !== 'player'
+                && !isInActivePlayerSurface
             ),
         paused: displayPlayerState !== PlayerState.PLAYING || suspendAnimation,
         visualizerOpacity,

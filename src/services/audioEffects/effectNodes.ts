@@ -1,5 +1,17 @@
 // src/services/audioEffects/effectNodes.ts
 // Creates and wires the always-on part of the effect chain; every stage stays neutral until settings ask for it.
+//
+// Poweramp-style clean bass & post-EQ protection:
+// 1. Sub-sonic high-pass filter (2nd-order Butterworth, Q = 0.7071 at 22 Hz):
+//    Strips inaudible DC offset and < 22 Hz sub-sonic rumble before saturation/dynamics so ultra-low
+//    excursion does not waste headroom or modulate the waveshaper/limiter.
+// 2. Post-EQ Soft-Knee Brickwall Limiter (DynamicsCompressorNode):
+//    Even when Dynamic Punch is at 0%, the compressor acts as a transparent safety limiter
+//    (threshold = -0.8 dBFS, knee = 3.0 dB, ratio = 16:1, attack = 2 ms, release = 80 ms)
+//    so heavy sub-bass transients never digitally clip past 0 dBFS.
+
+export const SUBSONIC_BUTTERWORTH_Q = Math.SQRT1_2; // 0.70710678...
+export const SUBSONIC_CUTOFF_HZ = 22;
 
 export type AudioEffectNodes = {
     highpass: BiquadFilterNode;
@@ -24,16 +36,18 @@ export type AudioEffectNodes = {
 
 export const WOW_BASE_DELAY_SECONDS = 0.012;
 
-// Allocates every persistent node with neutral defaults.
+// Allocates every persistent node with neutral defaults + sub-sonic rumble protection + transparent safety limiter.
 export const createAudioEffectNodes = (context: AudioContext): AudioEffectNodes => {
     const highpass = context.createBiquadFilter();
     highpass.type = 'highpass';
-    highpass.Q.value = 0.7;
-    highpass.frequency.value = 20;
+    // 2nd-order Butterworth Q (0.7071) at 22 Hz removes DC offset and inaudible sub-sonic rumble
+    // with maximally flat passband and zero resonant bump at the cutoff frequency.
+    highpass.Q.value = SUBSONIC_BUTTERWORTH_Q;
+    highpass.frequency.value = SUBSONIC_CUTOFF_HZ;
 
     const lowpass = context.createBiquadFilter();
     lowpass.type = 'lowpass';
-    lowpass.Q.value = 0.7;
+    lowpass.Q.value = SUBSONIC_BUTTERWORTH_Q;
     lowpass.frequency.value = Math.min(20000, context.sampleRate * 0.475);
 
     const drive = context.createWaveShaper();
@@ -52,12 +66,14 @@ export const createAudioEffectNodes = (context: AudioContext): AudioEffectNodes 
     stereoInput.channelCountMode = 'explicit';
     stereoInput.channelInterpretation = 'speakers';
 
+    // Default Post-EQ Soft-Knee Brickwall Limiter configuration:
+    // Catches peaks above -0.8 dBFS with fast 2ms attack and smooth 80ms release at 16:1 ratio.
     const compressor = context.createDynamicsCompressor();
-    compressor.threshold.value = 0;
-    compressor.knee.value = 30;
-    compressor.ratio.value = 1;
-    compressor.attack.value = 0.008;
-    compressor.release.value = 0.18;
+    compressor.threshold.value = -0.8;
+    compressor.knee.value = 3;
+    compressor.ratio.value = 16;
+    compressor.attack.value = 0.002;
+    compressor.release.value = 0.08;
 
     const createGain = (value: number) => {
         const node = context.createGain();

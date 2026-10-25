@@ -177,3 +177,15 @@ export const hasKnownGoodWordByWordLocalLyric = (song: LocalSong): boolean => {
     }
     return false;
 };
+
+export const hasTimedLocalOrEmbeddedLyric = (song: LocalSong): boolean => {
+    if (hasKnownGoodWordByWordLocalLyric(song)) return true;
+    const isTimedText = (text?: string | null): boolean => {
+        if (!text) return false;
+        return /\[\d{1,3}:\d{2}(?:[.:]\d{1,3})?\]/.test(text)
+            || /\d{2}:\d{2}:\d{2}[.,]\d{3}\s*-->/.test(text)
+            || /<\s*p\b[^>]*\bbegin\s*=/i.test(text);
+    };
+    return (Boolean(song.hasLocalLyrics) && isTimedText(song.localLyricsContent))
+        || (Boolean(song.hasEmbeddedLyrics) && isTimedText(song.embeddedLyricsContent));
+};
