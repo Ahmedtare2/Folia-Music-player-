@@ -76,7 +76,7 @@ export const createAudioEffectChain = ({
             lastCrush = active.crush;
         }
 
-        wowBranch.apply(active.wow);
+        wowBranch.set(active.wow);
 
         // Mid/side width matrix: L' = (1+w)/2 * L + (1-w)/2 * R, R' = (1-w)/2 * L + (1+w)/2 * R.
         // At width = 1 the cross terms vanish (identity); at 0 both channels get (L+R)/2 (mono).
@@ -101,8 +101,7 @@ export const createAudioEffectChain = ({
             rampParam(context, nodes.compressor.ratio, 12 + active.punch * 8);
             rampParam(context, nodes.compressor.attack, 0.002 + active.punch * 0.003);
             rampParam(context, nodes.compressor.release, 0.08 + active.punch * 0.04);
-            // Keep makeup unity (1.0) or very slight compensation capped below 0 dB ceiling
-            // so compressed bass transients never get pushed back above 0 dBFS.
+            // Keep makeup unity (1.0) so compressed bass transients never get pushed back above 0 dBFS.
             rampParam(context, nodes.makeup.gain, dbToLinear(0));
         } else {
             rampParam(context, nodes.compressor.threshold, -0.8);
@@ -113,8 +112,8 @@ export const createAudioEffectChain = ({
             rampParam(context, nodes.makeup.gain, 1);
         }
 
-        reverbBranch.apply(active.space);
-        noiseBranch.apply(active.noise);
+        reverbBranch.set(active.space);
+        noiseBranch.set(active.noise);
     };
 
     apply(effects, enabled);
