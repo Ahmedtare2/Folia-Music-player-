@@ -11,6 +11,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.ServiceInfo;
 import android.media.AudioManager;
+import android.media.audiofx.DynamicsProcessing;
 import android.media.MediaMetadata;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
@@ -139,6 +140,9 @@ public class FoliaPlaybackService extends Service {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     @Nullable
     private ExoPlayer exoPlayer = null;
+    @Nullable
+    private DynamicsProcessing dynamicsProcessing = null;
+    private int boundDynamicsAudioSessionId = C.AUDIO_SESSION_ID_UNSET;
     @Nullable
     private androidx.media3.session.MediaSession media3Session = null;
     @Nullable
@@ -350,7 +354,7 @@ public class FoliaPlaybackService extends Service {
     private void initExoPlayerAndMediaSessions() {
         DefaultRenderersFactory renderersFactory = new DefaultRenderersFactory(this)
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
-            .setEnableAudioFloatOutput(false);
+            .setEnableAudioFloatOutput(true);
 
         AudioAttributes audioAttributes = new AudioAttributes.Builder()
             .setUsage(C.USAGE_MEDIA)
@@ -364,6 +368,11 @@ public class FoliaPlaybackService extends Service {
             .build();
 
         exoPlayer.addListener(new Player.Listener() {
+            @Override
+            public void onAudioSessionIdChanged(int audioSessionId) {
+                attachHardwareDynamicsLimiter(audioSessionId);
+            }
+
             @Override
             public void onIsPlayingChanged(boolean isPlaying) {
                 if (!nativeExoModeActive) return;
@@ -425,6 +434,8 @@ public class FoliaPlaybackService extends Service {
                 captureAndEmitClockAnchor("error", true);
             }
         });
+
+        attachHardwareDynamicsLimiter(exoPlayer.getAudioSessionId());
 
         Intent launchIntent = new Intent(this, MainActivity.class);
         launchIntent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
@@ -672,6 +683,7 @@ public class FoliaPlaybackService extends Service {
 
     private void setVolumeInternal(float volume) {
         currentVolume = Math.max(0f, Math.min(1f, volume));
+        releaseHardwareDynamicsLimiter();
         if (exoPlayer != null) {
             exoPlayer.setVolume(currentVolume);
         }
@@ -1051,6 +1063,69 @@ public class FoliaPlaybackService extends Service {
                 // Ignore under-locked exception.
             }
         }
+    }
+
+
+    private void attachHardwareDynamicsLimiter(int audioSessionId) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            return;
+        }
+        if (audioSessionId == C.AUDIO_SESSION_ID_UNSET || audioSessionId <= 0) {
+            return;
+        }
+        if (dynamicsProcessing != null && boundDynamicsAudioSessionId == audioSessionId) {
+            return;
+        }
+        releaseHardwareDynamicsLimiter();
+        try {
+            DynamicsProcessing.Config.Builder configBuilder = new DynamicsProcessing.Config.Builder(
+                DynamicsProcessing.VARIANT_FAVOR_FREQUENCY_RESOLUTION,
+                2,
+                true,
+                10,
+                false,
+                0,
+                false,
+                0,
+                true
+            );
+            // Configure Clean Post-EQ Soft-Knee Limiter (2ms attack, 80ms release, 16:1 ratio, -0.8 dBFS ceiling, 0 dB postGain)
+            DynamicsProcessing.Limiter limiter = new DynamicsProcessing.Limiter(
+                true,
+                true,
+                0,
+                2.0f,
+                80.0f,
+                16.0f,
+                -0.8f,
+                0.0f
+            );
+            configBuilder.setLimiterAllChannelsTo(limiter);
+            // Apply subtle PreEQ inputGain headroom margin (-1.5 dB) so hardware bass transients never clip
+            configBuilder.setInputGainAllChannelsTo(-1.5f);
+
+            DynamicsProcessing dp = new DynamicsProcessing(0, audioSessionId, configBuilder.build());
+            dp.setEnabled(true);
+            dynamicsProcessing = dp;
+            boundDynamicsAudioSessionId = audioSessionId;
+        } catch (Throwable ignored) {
+            // Safe fallback on devices without DynamicsProcessing effect engine support
+            dynamicsProcessing = null;
+            boundDynamicsAudioSessionId = C.AUDIO_SESSION_ID_UNSET;
+        }
+    }
+
+    private void releaseHardwareDynamicsLimiter() {
+        if (dynamicsProcessing != null) {
+            try {
+                dynamicsProcessing.setEnabled(false);
+            } catch (Throwable ignored) {}
+            try {
+                dynamicsProcessing.release();
+            } catch (Throwable ignored) {}
+            dynamicsProcessing = null;
+        }
+        boundDynamicsAudioSessionId = C.AUDIO_SESSION_ID_UNSET;
     }
 
     @Override

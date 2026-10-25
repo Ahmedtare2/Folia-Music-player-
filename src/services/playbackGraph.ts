@@ -1,42 +1,41 @@
-import { connectAudioEqualizerGraph } from './audioEqualizerGraph';
+import {
+    applyEqualizerPreampHeadroom,
+    connectAudioEqualizerGraph,
+} from './audioEqualizerGraph';
 import { createAudioEffectChain, type AudioEffectChain } from './audioEffects/effectChain';
 import type { AudioEqualizerSettings } from '../utils/audioEqualizer';
+import type { MutableRefObject } from 'react';
 
 // src/services/playbackGraph.ts
-// The order the playback nodes are wired in, as one function so the order can be asserted.
+// Connects everything downstream of the automix mix point.
 //
-// Supports full DSP bypass (`setDspBypass(true)` / `bypassDsp: true`) when Chorus, EQ, Automix,
-// and Stem Separation are turned off so `mixNode` routes directly to `gainNode` without running
-// the 10-band biquad EQ cascade or the 4x-oversampled WaveShaper / Compressor / Convolver / LFO
-// effect chain on every audio quantum.
-
-type BuildPlaybackGraphParams = {
-    context: AudioContext;
-    /** Where the mix lands. Everything downstream of here is per-listener, not per-track. */
-    analyser: AnalyserNode;
-    /** Wires both automix decks into the shared mix point. Returns false if a deck is missing. */
-    connectDecks: (context: AudioContext, output: AudioNode) => boolean;
-    equalizerNodesRef: { current: BiquadFilterNode[] };
-    settings: AudioEqualizerSettings;
-    /** When true, bypasses the 10-band EQ and AudioEffectChain nodes so mixNode feeds gainNode directly. */
-    bypassDsp?: boolean;
-};
+// Signal order:
+//   decks -> mixNode -> [10-band EQ -> equalizerOutput (Preamp Headroom) -> effectChain] -> gainNode (volume) -> fadeNode (transport) -> analyser -> destination
+//   (When DSP bypass is active — i.e., Chorus/Effects, EQ, Automix, and Stem Separation are all off —
+//    mixNode routes directly into gainNode so zero WebAudio biquad/waveshaper/compressor CPU is spent.)
+//
+// The volume fader sits AFTER the effect chain, not before it. Three of the effects are absolute:
+//   - Vinyl noise is an independent buffer source mixed in at the effect chain's output. If the
+//     fader were upstream of the chain it would attenuate the music and leave the crackle untouched,
+//     so turning the volume down would raise the noise floor relative to the song; at volume 0 you
+//     would still hear crackle.
+//   - Bit crush quantizes amplitude into 2^bits steps across [-1, 1]. A quieter input simply uses
+//     fewer of those steps - halving the volume is equivalent to losing one more bit of resolution.
+//   - Punch is a compressor with a fixed threshold in dBFS. Pulling the input down moves the signal
+//     below the threshold instead of making the compressed signal quieter.
+// Putting the fader after the chain means every effect sees the normalized deck signal (with
+// automatic preamp headroom compensation applied on `equalizerOutput`), and the fader scales the
+// finished mix (music, reverb tail and vinyl noise together) on its way to the speakers.
+// The analyser stays after the fader so the visualiser reflects what is actually heard.
 
 export type PlaybackGraph = {
-    /** Playback volume. Ramped by syncOutputGain; nothing else may write it. */
     gainNode: GainNode;
-    /**
-     * Play/pause fade, unity at rest. Its own node because the volume node is rewritten by
-     * syncOutputGain on every volume, mute and track start, and the deck gains belong to automix.
-     * Owned by services/playbackFade; nothing else may write it.
-     */
     fadeNode: GainNode;
+    preampNode: GainNode;
     effectChain: AudioEffectChain;
-    /** False when a deck was missing, so automix will stay idle. Audio still flows. */
     decksConnected: boolean;
-    /** Switches between direct hardware/mix passthrough (`mixNode -> gainNode`) and full EQ+Effects DSP. */
-    setDspBypass: (bypassed: boolean) => void;
-    /** True when the 10-band EQ and AudioEffectChain DSP nodes are currently bypassed. */
+    /** Dynamically switches between direct hardware/zero-DSP bypass and the full EQ/Effects chain. */
+    setDspBypass: (bypass: boolean) => void;
     isDspBypassed: () => boolean;
 };
 
@@ -47,15 +46,24 @@ export const buildPlaybackGraph = ({
     equalizerNodesRef,
     settings,
     bypassDsp = false,
-}: BuildPlaybackGraphParams): PlaybackGraph => {
-    // The shared mix point. Both decks land here, so the equaliser and the analyser each exist
-    // once and see the sum: the tone never steps mid-blend and the visualiser draws what is
-    // actually being heard.
+}: {
+    context: AudioContext;
+    analyser: AnalyserNode;
+    connectDecks: (context: AudioContext, output: AudioNode) => boolean;
+    equalizerNodesRef: MutableRefObject<BiquadFilterNode[]>;
+    settings: AudioEqualizerSettings;
+    bypassDsp?: boolean;
+}): PlaybackGraph => {
     const mixNode = context.createGain();
-    const decksConnected = connectDecks(context, mixNode);
+    mixNode.gain.value = 1;
 
-    // Keeps a stable seam between the equalizer bands and the effect chain.
+    // `equalizerOutput` acts as the dedicated Preamp Headroom stage between the 10-band EQ
+    // cascade and the post-EQ effect/limiter chain, automatically attenuating positive EQ/Bass
+    // boosts so heavy sub-bass transients never clip the waveshaper or output stage.
     const equalizerOutput = context.createGain();
+    equalizerOutput.gain.value = 1;
+    applyEqualizerPreampHeadroom(context, equalizerOutput, settings);
+
     connectAudioEqualizerGraph({
         context,
         input: mixNode,
@@ -64,52 +72,49 @@ export const buildPlaybackGraph = ({
         settings,
     });
 
-    /**
-     * Volume, and it sits AFTER the effects rather than at the mix point where it started.
-     */
     const gainNode = context.createGain();
+    gainNode.gain.value = 1;
+
+    // Separate from gainNode so pause/resume fades never race with volume slider or track-start
+    // gain writes, which all target gainNode directly.
+    const fadeNode = context.createGain();
+    fadeNode.gain.value = 1;
+
     const effectChain = createAudioEffectChain({
         context,
         input: equalizerOutput,
         output: gainNode,
         effects: settings.effects,
-        enabled: settings.enabled,
+        enabled: settings.enabled && !bypassDsp,
     });
 
-    // After the volume so the fade multiplies whatever level the listener chose, and before the
-    // analyser so the visualiser fades with the sound.
-    const fadeNode = context.createGain();
-    gainNode.connect(fadeNode);
-
-    // The analyser stays last, so the visualiser draws what is actually being heard - including
-    // the volume the listener set.
-    fadeNode.connect(analyser);
-    analyser.connect(context.destination);
-
     let dspBypassed = false;
-    const setDspBypass = (nextBypassed: boolean) => {
-        if (dspBypassed === nextBypassed) return;
-        dspBypassed = nextBypassed;
-        const eqHead = equalizerNodesRef.current[0];
-        const eqTail = equalizerNodesRef.current[equalizerNodesRef.current.length - 1];
-        if (dspBypassed) {
-            if (eqHead) {
-                try { mixNode.disconnect(eqHead); } catch { /* ignore */ }
+    const firstEqNode = () => equalizerNodesRef.current[0] ?? null;
+
+    const setDspBypass = (shouldBypass: boolean) => {
+        const eqEntry = firstEqNode();
+        if (!eqEntry) {
+            return;
+        }
+        if (shouldBypass && !dspBypassed) {
+            try {
+                mixNode.disconnect(eqEntry);
+            } catch {
+                // Ignore if already disconnected
             }
-            if (eqTail) {
-                try { eqTail.disconnect(equalizerOutput); } catch { /* ignore */ }
-            }
-            effectChain.setBypassed(true);
+            effectChain.apply(settings.effects, false);
             mixNode.connect(gainNode);
-        } else {
-            try { mixNode.disconnect(gainNode); } catch { /* ignore */ }
-            if (eqHead) {
-                mixNode.connect(eqHead);
+            dspBypassed = true;
+        } else if (!shouldBypass && dspBypassed) {
+            try {
+                mixNode.disconnect(gainNode);
+            } catch {
+                // Ignore if already disconnected
             }
-            if (eqTail) {
-                eqTail.connect(equalizerOutput);
-            }
-            effectChain.setBypassed(false);
+            mixNode.connect(eqEntry);
+            applyEqualizerPreampHeadroom(context, equalizerOutput, settings);
+            effectChain.apply(settings.effects, settings.enabled);
+            dspBypassed = false;
         }
     };
 
@@ -117,15 +122,16 @@ export const buildPlaybackGraph = ({
         setDspBypass(true);
     }
 
-    console.log(
-        '[AudioContext] graph: decks -> mix -> equaliser -> effects -> volume -> fade -> analyser -> out'
-        + ` (equaliser ${settings.enabled ? 'on' : 'flat'}, dspBypass ${dspBypassed ? 'on' : 'off'},`
-        + ` noise ${settings.effects.noise}, crush ${settings.effects.crush}, punch ${settings.effects.punch})`,
-    );
+    gainNode.connect(fadeNode);
+    fadeNode.connect(analyser);
+    analyser.connect(context.destination);
+
+    const decksConnected = connectDecks(context, mixNode);
 
     return {
         gainNode,
         fadeNode,
+        preampNode: equalizerOutput,
         effectChain,
         decksConnected,
         setDspBypass,

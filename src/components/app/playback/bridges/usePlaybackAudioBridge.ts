@@ -6,7 +6,10 @@ import type { LocalSong } from '../../../../types';
 import { isLocalPlaybackSong, resolveNavidromePlaybackCarrier } from '../../../../utils/appPlaybackGuards';
 import { calculateReplayGain } from '../../../../utils/replayGain';
 import { shouldBypassWebAudioDspGraph } from '../../../../utils/audioEqualizer';
-import { applyAudioEqualizerSettings } from '../../../../services/audioEqualizerGraph';
+import {
+    applyAudioEqualizerSettings,
+    applyEqualizerPreampHeadroom,
+} from '../../../../services/audioEqualizerGraph';
 import { type AudioEffectChain } from '../../../../services/audioEffects/effectChain';
 import { buildPlaybackGraph } from '../../../../services/playbackGraph';
 import { cachePlayedTrackAssets } from '../../../../services/playedTrackCache';
@@ -88,6 +91,7 @@ export function usePlaybackAudioBridge({
     const previousAudioSrcRef = useRef<string | null>(null);
     const replayGainLogSignatureRef = useRef<string | null>(null);
     const equalizerNodesRef = useRef<BiquadFilterNode[]>([]);
+    const preampNodeRef = useRef<GainNode | null>(null);
     const effectChainRef = useRef<ManagedEffectChainHandle | null>(null);
     const audioEqualizerSettings = useAudioSettingsStore(state => state.audioEqualizerSettings);
 
@@ -214,8 +218,9 @@ export function usePlaybackAudioBridge({
                 bypassDsp: shouldBypassDsp,
             });
             if (!builtGraph) return;
-            const { gainNode, fadeNode, effectChain, decksConnected, setDspBypass, isDspBypassed } = builtGraph;
+            const { gainNode, fadeNode, preampNode, effectChain, decksConnected, setDspBypass, isDspBypassed } = builtGraph;
             gainNodeRef.current = gainNode;
+            preampNodeRef.current = preampNode ?? null;
             // Hands the transport its own fade node; until this runs (or if setup fails) pause and
             // resume see no graph and fall back to plain element pause/play.
             registerPlaybackFadeGraph({ context: ctx, gain: fadeNode });
@@ -282,12 +287,14 @@ export function usePlaybackAudioBridge({
             return;
         }
         applyAudioEqualizerSettings(context, equalizerNodesRef.current, audioEqualizerSettings);
+        applyEqualizerPreampHeadroom(context, preampNodeRef.current, audioEqualizerSettings);
         effectChainRef.current?.apply(audioEqualizerSettings.effects, audioEqualizerSettings.enabled && !shouldBypassDsp);
     }, [audioContextRef, audioEqualizerSettings, audioRef, setupAudioAnalyzer, shouldBypassDsp]);
 
     useEffect(() => () => {
         effectChainRef.current?.dispose();
         effectChainRef.current = null;
+        preampNodeRef.current = null;
     }, []);
 
     useEffect(() => {
