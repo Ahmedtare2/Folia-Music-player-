@@ -57,9 +57,9 @@ export const buildPlaybackGraph = ({
     const mixNode = context.createGain();
     mixNode.gain.value = 1;
 
-    // `equalizerOutput` acts as the dedicated Preamp Headroom stage between the 10-band EQ
-    // cascade and the post-EQ effect/limiter chain, automatically attenuating positive EQ/Bass
-    // boosts so heavy sub-bass transients never clip the waveshaper or output stage.
+    // `equalizerOutput` acts as the dedicated, modest Preamp Headroom stage between the 10-band
+    // EQ cascade and the post-EQ effect/limiter chain, reducing global loudness loss while the
+    // compressor catches peaks that remain after positive EQ/Bass boosts.
     const equalizerOutput = context.createGain();
     equalizerOutput.gain.value = 1;
     applyEqualizerPreampHeadroom(context, equalizerOutput, settings);

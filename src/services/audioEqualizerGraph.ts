@@ -20,10 +20,8 @@ import {
 //      simultaneously, their skirts overlap in the 40 Hz - 110 Hz region. Soft cross-band
 //      de-cumulation trims redundant skirt stacking so bass remains tight and articulated.
 // 3. Automatic Preamp Headroom Compensation:
-//    - Evaluates the true composite frequency response across dense log-spaced frequencies
-//      (25 Hz - 18 kHz) plus any active post-EQ Punch/Drive boost, and computes a negative
-//      preamp input gain offset (-0.78x of peak positive boost, plus safety margin) so
-//      boosted bass transients never clip past 0 dBFS.
+//    - Evaluates the composite EQ response and applies modest partial attenuation, preserving
+//      more playback loudness while leaving the post-EQ compressor to catch residual peaks.
 
 import type { MutableRefObject } from 'react';
 
@@ -378,10 +376,8 @@ const PREAMP_PROBE_FREQUENCIES: readonly number[] = [
 ];
 
 /**
- * Automatic Preamp Headroom Compensation (Anti-Clipping):
- * Calculates the peak positive gain across the active 10-band EQ cascade (especially low-frequency
- * sub-bass/mid-bass shelf + bell accumulation) and any active Punch/Drive boost, then returns a
- * negative Preamp input gain offset (in dB, <= 0) so boosted bass transients never exceed 0 dBFS.
+ * Applies modest automatic headroom for the composite EQ response without turning every bass
+ * boost into a large full-band volume drop. The post-EQ compressor handles the remaining peaks.
  */
 export const computeEqualizerPreampGainDb = (
     settings: Pick<AudioEqualizerSettings, 'enabled' | 'gains'> & {
@@ -393,7 +389,7 @@ export const computeEqualizerPreampGainDb = (
         return 0;
     }
 
-    // 1. Evaluate the composite biquad response across the dense probe grid
+    // Base headroom on the filters' combined response, not individual sliders that overlap.
     const compositeCurve = computeEqualizerFrequencyResponseDb(settings, PREAMP_PROBE_FREQUENCIES, sampleRate);
     let maxCompositePositiveDb = 0;
     for (let i = 0; i < compositeCurve.length; i += 1) {
@@ -401,29 +397,14 @@ export const computeEqualizerPreampGainDb = (
             maxCompositePositiveDb = compositeCurve[i];
         }
     }
-
-    // 2. Also inspect raw low-frequency sliders (31 Hz, 62 Hz, 125 Hz) since bass transients carry
-    //    the highest crest energy in modern mastered tracks (often mastered to -0.1 dBFS).
-    const lowBand0 = Math.max(0, Number(settings.gains[0] ?? 0));
-    const lowBand1 = Math.max(0, Number(settings.gains[1] ?? 0));
-    const lowBand2 = Math.max(0, Number(settings.gains[2] ?? 0));
-    const lowFrequencyPeakDb = Math.max(lowBand0, lowBand1, lowBand2);
-
-    // 3. Account for extra harmonic/dynamics energy when Drive or Punch is active in the preset
-    const driveAmount = Math.max(0, Number(settings.effects?.drive ?? 0));
-    const punchAmount = Math.max(0, Number(settings.effects?.punch ?? 0));
-    const effectsBoostDb = driveAmount * 1.5 + punchAmount * 1.8;
-
-    const effectivePeakBoostDb = Math.max(maxCompositePositiveDb, lowFrequencyPeakDb) + effectsBoostDb;
-    if (effectivePeakBoostDb <= 0.1) {
+    if (maxCompositePositiveDb <= 0.1) {
         return 0;
     }
 
-    // Apply ~78%-82% negative Preamp headroom attenuation of the composite peak positive boost,
-    // leaving the remaining ~18% transient peak to be transparently caught by the post-EQ soft-knee limiter.
-    const bassWeight = lowFrequencyPeakDb > 1.5 ? 0.82 : 0.74;
-    const preampAttenuationDb = -(effectivePeakBoostDb * bassWeight);
-    return Number(Math.max(-15, Math.min(0, preampAttenuationDb)).toFixed(2));
+    // Compensate for half of the peak EQ boost, capped at 6 dB. The previous near-full
+    // compensation made moderate bass adjustments noticeably quieter across the whole mix.
+    const preampAttenuationDb = -Math.min(6, maxCompositePositiveDb * 0.5);
+    return Number(preampAttenuationDb.toFixed(2));
 };
 
 export const computeEqualizerPreampLinearGain = (

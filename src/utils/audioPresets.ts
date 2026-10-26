@@ -51,7 +51,6 @@ export const AUDIO_SOUND_PRESETS: Record<AudioSoundPresetId, AudioSoundPreset> =
         effects: withEffects({
             drive: 0.1,
             width: 1.15,
-            punch: 0.45,
         }),
     },
     vocal: {

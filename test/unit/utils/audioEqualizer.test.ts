@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
     applyAudioEqualizerSettings,
+    computeEqualizerPreampGainDb,
     computeEqualizerFrequencyResponseDb,
     connectAudioEqualizerGraph,
     getAudioEqualizerRuntimeStatus,
@@ -92,6 +93,10 @@ describe('audio equalizer model', () => {
         });
         expect(rockSettings.preset).toBe('rock');
         expect(isAudioEqualizerFlat(rockSettings)).toBe(false);
+    });
+
+    it('keeps the Bass Boost preset free of level-reducing punch compression', () => {
+        expect(AUDIO_SOUND_PRESETS.bass.effects.punch).toBe(0);
     });
 
     it('resets any preset or custom curve to Flat while preserving custom slots and enabled state', () => {
@@ -245,6 +250,44 @@ describe('audio effect model', () => {
 });
 
 describe('audio equalizer graph & measurable frequency response', () => {
+    it('does not attenuate a flat EQ or treat Drive/Punch controls as linear EQ gain', () => {
+        const flatSettings = {
+            enabled: true,
+            gains: Array(10).fill(0),
+            effects: { drive: 1, punch: 1 },
+        };
+        const boostedSettings = {
+            ...flatSettings,
+            gains: [6, 5, 3, 0, 0, 0, 0, 0, 0, 0],
+        };
+
+        expect(computeEqualizerPreampGainDb(flatSettings)).toBe(0);
+        expect(computeEqualizerPreampGainDb(boostedSettings)).toBe(
+            computeEqualizerPreampGainDb({
+                ...boostedSettings,
+                effects: { drive: 0, punch: 0 },
+            }),
+        );
+    });
+
+    it('uses moderate, bounded headroom for bass boosts instead of nearly matching the full boost', () => {
+        const bassSettings = {
+            enabled: true,
+            gains: [...AUDIO_SOUND_PRESETS.bass.gains],
+            effects: AUDIO_SOUND_PRESETS.bass.effects,
+        };
+        const bassPreampDb = computeEqualizerPreampGainDb(bassSettings);
+        const maximumPreampDb = computeEqualizerPreampGainDb({
+            enabled: true,
+            gains: Array(10).fill(12),
+        });
+
+        expect(bassPreampDb).toBeLessThan(0);
+        expect(bassPreampDb).toBeGreaterThan(-5);
+        expect(maximumPreampDb).toBeGreaterThanOrEqual(-6);
+        expect(maximumPreampDb).toBeLessThanOrEqual(0);
+    });
+
     it('connects ten filters between the existing gain and analyser nodes and reports runtime status across session changes', () => {
         const filters = AUDIO_EQUALIZER_BANDS.map(() => createFilter());
         const context = {
