@@ -38,7 +38,7 @@ const DeleteFolderConfirmModal: React.FC<DeleteFolderConfirmModalProps> = ({
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
                     exit={{ opacity: 0 }}
-                    className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-xl p-4"
+                    className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 p-4"
                     onClick={onCancel}
                 >
                     <motion.div
@@ -46,7 +46,7 @@ const DeleteFolderConfirmModal: React.FC<DeleteFolderConfirmModalProps> = ({
                         animate={{ scale: 1, opacity: 1 }}
                         exit={{ scale: 0.9, opacity: 0 }}
                         onClick={(e) => e.stopPropagation()}
-                        className={`${bgClass} border rounded-3xl max-w-md w-full p-8 shadow-2xl backdrop-blur-md`}
+                        className={`${bgClass} border rounded-3xl max-w-md w-full p-8 shadow-2xl`}
                     >
                         <button
                             onClick={onCancel}

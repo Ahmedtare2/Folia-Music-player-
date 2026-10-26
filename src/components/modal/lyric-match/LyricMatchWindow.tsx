@@ -84,7 +84,7 @@ export const LyricMatchWindow: React.FC<LyricMatchWindowProps> = ({
     const { songInfo, source, sources, query, results, isSearching, selectedResult } = search;
 
     // Dynamic theme classes
-    const bgClass = isDaylight ? 'bg-white/90 border-white/20' : 'bg-zinc-900/95 border-white/10';
+    const bgClass = isDaylight ? 'bg-white/95 border-white/20' : 'bg-zinc-900/95 border-white/10';
     const textPrimary = isDaylight ? 'text-zinc-900' : 'text-white';
     const textSecondary = isDaylight ? 'text-zinc-500' : 'text-zinc-400';
     const borderColor = isDaylight ? 'border-black/5' : 'border-white/10';
@@ -117,13 +117,13 @@ export const LyricMatchWindow: React.FC<LyricMatchWindowProps> = ({
     return (
         <div
             data-folia-keyboard-window={keepsHotkeys ? undefined : 'true'}
-            className={`fixed inset-0 ${overAllLayers ? 'z-[260]' : 'z-[250]'} bg-black/60 backdrop-blur-xl flex items-center justify-center p-3 sm:p-6`}
+            className={`fixed inset-0 ${overAllLayers ? 'z-[260]' : 'z-[250]'} bg-black/60 flex items-center justify-center p-3 sm:p-6`}
             onMouseDown={closesOnBackdropClick ? event => { isMouseDownOnOverlayRef.current = event.target === event.currentTarget; } : undefined}
             onClick={closesOnBackdropClick ? event => { if (event.target === event.currentTarget && isMouseDownOnOverlayRef.current) onClose(); } : undefined}
         >
             <div
                 data-ponder="lyric-match"
-                className={`${bgClass} border rounded-2xl max-w-5xl w-full max-h-[90dvh] sm:max-h-[82vh] flex flex-col shadow-2xl backdrop-blur-md`}
+                className={`${bgClass} border rounded-2xl max-w-5xl w-full max-h-[90dvh] sm:max-h-[82vh] flex flex-col shadow-2xl`}
                 onClick={closesOnBackdropClick ? event => event.stopPropagation() : undefined}
             >
                 {/* Header */}

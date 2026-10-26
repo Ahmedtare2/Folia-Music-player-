@@ -1884,7 +1884,7 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                     {!isKeyboardOpen && (
                         <nav
                             aria-label="Primary mobile navigation"
-                            className="flex shrink-0 items-center justify-around border-t border-white/10 bg-[#08080c]/95 px-2 pt-1.5 backdrop-blur-xl"
+                            className="flex shrink-0 items-center justify-around border-t border-white/10 bg-[#08080c]/95 px-2 pt-1.5"
                             style={{
                                 paddingBottom: bottomNavSafePadding,
                             }}
@@ -1972,7 +1972,7 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
 
             {isShellEqualizerOpen && (
                 <div
-                    className="fixed inset-0 z-[230] flex flex-col justify-end bg-black/65 backdrop-blur-sm"
+                    className="fixed inset-0 z-[230] flex flex-col justify-end bg-black/65"
                     onClick={(e) => {
                         if (e.target === e.currentTarget) setIsShellEqualizerOpen(false);
                     }}

@@ -170,8 +170,8 @@ export const StudioWindow: React.FC<StudioWindowProps> = ({
                 animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
                 transition={kitTransition('move', reduced)}
-                // The dim layer of the app's dialogs (Sheet), over a blur: the settings window lies behind.
-                className={`pointer-events-none absolute inset-0 backdrop-blur-xl ${isDaylight ? 'bg-[rgba(24,18,12,0.36)]' : 'bg-[rgba(0,0,0,0.52)]'}`}
+                // The dim layer of the app's dialogs (Sheet); the settings window lies behind.
+                className={`pointer-events-none absolute inset-0 ${isDaylight ? 'bg-[rgba(24,18,12,0.36)]' : 'bg-[rgba(0,0,0,0.52)]'}`}
             />
             <motion.div
                 ref={panelRef}

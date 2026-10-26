@@ -1972,7 +1972,7 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
                     data-testid="mobile-lyrics-tools-drawer"
                     onClick={(e) => e.stopPropagation()}
                     onTouchStart={(e) => e.stopPropagation()}
-                    className="absolute inset-x-0 bottom-0 z-30 max-h-[86dvh] landscape:max-h-[90dvh] overflow-y-auto overscroll-contain rounded-t-3xl border-t border-white/15 bg-[#0c0c12]/98 p-4 sm:p-5 shadow-2xl backdrop-blur-2xl space-y-4"
+                    className="absolute inset-x-0 bottom-0 z-30 max-h-[86dvh] landscape:max-h-[90dvh] overflow-y-auto overscroll-contain rounded-t-3xl border-t border-white/15 bg-[#0c0c12]/98 p-4 sm:p-5 shadow-2xl space-y-4"
                     style={{ paddingBottom: 'max(var(--folia-native-inset-bottom, env(safe-area-inset-bottom, 0px)), 16px)' }}
                 >
                     <div className="flex items-center justify-between">
@@ -2441,7 +2441,7 @@ export const MobileNowPlayingSheet: React.FC<MobileNowPlayingSheetProps> = ({
             {subDrawer === 'queue' && (
                 <div
                     data-testid="mobile-queue-drawer"
-                    className="absolute inset-x-0 bottom-0 z-30 flex max-h-[82dvh] landscape:max-h-[88dvh] flex-col rounded-t-3xl border-t border-white/15 bg-[#0c0c12]/98 p-4 sm:p-5 shadow-2xl backdrop-blur-2xl"
+                    className="absolute inset-x-0 bottom-0 z-30 flex max-h-[82dvh] landscape:max-h-[88dvh] flex-col rounded-t-3xl border-t border-white/15 bg-[#0c0c12]/98 p-4 sm:p-5 shadow-2xl"
                     style={{ paddingBottom: 'max(var(--folia-native-inset-bottom, env(safe-area-inset-bottom, 0px)), 16px)' }}
                 >
                     <div className="flex items-center justify-between pb-3 border-b border-white/10">

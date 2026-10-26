@@ -94,7 +94,7 @@ export const MobileMiniPlayer: React.FC<MobileMiniPlayerProps> = ({
     return (
         <div
             data-testid="mobile-mini-player"
-            className="relative mx-2.5 mb-1.5 overflow-hidden rounded-2xl border border-white/10 bg-[#0d0d12]/95 shadow-[0_12px_32px_rgba(0,0,0,0.65)] backdrop-blur-xl"
+            className="relative mx-2.5 mb-1.5 overflow-hidden rounded-2xl border border-white/10 bg-[#0d0d12]/95 shadow-[0_12px_32px_rgba(0,0,0,0.65)]"
             style={{
                 backgroundImage: `linear-gradient(110deg, color-mix(in srgb, ${accentColor} 14%, #0c0c12) 0%, #09090d 70%)`,
             }}

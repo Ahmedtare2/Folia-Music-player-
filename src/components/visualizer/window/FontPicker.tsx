@@ -249,7 +249,7 @@ export const FontPicker: React.FC<FontPickerProps> = ({
 
     return (
         // Over everything in the window, the sample's own button too.
-        <div className="absolute inset-0 z-50 grid place-items-center bg-[color-mix(in_srgb,var(--st-win)_72%,transparent)] p-4 backdrop-blur-sm sm:p-6">
+        <div className="absolute inset-0 z-50 grid place-items-center bg-[color-mix(in_srgb,var(--st-win)_72%,transparent)] p-4 sm:p-6">
             <div
                 role="dialog"
                 aria-label={title}

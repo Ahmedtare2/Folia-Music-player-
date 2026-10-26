@@ -260,7 +260,7 @@ export const Grid3D: React.FC<Grid3DProps> = (props) => {
     // Background style mappings
     const mainBg = isDaylight ? 'bg-white/40' : 'bg-black/20';
     const inputBg = isDaylight ? 'bg-black/5 focus:bg-black/10' : 'bg-white/5 focus:bg-white/10';
-    const navPillBg = isDaylight ? 'bg-black/5' : 'bg-white/10';
+    const navPillBg = isDaylight ? 'bg-zinc-200/90' : 'bg-zinc-950/90';
     const navPillInactiveText = isDaylight ? 'text-black/60 hover:text-black' : 'text-white/60 hover:text-white';
     const activeTabBg = isDaylight ? 'text-black font-bold' : 'text-black';
 
@@ -353,7 +353,7 @@ export const Grid3D: React.FC<Grid3DProps> = (props) => {
                                             initial={{ opacity: 0, y: -6 }}
                                             animate={{ opacity: 1, y: 0 }}
                                             exit={{ opacity: 0, y: -6 }}
-                                            className={`absolute left-0 top-full mt-2 w-72 p-4 rounded-2xl border backdrop-blur-xl shadow-xl ${isDaylight ? 'bg-white/85 border-black/10 text-zinc-800' : 'bg-black/60 border-white/10 text-zinc-100'
+                                            className={`absolute left-0 top-full mt-2 w-72 p-4 rounded-2xl border shadow-xl ${isDaylight ? 'bg-white/95 border-black/10 text-zinc-800' : 'bg-zinc-950/95 border-white/10 text-zinc-100'
                                                 }`}
                                         >
                                             <div className="text-sm font-semibold truncate">
@@ -384,7 +384,7 @@ export const Grid3D: React.FC<Grid3DProps> = (props) => {
 
                     {/* Center Tab Switcher */}
                     <div className="flex justify-center order-3 md:order-none col-span-2 md:col-span-1">
-                        <div className={`relative ${navPillBg} backdrop-blur-md p-1 rounded-full scale-90 md:scale-100 origin-center`}>
+                        <div className={`relative ${navPillBg} p-1 rounded-full scale-90 md:scale-100 origin-center`}>
                             <div className="inline-flex items-center gap-0">
                                 {homeTabs.map((tab) => {
                                     const isActive = homeViewTab === tab.key;

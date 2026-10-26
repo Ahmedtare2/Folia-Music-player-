@@ -374,7 +374,7 @@
 }
 
 .bravais-focus-more-toggle { min-height: 36px; padding: 0 10px; }
-.bravais-focus-menu { min-width: 180px; background: rgb(0 0 0 / 55%); backdrop-filter: blur(18px); }
+.bravais-focus-menu { min-width: 180px; background: rgb(12 12 14 / 96%); }
 
 /* ---------- 墙：列表联动（与键盘焦点同一道环）与首屏加载的呼吸 ---------- */
 

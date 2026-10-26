@@ -72,7 +72,7 @@ export const LocalTrackSortMenu: React.FC<LocalTrackSortMenuProps> = ({ field, o
                         exit={{ opacity: 0, y: -6, scale: 0.96 }}
                         transition={{ duration: 0.16, ease: 'easeOut' }}
                         role="menu"
-                        className="absolute right-0 top-10 z-10 w-44 rounded-2xl border p-1.5 shadow-xl backdrop-blur-2xl theme-glass-panel"
+                        className="absolute right-0 top-10 z-10 w-44 rounded-2xl border p-1.5 shadow-xl theme-glass-panel"
                     >
                         <SortFieldButton
                             active={field === 'fileName'}

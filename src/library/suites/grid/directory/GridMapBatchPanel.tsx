@@ -244,7 +244,7 @@ export const GridMapBatchPanel = ({
 
             <div
                 data-ponder={usesDirectoryTree ? 'local-grid-map-directory-tree' : undefined}
-                className={`relative z-10 mt-4 min-h-0 flex-1 overflow-hidden rounded-2xl border backdrop-blur-2xl transition-[width,background-color,box-shadow] duration-200 ${
+                className={`relative z-10 mt-4 min-h-0 flex-1 overflow-hidden rounded-2xl border transition-[width,background-color,box-shadow] duration-200 ${
                     usesDirectoryTree && isTreeExpanded
                         ? 'w-[min(44rem,calc(100vw-4.5rem))] shrink-0 border-black/10 bg-white/90 shadow-2xl dark:border-white/15 dark:bg-zinc-900/95'
                         : 'w-full border-black/5 bg-black/[0.025] dark:border-white/10 dark:bg-black/10'

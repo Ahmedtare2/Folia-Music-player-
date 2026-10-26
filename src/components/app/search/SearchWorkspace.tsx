@@ -110,7 +110,6 @@ const SearchWorkspace: React.FC<SearchWorkspaceProps> = ({
                     style={{
                         color: theme.primaryColor,
                         backgroundColor: isDaylight ? 'rgba(250,250,250,0.96)' : 'rgba(8,8,10,0.94)',
-                        backdropFilter: 'blur(24px)',
                     }}
                 >
                     <header className="mx-auto flex w-full max-w-5xl shrink-0 flex-col gap-3">

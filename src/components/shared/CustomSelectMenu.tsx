@@ -273,7 +273,7 @@ export const CustomSelectMenu: React.FC<CustomSelectMenuProps> = ({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={hidden}
             transition={{ duration: reducedMotion ? 0 : 0.15, ease: 'easeOut' }}
-            className={`fixed z-[200] border overscroll-contain custom-scrollbar ${compact ? 'rounded-[10px]' : 'rounded-xl shadow-xl backdrop-blur-md'}${isVirtualized ? '' : ' overflow-y-auto'}`}
+            className={`fixed z-[200] border overscroll-contain custom-scrollbar ${compact ? 'rounded-[10px]' : 'rounded-xl shadow-xl'}${isVirtualized ? '' : ' overflow-y-auto'}`}
             data-wheel-scroll-region
             role="listbox"
             aria-label={ariaLabel}

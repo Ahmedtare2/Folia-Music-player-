@@ -155,9 +155,9 @@ body {
   border-color: color-mix(in srgb, var(--text-primary) 32%, transparent) !important;
 }
 
-/* Glass panel (search box, sidebar) theme-adaptive styles */
+/* Opaque, theme-adaptive surface for popup panels and menus. */
 .theme-glass-panel {
-  background-color: color-mix(in srgb, var(--bg-color) 85%, transparent) !important;
+  background-color: color-mix(in srgb, var(--bg-color) 96%, transparent) !important;
   border-color: color-mix(in srgb, var(--text-primary) 12%, transparent) !important;
   color: var(--text-primary) !important;
 }

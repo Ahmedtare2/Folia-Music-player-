@@ -154,7 +154,7 @@ export const MobileEqualizerSheet: React.FC<MobileEqualizerSheetProps> = ({
     return (
         <div
             data-testid="mobile-equalizer-sheet"
-            className="flex flex-col max-h-[84dvh] overflow-hidden rounded-t-3xl border-t border-white/15 bg-[#0b0b11]/98 text-zinc-100 shadow-2xl backdrop-blur-2xl"
+            className="flex flex-col max-h-[84dvh] overflow-hidden rounded-t-3xl border-t border-white/15 bg-[#0b0b11]/98 text-zinc-100 shadow-2xl"
             style={{ paddingBottom: 'max(env(safe-area-inset-bottom, 0px), 16px)' }}
         >
             {/* Header Bar */}

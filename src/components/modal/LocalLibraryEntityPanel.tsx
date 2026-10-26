@@ -43,8 +43,8 @@ export const LocalLibraryEntityPanel = ({
     ? t('localMusic.artistLabel')
     : t('localMusic.albumLabel');
   const panelTheme = isDaylight
-    ? 'bg-white/80 border-white/40 text-zinc-900 shadow-2xl shadow-black/5 backdrop-saturate-150'
-    : 'bg-zinc-950/80 border-white/10 text-white shadow-2xl shadow-black/50 backdrop-saturate-150';
+    ? 'bg-white/95 border-white/40 text-zinc-900 shadow-2xl shadow-black/5'
+    : 'bg-zinc-950/95 border-white/10 text-white shadow-2xl shadow-black/50';
   const borderTheme = isDaylight ? 'border-zinc-200/60' : 'border-white/10';
   const closeButtonTheme = isDaylight ? 'hover:bg-zinc-200/50 text-zinc-500 hover:text-zinc-900' : 'hover:bg-white/10 text-zinc-400 hover:text-white';
   const [pending, setPending] = useState(false);
@@ -71,7 +71,7 @@ export const LocalLibraryEntityPanel = ({
   return (
     <div
       data-folia-keyboard-window="true"
-      className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60 p-3 backdrop-blur-xl md:p-6"
+      className="fixed inset-0 z-[120] flex items-center justify-center bg-black/60 p-3 md:p-6"
       onMouseDown={event => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -86,7 +86,7 @@ export const LocalLibraryEntityPanel = ({
         role="dialog"
         aria-modal="true"
         aria-labelledby="local-library-entity-title"
-        className={`${panelTheme} flex max-h-[80vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border shadow-2xl backdrop-blur-md`}
+        className={`${panelTheme} flex max-h-[80vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border shadow-2xl`}
       >
         <header className={`flex shrink-0 items-center justify-between gap-5 border-b px-8 py-6 ${borderTheme}`}>
           <div className="min-w-0">
@@ -116,7 +116,7 @@ export const LocalLibraryEntityPanel = ({
               className="overflow-hidden px-8"
             >
               <div
-                className={`mt-6 flex shrink-0 items-center gap-3 rounded-2xl border px-4 py-3 text-sm font-semibold shadow-sm backdrop-blur-md ${
+                className={`mt-6 flex shrink-0 items-center gap-3 rounded-2xl border px-4 py-3 text-sm font-semibold shadow-sm ${
                   feedback.type === 'success'
                     ? (isDaylight ? 'border-emerald-500/30 bg-emerald-50 text-emerald-700' : 'border-emerald-500/30 bg-emerald-500/10 text-emerald-400')
                     : (isDaylight ? 'border-rose-500/30 bg-rose-50 text-rose-700' : 'border-rose-500/30 bg-rose-500/10 text-rose-400')

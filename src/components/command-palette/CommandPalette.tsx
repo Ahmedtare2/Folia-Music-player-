@@ -249,12 +249,10 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
         (command: CommandPaletteCommand) => getCommandPrimaryTerm(availableCommands, command, i18n.language)
     ), [availableCommands, i18n.language]);
 
-    // A live-preview surface asks for an unblurred backdrop so its own effect stays visible behind
-    // the palette; the panel then has to carry its own legibility, hence the denser fill.
+    // A live-preview surface keeps its own effect visible behind the palette; use a dense panel
+    // fill so the command list stays legible without blurring the full-screen backdrop.
     const hasClearBackdrop = surface?.backdrop === 'clear';
-    const panelBg = hasClearBackdrop
-        ? (isDaylight ? 'bg-white/95 text-zinc-950' : 'bg-zinc-950/95 text-white')
-        : (isDaylight ? 'bg-white/70 text-zinc-950' : 'bg-zinc-950/70 text-white');
+    const panelBg = isDaylight ? 'bg-white/95 text-zinc-950' : 'bg-zinc-950/95 text-white';
     const itemActiveBg = isDaylight ? 'bg-black/10' : 'bg-white/10';
     const itemIdleBg = isDaylight ? 'hover:bg-black/5' : 'hover:bg-white/5';
 
@@ -410,7 +408,7 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
             {isOpen && (
                 <motion.div
                     data-folia-keyboard-window="true"
-                    className={`fixed inset-0 z-[150] flex items-start justify-center px-4 pt-[18vh] ${hasClearBackdrop ? '' : 'backdrop-blur-md'}`}
+                    className="fixed inset-0 z-[150] flex items-start justify-center px-4 pt-[18vh]"
                     style={{
                         backgroundColor: hasClearBackdrop
                             ? (isDaylight ? 'rgba(250,250,249,0.12)' : 'rgba(0,0,0,0.16)')
@@ -428,14 +426,6 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({
                         animate={{ opacity: 1, y: 0, scale: 1 }}
                         exit={{ opacity: 0, y: 18, scale: 0.98 }}
                         transition={{ duration: 0.18, ease: 'easeOut' }}
-                        onAnimationComplete={() => {
-                            // iOS Safari blocks overflow scrolling in sibling containers
-                            // when an input is focused inside a fixed + backdrop-blur panel.
-                            // Blur proactively so the first touch-scroll works immediately.
-                            if ('ontouchstart' in window) {
-                                inputRef.current?.blur();
-                            }
-                        }}
                         onMouseDown={(event) => event.stopPropagation()}
                     >
                         <div
