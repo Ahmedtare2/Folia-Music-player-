@@ -2,7 +2,7 @@ Folia Android Diagnostic Debug APK Build Summary
 ================================================
 Version: 0.7.21
 Branch: main
-Commit: fe8de3ded80809f2ed9436513ecedb4f0421b5a9
+Commit: 646264b6fcbb10e8c3038315ff56140122b6a991
 APK File: Folia-0.7.21-android-debug.apk
-Size: 19M (19028168 bytes)
-SHA-256: 0d618c123a179178a95007cdf4f3ff996a8c07fd71516d6756d6b28bf286d79a
+Size: 19M (19029104 bytes)
+SHA-256: fa4ca675fe2ee4920d5f1e19bc66a2d8a77681a7b1e1c1d9d3a62e3a11a50311
