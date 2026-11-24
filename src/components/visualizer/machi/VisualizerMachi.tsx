@@ -59,7 +59,6 @@ const VisualizerMachi: React.FC<VisualizerMachiProps> = (props) => {
         songAlbum,
         isPlayerChromeHidden = false,
         hideTranslationSubtitle = false,
-        subtitleOverlayLayout,
         subtitleTheme,
         subtitleFontScale,
         subtitleOverlayOpacity,
@@ -289,7 +288,6 @@ const VisualizerMachi: React.FC<VisualizerMachiProps> = (props) => {
                 subtitleUpcomingLyricsBlur={subtitleUpcomingLyricsBlur}
                 isPlayerChromeHidden={isPlayerChromeHidden}
                 hideTranslationSubtitle={hideTranslationSubtitle}
-                subtitleOverlayLayout={subtitleOverlayLayout}
             />
         </VisualizerShell>
     );

@@ -29,7 +29,7 @@ const VisualizerNebbia: React.FC<Props> = (props) => {
         currentTime, currentLineIndex, lines, theme, audioPower, audioBands,
         showText = true, lyricsFontScale = 1, staticMode = false, paused = false, seed = 'nebbia', songTitle, songArtist,
         isPlayerChromeHidden = false, hideTranslationSubtitle = false, isPreviewMode = false,
-        subtitleOverlayLayout, subtitleTheme, subtitleFontScale, subtitleOverlayOpacity, subtitleOverlayBackground, subtitleUpcomingLyricsBlur,
+        subtitleTheme, subtitleFontScale, subtitleOverlayOpacity, subtitleOverlayBackground, subtitleUpcomingLyricsBlur,
         isDaylight = false, nebbiaTuning = DEFAULT_NEBBIA_TUNING,
     } = props;
     const { t } = useTranslation();
@@ -148,7 +148,6 @@ const VisualizerNebbia: React.FC<Props> = (props) => {
                 subtitleUpcomingLyricsBlur={subtitleUpcomingLyricsBlur}
                 isPlayerChromeHidden={isPlayerChromeHidden}
                 hideTranslationSubtitle={hideTranslationSubtitle}
-                subtitleOverlayLayout={subtitleOverlayLayout}
             />
         </VisualizerShell>
     );

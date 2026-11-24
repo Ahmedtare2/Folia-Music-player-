@@ -118,7 +118,7 @@ interface Cell {
 
 /** Shared 2d context for measuring glyph ink width before the atlas canvas exists. */
 let glyphMeasureContext: CanvasRenderingContext2D | null = null;
-const glyphInkWidth = (weight: number, px: number, font: string | undefined, char: string): number => {
+const glyphInkWidth = (weight: number, px: number, font: string, char: string): number => {
     if (!glyphMeasureContext) glyphMeasureContext = document.createElement('canvas').getContext('2d');
     if (!glyphMeasureContext) return px * Math.max(1, char.length);
     glyphMeasureContext.font = glyphFont(weight, px, font);

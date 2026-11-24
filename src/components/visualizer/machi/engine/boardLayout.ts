@@ -173,7 +173,7 @@ const placeRows = (rows: Token[][], fontPx: number, box: MachiBoardBox, measure:
             if (rtl) {
                 // RTL lines place their words in visual order (first-sung word rightmost); the array
                 // stays in sung order so the reveal walk below still reads it in sung order.
-                const byGlyph = new Map(glyphs.map(glyph => [glyph, glyph] as const));
+                const byGlyph = new Map<(typeof glyphs)[number], MachiBoardGlyph>();
                 let xr = left;
                 [...glyphs].reverse().forEach(glyph => {
                     const w = measure(glyph.text) * scale;

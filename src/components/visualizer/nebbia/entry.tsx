@@ -1,7 +1,7 @@
 import React from 'react';
 import { QuickControlChip } from '../../shared/QuickControlChip';
 import { defineVisualizer, type VisualizerQuickControlsProps } from '../definition';
-import { nebbiaBackgroundConfig, nebbiaBeatEffectOnScreen, nebbiaShowsBackground } from './nebbiaBehind';
+import { nebbiaBackgroundConfig } from './nebbiaBehind';
 import NebbiaSettingsPanel, { NEBBIA_APPEAR_LABEL_KEYS, NEBBIA_FADE_LABEL_KEYS } from './NebbiaSettingsPanel';
 import nebbiaTuning from './tuning';
 import type { NebbiaTuning } from './types';
@@ -54,7 +54,6 @@ export default defineVisualizer({
     },
     // 画面自己画窗外的夜景时不要共用背景；窗外选了共用背景、或播放页透明时照常画它（nebbiaBehind.ts）。
     background: nebbiaBackgroundConfig,
-    showsBackground: nebbiaShowsBackground,
     usesWordSegmentation: true,
     // 智能动感模式, 疏雨轻车: one effect, two parts, both off the htdemucs run (`source: 'stems'`).
     // - rain (雨点强度): the rain follows the vocal stem (analysis/vocalEnvelope.ts) - small drops as
@@ -90,15 +89,6 @@ export default defineVisualizer({
             ],
         },
     ],
-    beatEffectOnScreen: nebbiaBeatEffectOnScreen,
-    // Its shaders compile in the background (cold, about a second on D3D11): at once when it is the saved
-    // style, otherwise once the app is idle, so the first switch to it finds them in the GPU cache.
-    prewarmWhenIdle: true,
-    prewarm: () => {
-        void import('./nebbiaShaderWarmup')
-            .then(module => module.warmNebbiaShaders())
-            .catch(error => console.warn('[Nebbia] shader warm-up did not load', error));
-    },
     // Deliberately unkeyed on the seed: the runtime takes a track change in place (createNebbiaRuntime.ts).
     render: props => <VisualizerNebbia {...props} nebbiaTuning={nebbiaTuning.read(props.visualizerTunings)} />,
     renderSettingsPanel: props => <NebbiaSettingsPanel {...props} />,

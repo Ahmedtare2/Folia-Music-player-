@@ -43,7 +43,6 @@ const VisualizerMetaphor: React.FC<VisualizerMetaphorProps> = (props) => {
         songTitle,
         isPlayerChromeHidden = false,
         hideTranslationSubtitle = false,
-        subtitleOverlayLayout,
         subtitleTheme,
         subtitleFontScale,
         subtitleOverlayOpacity,
@@ -173,7 +172,6 @@ const VisualizerMetaphor: React.FC<VisualizerMetaphorProps> = (props) => {
                 subtitleUpcomingLyricsBlur={subtitleUpcomingLyricsBlur}
                 isPlayerChromeHidden={isPlayerChromeHidden}
                 hideTranslationSubtitle={hideTranslationSubtitle}
-                subtitleOverlayLayout={subtitleOverlayLayout}
             />
         </VisualizerShell>
     );
