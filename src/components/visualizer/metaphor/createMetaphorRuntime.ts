@@ -87,6 +87,8 @@ export interface MetaphorRuntimeOptions {
     signal: AbortSignal;
     /** Video export only: draw at exactly this pixel ratio instead of the screen's (host CSS size x ratio = video size). */
     fixedPixelRatio?: number;
+    /** Video export only: draw at exactly this many pixels (any aspect ratio); wins over fixedPixelRatio. */
+    fixedPixelSize?: { width: number; height: number };
 }
 
 interface MetaphorSet {
@@ -481,19 +483,28 @@ export class MetaphorRuntime {
         // 量排版尺寸，不量 getBoundingClientRect：样式小图把大舞台缩小了画，量到的会是缩小后的尺寸
         const { clientWidth: width, clientHeight: height } = this.options.host;
         if (width < 1 || height < 1) return;
-        const pixelRatio = this.options.fixedPixelRatio ?? resolveLyricPixelRatio(Math.min(2, window.devicePixelRatio || 1), this.renderScale);
+        const fixedSize = this.options.fixedPixelSize;
+        const pixelRatio = fixedSize
+            ? fixedSize.width / width
+            : (this.options.fixedPixelRatio ?? resolveLyricPixelRatio(Math.min(2, window.devicePixelRatio || 1), this.renderScale));
         if (width === this.width && height === this.height && pixelRatio === this.pixelRatio) return;
         this.width = width;
         this.height = height;
         this.pixelRatio = pixelRatio;
-        this.renderer.setPixelRatio(pixelRatio);
-        this.renderer.setSize(width, height, false);
-        const pixelWidth = Math.max(1, Math.round(width * pixelRatio));
-        const pixelHeight = Math.max(1, Math.round(height * pixelRatio));
+        const pixelWidth = fixedSize ? fixedSize.width : Math.max(1, Math.round(width * pixelRatio));
+        const pixelHeight = fixedSize ? fixedSize.height : Math.max(1, Math.round(height * pixelRatio));
+        if (fixedSize) {
+            // Exact pixels: the canvas is pixelWidth x pixelHeight whatever the CSS size rounds to.
+            this.renderer.setPixelRatio(1);
+            this.renderer.setSize(pixelWidth, pixelHeight, false);
+        } else {
+            this.renderer.setPixelRatio(pixelRatio);
+            this.renderer.setSize(width, height, false);
+        }
         this.fieldTarget.setSize(pixelWidth, pixelHeight);
         (this.developMaterial.uniforms.uRes.value as THREE.Vector2).set(pixelWidth, pixelHeight);
         this.developMaterial.uniforms.uPixelRatio.value = pixelRatio;
-        this.camera.aspect = width / height;
+        this.camera.aspect = fixedSize ? pixelWidth / pixelHeight : width / height;
         // 线稿是按画面的宽高比摆的：比例变了不少（横竖互换、拉成长条）就重摆
         if (Math.abs(Math.log(width / height / this.layoutAspect)) > 0.25) {
             this.layoutAspect = width / height;

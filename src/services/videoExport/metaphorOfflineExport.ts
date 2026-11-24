@@ -1,6 +1,7 @@
 import type { Line, Theme } from '../../types';
 import type { MetaphorTuning } from '../../components/visualizer/metaphor/types';
 import { computeAudioLevelTrack } from './offlineAudioLevels';
+import type { ExportSize } from './exportFormats';
 import { openVideoEncoderSession, type VideoChunkSink, type VideoCodecFamily } from './videoEncoderSession';
 
 // src/services/videoExport/metaphorOfflineExport.ts
@@ -27,8 +28,9 @@ export const EXPORT_PRESETS: readonly ExportPreset[] = [
     { id: '4k60', label: '4K 60 fps (HEVC)', width: 3840, height: 2160, fps: 60, bitrate: 50_000_000, family: 'hevc' },
 ];
 
-const HOST_CSS_WIDTH = 1280;
-const HOST_CSS_HEIGHT = 720;
+/** Bitrate for a size: the preset's bitrate is for its own 16:9 size, other shapes scale with their pixel count. */
+export const bitrateFor = (preset: ExportPreset, size: ExportSize) =>
+    Math.round(preset.bitrate * (size.width * size.height) / (preset.width * preset.height));
 
 export type MetaphorExportJob = {
     lines: Line[];
@@ -39,6 +41,7 @@ export type MetaphorExportJob = {
     /** The song file as bytes (decoded once for the audio levels). */
     audioBytes: Uint8Array;
     preset: ExportPreset;
+    size: ExportSize;
     startSec: number;
     /** Seconds to render from startSec. */
     clipSec: number;
@@ -75,7 +78,7 @@ export const runMetaphorExport = async (job: MetaphorExportJob): Promise<Metapho
     job.onProgress({ frame: 0, total: frames, fps: 0, etaSec: null, phase: 'Starting renderer' });
     const host = document.createElement('div');
     host.setAttribute('aria-hidden', 'true');
-    host.style.cssText = `position:fixed;left:-20000px;top:0;width:${HOST_CSS_WIDTH}px;height:${HOST_CSS_HEIGHT}px;pointer-events:none;overflow:hidden`;
+    host.style.cssText = `position:fixed;left:-20000px;top:0;width:${job.size.hostCssWidth}px;height:${job.size.hostCssHeight}px;pointer-events:none;overflow:hidden`;
     document.body.appendChild(host);
 
     const { motionValue } = await import('framer-motion');
@@ -98,13 +101,13 @@ export const runMetaphorExport = async (job: MetaphorExportJob): Promise<Metapho
             seeThrough: false,
             onContextLost: () => { contextLost = true; },
             signal: job.signal,
-            fixedPixelRatio: preset.width / HOST_CSS_WIDTH,
+            fixedPixelSize: { width: job.size.width, height: job.size.height },
         });
         runtime.setTheme(job.theme);
         runtime.setTuning(job.tuning);
 
         session = await openVideoEncoderSession(
-            { width: preset.width, height: preset.height, fps: preset.fps, bitrate: preset.bitrate, family: preset.family },
+            { width: job.size.width, height: job.size.height, fps: preset.fps, bitrate: bitrateFor(preset, job.size), family: preset.family },
             job.sink,
         );
         const setupMs = performance.now() - setupStart;
@@ -156,8 +159,8 @@ export const runMetaphorExport = async (job: MetaphorExportJob): Promise<Metapho
     }
 };
 
-export const formatMetaphorExportReport = (preset: ExportPreset, report: MetaphorExportReport): string => [
-    `Metaphor export speed test, ${preset.label} (${preset.width}x${preset.height})`,
+export const formatMetaphorExportReport = (preset: ExportPreset, size: ExportSize, report: MetaphorExportReport, styleLabel = 'Metaphor'): string => [
+    `${styleLabel} export, ${preset.label} (${size.width}x${size.height})`,
     `Frames rendered: ${report.frames} (${(report.frames / preset.fps).toFixed(1)} s of video)`,
     `Encoder: ${report.codec}, ${report.hardware ? 'hardware' : 'software or unknown'}`,
     `Speed: ${report.fpsAchieved.toFixed(1)} frames/s, ${report.speedFactor.toFixed(2)}x real time`,
