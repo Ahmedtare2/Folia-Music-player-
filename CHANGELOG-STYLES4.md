@@ -65,3 +65,8 @@ android/app/build.gradle and packaging/android/latest-source-overrides.json
   - F every file under src/components/visualizer + stores + beatEffects + settingsSnapshot + AppearanceSection: clean.
 - vitest: workflow step-19 subset 11 files / 151 tests passed; builtinModeLists + beatEffectsGroup 5 passed; livePictures 39 passed.
 - Ahmed's GitHub CI is the backstop for the full-program run.
+
+## v5 - CI robustness: zip-carried overrides stomped src/types.ts
+- Root cause of the 27-error CI run on v4: the repo workflow's normalize step unpacks an embedded 98-file bundle, then applies packaging/android/latest-source-overrides.json FROM THE ZIP on top of it. The base zip's overrides file carried a stale src/types.ts with no LyricRender* exports, overwriting the fixed one. The two metaphor errors were cascades (MetaphorNumberKey derives from LyricRenderOverride; unresolved, 'render' collapses into the number-key union).
+- Fix: the zip's latest-source-overrides.json now carries the v4 src/types.ts content, so the CI-effective tree has the LyricRender* exports and BeatEffectSetting.parts.
+- Verified against a locally simulated CI-effective tree (zip extract + embedded bundle + zip overrides, decoded from the CI log): tsc subsets A-F clean, workflow vitest subset + visualizer subsets 195/195 passed.

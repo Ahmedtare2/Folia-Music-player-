@@ -127,6 +127,17 @@ export interface DualTheme {
 export type ThemeMode = 'default' | 'ai' | 'custom';
 
 export type BuiltinVisualizerMode = 'classic' | 'cadenza' | 'partita' | 'fume' | 'monet';
+export type LyricRenderScale = 0.5 | 0.75 | 1 | 1.5 | 2;
+export type LyricAntialias = 'auto' | 'on' | 'off';
+export interface LyricRenderQuality {
+  scale: LyricRenderScale;
+  antialias: LyricAntialias;
+}
+export interface LyricRenderOverride {
+  scale: 'global' | LyricRenderScale;
+  antialias: 'global' | 'on' | 'off';
+}
+
 export type VisualizerMode = BuiltinVisualizerMode | (string & {});
 export type VisualizerFrameRate = 'off' | 120 | 90 | 60;
 
@@ -594,6 +605,17 @@ export const DEFAULT_SONNET_TUNING: SonnetTuning = {
 export interface BeatEffectSetting {
   on: boolean;
   strength: number;
+  /**
+   * An effect made of parts, each with its own slider (BeatEffectDef `parts`, 雾笺's 疏雨轻车): their
+   * strengths by part key, 0..2, a part never touched at 1. `strength` is then unused.
+   */
+  parts?: Record<string, number>;
+}
+
+/** 一个歌词样式自己的分辨率与抗锯齿（存在样式的 tuning 里）：global 跟随全局挡位。 */
+export interface LyricRenderOverride {
+  scale: 'global' | LyricRenderScale;
+  antialias: 'global' | 'on' | 'off';
 }
 
 /**
