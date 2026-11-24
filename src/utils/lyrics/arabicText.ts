@@ -537,3 +537,16 @@ export const mergeContiguousArabicWordsInLine = (line: Line): Line => {
 
     return changed ? { ...line, words: mergedWords } : line;
 };
+
+export const wholeCursiveTimeline = <T extends { char: string; startTime: number; endTime: number }>(items: T[]): T[] => {
+    if (!hasCursiveJoiningScript(items.map(item => item.char).join(''))) return items;
+    const out: T[] = [];
+    for (const item of items) {
+        const last = out[out.length - 1];
+        if (last && /^\s*$/u.test(last.char) === /^\s*$/u.test(item.char)) {
+            last.char += item.char;
+            last.endTime = Math.max(last.endTime, item.endTime);
+        } else out.push({ ...item });
+    }
+    return out;
+};
