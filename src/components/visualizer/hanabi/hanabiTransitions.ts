@@ -10,7 +10,10 @@
 
 import { easeSeptic } from './timeline';
 
-export const HANABI_TRANSITION_KINDS =['ascend', 'flash', 'bloom'] as const;
+export const HANABI_TRANSITION_KINDS =['ascend', 'flash', 'bloom', 'drift', 'zoom'] as const;
+/** The kinds the original (classic) style picks from; drift and zoom are added by the varied and slow styles. */
+const CLASSIC_KINDS: readonly HanabiTransitionKind[] = ['ascend', 'flash', 'bloom'];
+export type HanabiTransitionStyle = 'classic' | 'varied' | 'slow';
 export type HanabiTransitionKind = typeof HANABI_TRANSITION_KINDS[number];
 
 export interface HanabiTransitionFrame {
@@ -56,6 +59,24 @@ const resolveFrame = (kind: HanabiTransitionKind, phase: 'enter' | 'exit', progr
         const k = launch(1 - p);
         return frame({ y: -0.26 * k, blur: 10 * k, alpha: 1 - 0.7 * k, rotation: -0.5 * k });
     }
+    if (kind === 'drift') {
+        // Soft cross-fade with a slow sideways-and-down float; for ballads.
+        if (phase === 'exit') {
+            const e = ease(Math.min(p, 1));
+            return frame({ y: 0.03 * e, blur: 3 * e, alpha: 1 - e, rotation: 0.04 * e });
+        }
+        const k = 1 - ease(p);
+        return frame({ y: -0.03 * k, blur: 3 * k, alpha: 1 - k, rotation: -0.04 * k });
+    }
+    if (kind === 'zoom') {
+        // The old picture rushes toward the viewer and blurs out; the new one settles in from slightly small.
+        if (phase === 'exit') {
+            const e = ease(Math.min(p, 1));
+            return frame({ scale: 1 + 0.45 * e, blur: 8 * e, alpha: 1 - e });
+        }
+        const k = 1 - ease(p);
+        return frame({ scale: 1 - 0.3 * k, blur: 6 * k, alpha: 1 - k });
+    }
     if (kind === 'flash') {
         const near = phase === 'exit' ? ease(p) : 1 - ease(p);
         return frame({ scale: 1 + 0.05 * near, blur: 9 * near * near, alpha: 1 - 0.55 * near * near, rotation: (phase === 'exit' ? 0.12 : -0.12) * near });
@@ -73,8 +94,10 @@ export const HANABI_TRANSITIONS: Record<HanabiTransitionKind, HanabiTransitionDe
         kind,
         duration: (gap: number) => (kind === 'flash'
             ? Math.min(0.5, Math.max(0.28, gap > 0 ? gap * 0.4 : 0.35))
-            : Math.min(1.1, Math.max(0.5, gap > 0 ? gap * 0.6 : 0.8))),
-        enterClamp: kind === 'flash' ? [0.2, 0.45] : [0.4, 0.9],
+            : kind === 'drift'
+                ? Math.min(1.8, Math.max(0.9, gap > 0 ? gap * 0.8 : 1.2))
+                : Math.min(1.1, Math.max(0.5, gap > 0 ? gap * 0.6 : 0.8))),
+        enterClamp: kind === 'flash' ? [0.2, 0.45] : kind === 'drift' ? [0.8, 1.6] : [0.4, 0.9],
         resolveFrame: (phase: 'enter' | 'exit', progress: number) => resolveFrame(kind, phase, progress),
     } satisfies HanabiTransitionDef]),
 ) as Record<HanabiTransitionKind, HanabiTransitionDef>;
@@ -88,11 +111,17 @@ export const resolveHanabiEnterDuration = (kind: HanabiTransitionKind, startTime
 /**
  * 选转场：上升占一半（连续升空是这个模式的主线），另一半在闪白 / 开花里挑；不与上一次相同，按 (seed, 段落序号) 散列确定。
  */
-export const chooseHanabiTransition = (seed: string, paragraphIndex: number, previous: HanabiTransitionKind | null): HanabiTransitionKind => {
+export const chooseHanabiTransition = (seed: string, paragraphIndex: number, previous: HanabiTransitionKind | null, style: HanabiTransitionStyle = 'classic'): HanabiTransitionKind => {
     let hash = 0;
     for (const char of `${seed}:${paragraphIndex}:hanabi-transition`) hash = (hash * 31 + char.charCodeAt(0)) | 0;
     const roll = Math.abs(hash);
+    if (style === 'slow') return 'drift';
+    if (style === 'varied') {
+        // Every kind, never the same one twice in a row; rise keeps its double weight because it is the signature.
+        const pool = [...HANABI_TRANSITION_KINDS, 'ascend' as const].filter(kind => kind !== previous);
+        return pool[roll % pool.length]!;
+    }
     if (previous !== 'ascend' && roll % 2 === 0) return 'ascend';
-    const choices = HANABI_TRANSITION_KINDS.filter(kind => kind !== previous && kind !== 'ascend');
+    const choices = CLASSIC_KINDS.filter(kind => kind !== previous && kind !== 'ascend');
     return choices[(roll >> 1) % choices.length]!;
 };

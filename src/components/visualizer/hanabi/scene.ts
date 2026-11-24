@@ -6,6 +6,7 @@ import { firstBeatAtOrAfter, HANABI_BEAT_SHELL_LIFE, resolveHanabiBeatShell } fr
 import { createRng } from './hanabiRandom';
 import type { TransformParams } from './hanabiKernel';
 import { burstPreset } from './catalog';
+import { resolveHanabiChorusWeight, type HanabiChorusSpan } from './hanabiScreenBloom';
 import { planShotCollage, pickCollageKeyword, type CollagePlan, type CollageRecipe } from './collage/collagePlan';
 import { createCollageTextureCache, type CollageTextureCache } from './collage/collagePainters';
 import { createShotCollage, type ShotCollageView } from './collage/collageViews';
@@ -87,6 +88,8 @@ export interface HanabiSceneOptions {
     icons?: readonly string[];
     /** 世界旋转起转的方向（1 / −1，整首歌一个，段落转场也朝它转）；段内各边界还会换向。不给为 1。 */
     spinDirection?: number;
+    /** Chorus time spans of the song (program.chorus); chorus bursts open bigger (tuning.energyBursts). */
+    chorus?: readonly HanabiChorusSpan[];
 }
 
 /** 智能动感模式「随拍开花」这一帧的输入：节拍表（按时刻排好）、效果强度与曲目的动感系数。 */
@@ -207,7 +210,7 @@ export const createHanabiScene = (pixi: PixiModule, options: HanabiSceneOptions)
     // 世界旋转，贯穿整个单元一直在转：镜头内慢转（约 11°/秒，长镜头慢一些），镜头边界跟着上升再甩过 34°–80°（都乘 tuning.spin），
     // 像一路旋着往上走。单元从整首歌的方向（options.spinDirection）起转，偶尔换向、单元结束前转回来（timeline.ts 的 planSpin）。
     const { angles: spinAngles, drift: spinDrift } = planSpin(options.shots.map(shot => shot.endTime - shot.startTime), {
-        amount: graphicsOn ? Math.max(0, tuning.spin) : 0,
+        amount: graphicsOn ? Math.max(0, tuning.spin) * (tuning.clearText ? 0.3 : 1) : 0,
         direction: options.spinDirection ?? 1,
         random: createRng(`${options.seed}:spin`),
     });
@@ -318,6 +321,8 @@ export const createHanabiScene = (pixi: PixiModule, options: HanabiSceneOptions)
                 exitAt: timing.exitAt,
                 exitDuration: timing.exitDuration,
                 motion: Math.max(0, tuning.textMotion),
+                wordGlow: Math.max(0, tuning.wordGlow),
+                straight: tuning.clearText,
                 blockOpacity: Math.min(1, Math.max(0, tuning.blockOpacity)),
                 keywordColor,
             })
@@ -341,7 +346,7 @@ export const createHanabiScene = (pixi: PixiModule, options: HanabiSceneOptions)
         world.addChild(holder);
 
         const { bursts, launches, mains } = graphicsOn
-            ? planShotEvents({ shot, index, timing, palette, text, region, seed: options.seed, screenToShot, width, height, unit, tuning })
+            ? planShotEvents({ shot, index, timing, palette, text, region, seed: options.seed, screenToShot, width, height, unit, tuning, chorus: options.chorus ?? [] })
             : { bursts: [], launches: [], mains: [] };
         const burstEnd = Math.max(...bursts.map(event => event.at + event.spec.duration), -Infinity);
         const launchEnd = Math.max(...launches.map(event => event.at + event.duration + 0.7), -Infinity);
@@ -374,6 +379,7 @@ export const createHanabiScene = (pixi: PixiModule, options: HanabiSceneOptions)
                 previous: previousRecipe,
                 opening: index === 0 ? options.opening ?? null : null,
                 icons: options.icons,
+                clearText: tuning.clearText,
             })
             : { recipe: null, items: [] };
         previousRecipe = collage.recipe;
@@ -649,6 +655,7 @@ interface PlanInput {
     height: number;
     unit: number;
     tuning: HanabiTuning;
+    chorus: readonly HanabiChorusSpan[];
 }
 
 /**
@@ -685,6 +692,12 @@ const planShotEvents = (input: PlanInput): { bursts: BurstEvent[]; launches: Lau
         ? { squash: spec.kind === 'ring' ? 0.4 + random() * 0.5 : 1, rotation: (random() - 0.5) * 0.6 }
         : {});
 
+    /** Chorus energy: bursts opening inside a chorus are bigger (tuning.energyBursts; 0 = off). */
+    const energize = (list: BurstEvent[]) => {
+        if (tuning.energyBursts <= 0 || input.chorus.length === 0) return;
+        for (const event of list) event.scale *= 1 + 0.35 * tuning.energyBursts * resolveHanabiChorusWeight(input.chorus, event.at);
+    };
+
     if (shot.isBridge) {
         // 间奏：スターマイン / 千輪 连发，沿画面随机高处开，每朵都有尾迹（スターマイン 从底边喷）。
         const from = timing.start + 0.15;
@@ -706,6 +719,7 @@ const planShotEvents = (input: PlanInput): { bursts: BurstEvent[]; launches: Lau
             if (tuning.launches) launchTo(p.x, p.y, at, `b${k}`);
         }
         bursts.sort((a, b) => a.at - b.at);
+        energize(bursts);
         return { bursts, launches, mains: [...bursts] };
     }
 
@@ -770,6 +784,28 @@ const planShotEvents = (input: PlanInput): { bursts: BurstEvent[]; launches: Lau
                 });
             });
         }
+        // Shaped fireworks (ring / heart / star / willow ring) over long held words (tuning.shapeBursts; 0 = off).
+        if (tuning.shapeBursts > 0) {
+            const held = glyphs.filter(({ anchor }) => anchor.sungEnd - anchor.sungAt >= 1.0 && anchor.sungAt >= timing.enterAt && anchor.sungAt < timing.exitAt);
+            const cap = tuning.shapeBursts >= 1.5 ? 3 : tuning.shapeBursts >= 0.5 ? 2 : 1;
+            const kinds = ['ring', 'heart', 'star', 'willow-ring'] as const;
+            thin(held, cap).forEach(({ anchor, k }, n) => {
+                const now = text.anchors(anchor.sungAt)[k] ?? anchor;
+                const p = toShot(text.view, now.x, now.y);
+                const chorusNow = resolveHanabiChorusWeight(input.chorus, anchor.sungAt) > 0.5;
+                const kind = chorusNow ? (n % 2 === 0 ? 'heart' : 'star') : kinds[Math.floor(random() * kinds.length)]!;
+                const spec = burstPreset(kind, [n % 5, (n + 1) % 5, (n + 2) % 5]);
+                bursts.push({
+                    x: p.x,
+                    y: p.y - now.size * 1.3,
+                    at: anchor.sungAt + 0.05,
+                    spec,
+                    seed: `${input.seed}:${shot.id}:shape${k}`,
+                    scale: Math.min(1.5, 0.75 + 0.3 * tuning.shapeBursts),
+                    ...shape(spec),
+                });
+            });
+        }
         // 碎成火花的退场：每个字心放一朵小火花。
         if (profile.text.exit === 'dissolve') {
             const chosen = thin(glyphs, MAX_DISSOLVE_BURSTS);
@@ -784,6 +820,7 @@ const planShotEvents = (input: PlanInput): { bursts: BurstEvent[]; launches: Lau
         }
     }
 
+    energize(bursts);
     bursts.sort((a, b) => a.at - b.at);
     return { bursts, launches, mains };
 };

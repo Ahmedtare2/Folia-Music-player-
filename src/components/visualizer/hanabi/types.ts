@@ -137,6 +137,10 @@ export interface HanabiTextOptions {
     motion: number;
     /** 色块不透明度（tuning.blockOpacity）。 */
     blockOpacity: number;
+    /** tuning.wordGlow: 0 = off. */
+    wordGlow?: number;
+    /** tuning.clearText: no tilt on the line. */
+    straight?: boolean;
     /** 关键字色（主题 wordColors），命中的字用这个颜色。 */
     keywordColor?: (text: string) => number | null;
 }
@@ -382,7 +386,7 @@ export interface HanabiTuning {
     /** 分辨率与抗锯齿（#929）：默认跟随「动画与性能」里的全局挡位（utils/lyricRenderQuality.ts）。 */
     render: LyricRenderOverride;
     /** 配色：跟随主题 / 预设自带的鲜艳配色 / 两者混合。 */
-    colorMode: 'theme' | 'vivid' | 'mixed';
+    colorMode: 'theme' | 'vivid' | 'mixed' | 'calm';
     /** 烟花粒子数量倍率 0..2。 */
     sparkAmount: number;
     /** MG 装饰件数量倍率 0..2。 */
@@ -413,6 +417,16 @@ export interface HanabiTuning {
     sky: number;
     /** PV 拼贴装饰（跑马灯色带、重复字、贴纸、胶带、拟声字）数量倍率 0..2。 */
     collage: number;
+    /** Chorus energy: bursts that open during a chorus are bigger (0 = off, 1 = default, 2 = strongest). */
+    energyBursts: number;
+    /** Shaped fireworks (rings, hearts, stars, willow rings) that open over long held words, 0..2 (0 = off). */
+    shapeBursts: number;
+    /** Readable text: ghost words behind the line are dimmed, the line is kept straight and the world turns less. */
+    clearText: boolean;
+    /** Sung-word glow: the word being sung lights up for exactly as long as it is sung, and a held word breathes. 0..2 (0 = off). */
+    wordGlow: number;
+    /** Section transitions: classic (rise, flash, bloom), varied (adds drift and zoom) or slow (soft drifts, for ballads). */
+    transitionStyle: 'classic' | 'varied' | 'slow';
     /** 画质：均衡 / 省电降低烟花辉光的分辨率（字与全屏辉光仍按满分辨率），省电再少画一些环境粒子。 */
     renderQuality: HanabiRenderQuality;
 }
@@ -438,6 +452,11 @@ export const DEFAULT_HANABI_TUNING: HanabiTuning = {
     sky: 0.85,
     collage: 1,
     renderQuality: 'full',
+    energyBursts: 1,
+    shapeBursts: 1,
+    clearText: true,
+    wordGlow: 1,
+    transitionStyle: 'varied',
 };
 
 // ─── 模块函数签名（各模块按这些名字导出） ───────────────────────────────

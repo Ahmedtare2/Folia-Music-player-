@@ -81,6 +81,10 @@ const decorate = (c: LaidChar, base: Glyph, rnd: () => number, warp: number) => 
     c.ends = g.strokes.map(() => ({ h: rnd(), j: rnd() }));
 };
 
+/** Seconds after a line's last sung word by which its writing should be finished, and the fastest pen (share of natural time). */
+const WRITE_SLACK = 0.35;
+const WRITE_MIN_K = 0.22;
+
 /** 自然书写一个字要几秒。 */
 export const naturalWriteTime = (g: Glyph, speed: number) => (g.total * 0.28 + (g.strokes.length - 1) * 0.06) / speed;
 
@@ -103,17 +107,31 @@ const applyAppear = (line: LaidLine, tuning: NebbiaTuning, idx: number, seed: nu
     const kind = kinds.length ? kinds[Math.floor(createVisualizerRng((seed + idx * 613 + 11) >>> 0)() * kinds.length)] : null;
     const cs = line.chars.filter(c => c.glyph);
     const nat = cs.map(c => naturalWriteTime(c.glyph!, tuning.writeSpeed));
-    const until = Math.max(line.next, line.end);
+    // Writing has to be done soon after the last word is sung. It used to be allowed to run on until the next line began,
+    // which on a line with a gap after it showed the words seconds after they were sung. Now the pen is sped up
+    // (down to WRITE_MIN_K of natural time) to finish within WRITE_SLACK of the line's end.
+    const until = Math.min(Math.max(line.next, line.end), line.end + WRITE_SLACK);
     let k = 1;
     if (scheduleWrite(cs, nat, 1).end > until) {
         // 写完的时刻随 k 单调，二分找正好写完的 k
-        let lo = 0.3, hi = 1;
+        let lo = WRITE_MIN_K, hi = 1;
         for (let n = 0; n < 14; n += 1) { const m = (lo + hi) / 2; if (scheduleWrite(cs, nat, m).end > until) hi = m; else lo = m; }
         k = lo;
     }
-    const plan = scheduleWrite(cs, nat, k);
+    let plan = scheduleWrite(cs, nat, k);
+    let durs = nat.map(n => n * k);
+    // Held words: a word sung for a long time is drawn slowly over (most of) that time instead of in a flash and then sitting.
+    // Only kept when the line still finishes in time.
+    if (plan.end <= until + 1e-3) {
+        const stretched = cs.map((c, i) => (c.d > 0.8 && c.d > durs[i] * 1.5 ? Math.min(3, c.d * 0.9) : durs[i]));
+        if (stretched.some((d, i) => d !== durs[i])) {
+            let end = -Infinity;
+            const starts = cs.map((c, i) => { const t0 = Math.max(c.t, end); end = t0 + stretched[i]; return t0; });
+            if (end <= until + 1e-3) { plan = { starts, end }; durs = stretched; }
+        }
+    }
     const fade = !kind || (canFade && cs.length > 0 && plan.end > until + 1e-3);
-    cs.forEach((c, i) => { c.wt = plan.starts[i]; c.wd = nat[i] * k; });
+    cs.forEach((c, i) => { c.wt = plan.starts[i]; c.wd = durs[i]; });
     if (kind === 'breath' && !fade && cs.length) {
         line.appearBreathAt = cs[0].wt - NEBBIA_FIXED.breathSpread - 0.3;
         line.appearBreathUntil = line.end + NEBBIA_FIXED.breathHold;

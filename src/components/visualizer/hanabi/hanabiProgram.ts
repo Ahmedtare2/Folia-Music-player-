@@ -9,7 +9,7 @@ import {
     type StructureLine,
 } from '../paragraphStructure';
 import { resolveHanabiChorusSpans, type HanabiChorusSpan } from './hanabiScreenBloom';
-import { chooseHanabiTransition, HANABI_TRANSITIONS, type HanabiTransitionKind } from './hanabiTransitions';
+import { chooseHanabiTransition, HANABI_TRANSITIONS, type HanabiTransitionKind, type HanabiTransitionStyle } from './hanabiTransitions';
 import {
     advanceChain,
     castShot,
@@ -36,6 +36,8 @@ import {
 export interface HanabiProgramOptions {
     /** 歌曲总时长（秒）。有歌词时最后一段延伸到这里；没有歌词时按它铺纯间奏的程序（不给用 480 秒）。 */
     duration?: number;
+    /** Transition style (tuning.transitionStyle); classic when not given. */
+    transitionStyle?: HanabiTransitionStyle;
 }
 
 /** 编译出的一个段落：lumisynth 的原生段落结构 + 段落序号与性质。 */
@@ -186,7 +188,7 @@ export const compileHanabiProgram = (
         const next = plans[index + 1];
         let transitionOut: HanabiProgramParagraph['transitionOut'] = null;
         if (next) {
-            const kind = chooseHanabiTransition(resolvedSeed, index, previousTransition);
+            const kind = chooseHanabiTransition(resolvedSeed, index, previousTransition, options.transitionStyle ?? 'classic');
             previousTransition = kind;
             const gap = next.startTime - plan.lyricEndTime;
             transitionOut = {

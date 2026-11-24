@@ -202,6 +202,8 @@ export interface CollageLaunch {
 }
 
 export interface CollagePlanInput {
+    /** Clear text: ghost echo words are dimmed. */
+    clearText?: boolean;
     seed: string;
     family: string;
     mood: Mood;
@@ -512,8 +514,9 @@ export const planShotCollage = (input: CollagePlanInput): CollagePlan => {
         }
         case 'echo': {
             const vertical = screen.width - bounds.width > unit * 0.5;
-            const first = echo(vertical ? 'y' : 'x', -1, 0.3);
-            const second = echo(vertical ? 'y' : 'x', 1, 0.3);
+            const ghost = input.clearText ? 0.3 : 1;
+            const first = echo(vertical ? 'y' : 'x', -1, 0.3 * ghost);
+            const second = echo(vertical ? 'y' : 'x', 1, 0.3 * ghost);
             if (first) items.push(first);
             if (second && amount >= 0.75) items.push(second);
             const at = corner(1, unit * 0.04);
@@ -556,7 +559,7 @@ export const planShotCollage = (input: CollagePlanInput): CollagePlan => {
             break;
         }
         case 'quiet': {
-            const row = echo('x', random() < 0.5 ? -1 : 1, 0.16);
+            const row = echo('x', random() < 0.5 ? -1 : 1, input.clearText ? 0.06 : 0.16);
             if (row) items.push(row);
             const at = corner(Math.floor(random() * 4), unit * 0.03);
             items.push(sticker('sparkle', at.x, at.y, stickerSize() * 0.7, 0.35));

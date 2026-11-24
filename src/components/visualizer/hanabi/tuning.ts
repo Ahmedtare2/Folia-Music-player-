@@ -16,7 +16,12 @@ export default defineVisualizerTuning<HanabiTuning>({
     defaults: DEFAULT_HANABI_TUNING,
     // What mods may read and write (folium.visualizer.setTuning): the panel's own controls, without what the picture costs.
     modKeys: {
-        colorMode: modChoice(['theme', 'vivid', 'mixed']),
+        colorMode: modChoice(['theme', 'vivid', 'mixed', 'calm']),
+        energyBursts: modNumber(0, 2),
+        shapeBursts: modNumber(0, 2),
+        clearText: MOD_SWITCH,
+        wordGlow: modNumber(0, 2),
+        transitionStyle: modChoice(['classic', 'varied', 'slow']),
         sparkAmount: modNumber(0, 2),
         ornamentAmount: modNumber(0, 2),
         textMotion: modNumber(0, 2),

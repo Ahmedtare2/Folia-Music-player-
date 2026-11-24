@@ -36,6 +36,8 @@ const FIREWORKS_CONTROLS: ControlSpec[] = [
     slider('chorusBloom', 'options.hanabiChorusBloom', 0, 2, { noteKey: 'options.hanabiChorusBloomHint' }),
     slider('bloom', 'options.hanabiBloom', 0, 2, { noteKey: 'options.hanabiBloomHint' }),
     toggle('launches', 'options.hanabiLaunches', 'options.hanabiLaunchesHint'),
+    slider('energyBursts', 'options.hanabiEnergyBursts', 0, 2, { noteKey: 'options.hanabiEnergyBurstsHint' }),
+    slider('shapeBursts', 'options.hanabiShapeBursts', 0, 2, { noteKey: 'options.hanabiShapeBurstsHint' }),
 ];
 
 const STAGE_CONTROLS: ControlSpec[] = [
@@ -48,6 +50,8 @@ const STAGE_CONTROLS: ControlSpec[] = [
 
 const TEXT_CONTROLS: ControlSpec[] = [
     toggle('textOnly', 'options.hanabiTextOnly', 'options.hanabiTextOnlyHint'),
+    toggle('clearText', 'options.hanabiClearText', 'options.hanabiClearTextHint'),
+    slider('wordGlow', 'options.hanabiWordGlow', 0, 2, { noteKey: 'options.hanabiWordGlowHint' }),
     slider('textMotion', 'options.hanabiTextMotion', 0, 2),
     slider('blockOpacity', 'options.hanabiBlockOpacity', 0, 1, { step: 0.01 }),
 ];
@@ -116,8 +120,20 @@ const HanabiSettingsPanel: React.FC<VisualizerSettingsPanelProps<HanabiTuning>> 
                             { value: 'mixed', label: t('options.hanabiColorModeMixed') },
                             { value: 'vivid', label: t('options.hanabiColorModeVivid') },
                             { value: 'theme', label: t('options.hanabiColorModeTheme') },
+                            { value: 'calm', label: t('options.hanabiColorModeCalm') },
                         ]}
                         onChange={colorMode => onTuningChange?.({ colorMode })}
+                    />
+                </Row>
+                <Row label={t('options.hanabiTransitionStyle')} note={t('options.hanabiTransitionStyleHint')}>
+                    <Segmented<HanabiTuning['transitionStyle']>
+                        value={tuning.transitionStyle}
+                        options={[
+                            { value: 'varied', label: t('options.hanabiTransitionVaried') },
+                            { value: 'classic', label: t('options.hanabiTransitionClassic') },
+                            { value: 'slow', label: t('options.hanabiTransitionSlow') },
+                        ]}
+                        onChange={transitionStyle => onTuningChange?.({ transitionStyle })}
                     />
                 </Row>
             </Group>

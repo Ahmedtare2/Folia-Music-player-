@@ -149,7 +149,7 @@ export const buildHanabiText = (options: HanabiTextOptions, deps: HanabiTextDeps
         regionWidth: options.regionWidth,
         regionHeight: options.regionHeight,
         fontPx: spec.heroSize * Math.min(options.width, options.height),
-        tilt: spec.tilt,
+        tilt: options.straight ? 0 : spec.tilt,
         seed: options.seed,
         ...layoutParams,
     });
@@ -411,7 +411,7 @@ export const buildHanabiText = (options: HanabiTextOptions, deps: HanabiTextDeps
         const b = exitPose(spec.exit, span > 0 ? (t - rig.exitStart) / span : 0, rig.ctx);
         combinePoses(scratchEnter, b, out);
         if (singOut) {
-            const sung = t >= rig.landed ? singPose(spec.sing, t - rig.sungAt, rig.sungEnd - rig.sungAt, rig.ctx.rand[3], motion) : restSing();
+            const sung = t >= rig.landed ? singPose(spec.sing, t - rig.sungAt, rig.sungEnd - rig.sungAt, rig.ctx.rand[3], motion, options.wordGlow ?? 0) : restSing();
             Object.assign(singOut, sung);
         }
         return out.alpha > 0.002;

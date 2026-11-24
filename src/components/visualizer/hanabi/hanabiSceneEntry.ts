@@ -83,6 +83,7 @@ export const buildHanabiSceneEntry = (pixi: PixiModule, context: HanabiSceneBuil
         motifs: context.motifs,
         icons: context.icons,
         spinDirection: hanabiSpinDirection(program.seed),
+        chorus: program.chorus,
         opening: index === 0 && context.songTitle ? { title: context.songTitle, artist: context.songArtist } : null,
     });
     scene.setLayerVisibility({ graphics: true, text: context.showText, mid: false });

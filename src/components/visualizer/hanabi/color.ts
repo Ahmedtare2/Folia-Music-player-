@@ -195,6 +195,19 @@ const ROLES: Record<PaletteRole, RoleColors> = {
 
 export const PALETTE_ROLES = Object.keys(ROLES) as PaletteRole[];
 
+/** Calm: one hue (the theme accent, which follows the album cover), spread over a few soft lightness steps. */
+const calmColors = (theme: Theme): RoleColors => {
+    const [h, s] = toHsl(rgbOfHex(hexOfCss(theme.accentColor, 0x9bb7ff)));
+    const sat = Math.min(0.55, Math.max(0.22, s));
+    const tone = (l: number, mul = 1) => hexOfRgb(toRgb([h, clamp01(sat * mul), l]));
+    return {
+        blocks: [tone(0.32), tone(0.42, 0.9), tone(0.52, 0.8)],
+        sparks: [tone(0.78), tone(0.86, 0.8), tone(0.68), 0xffffff],
+        accent: tone(0.74),
+        glow: tone(0.88, 0.7),
+    };
+};
+
 /** 主题色 → 同一套结构（色块用主色 / 强调色 / 次色，烟花用它们调亮调饱和的版本）。 */
 const themeColors = (theme: Theme): RoleColors => {
     const primary = hexOfCss(theme.primaryColor, 0xffffff);
@@ -250,7 +263,7 @@ export const keywordColorOf = (theme: Theme): ((text: string) => number | null) 
  */
 export const resolveHanabiPalette = (role: PaletteRole, theme: Theme, colorMode: HanabiTuning['colorMode']): HanabiPalette => {
     const base = ROLES[role] ?? ROLES.night;
-    const colors = colorMode === 'theme' ? themeColors(theme) : colorMode === 'mixed' ? mixColors(base, theme) : base;
+    const colors = colorMode === 'calm' ? calmColors(theme) : colorMode === 'theme' ? themeColors(theme) : colorMode === 'mixed' ? mixColors(base, theme) : base;
     const background = hexOfCss(theme.backgroundColor, 0x000000);
     const paper = relativeLuminance(background) > 0.4 ? DARK_INK : LIGHT_INK;
     const worst = (ink: number) => Math.min(...colors.blocks.map(block => contrastRatio(block, ink)));

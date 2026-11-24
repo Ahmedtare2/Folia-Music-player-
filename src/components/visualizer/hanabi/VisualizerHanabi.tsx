@@ -83,8 +83,8 @@ const VisualizerHanabi: React.FC<VisualizerSharedProps & { hanabiTuning: HanabiT
     // 纯音乐 / 歌词还没到：编译成只有间奏镜头的程序（烟花照常一路升空）。showText 关掉时仍按真实歌词编译，
     // 镜头节奏跟着歌走，只是不画字。
     const program = useMemo(
-        () => compileHanabiProgram(committedLines, committedSeed),
-        [committedLines, committedSeed],
+        () => compileHanabiProgram(committedLines, committedSeed, {}, { transitionStyle: hanabiTuning.transitionStyle }),
+        [committedLines, committedSeed, hanabiTuning.transitionStyle],
     );
     const { activeLine, recentCompletedLine, nextLines } = useVisualizerRuntime({
         currentTime,

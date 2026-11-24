@@ -15,7 +15,8 @@ const MAX_BASE_RESOLUTION = 2;
 /** 花火自己的像素密度（分辨率倍数为 1 时就是它，和没有这个设置时一样）；字形图集按渲染倍率除以它算出超采样倍数。 */
 export const resolveHanabiBaseResolution = (devicePixelRatio: number) => Math.min(MAX_BASE_RESOLUTION, Math.max(1, devicePixelRatio || 1));
 
-const COLOR_MODES: HanabiTuning['colorMode'][] = ['theme', 'vivid', 'mixed'];
+const COLOR_MODES: HanabiTuning['colorMode'][] = ['theme', 'vivid', 'mixed', 'calm'];
+const TRANSITION_STYLES: HanabiTuning['transitionStyle'][] = ['classic', 'varied', 'slow'];
 const RENDER_QUALITIES: HanabiRenderQuality[] = ['full', 'balanced', 'low'];
 
 /** 任何存下来的值 → 完整、合法的 tuning（缺字段走默认，越界钳住）。 */
@@ -41,6 +42,11 @@ export const normalizeHanabiTuning = (raw: unknown): HanabiTuning => {
         sky: numberWithin(input.sky, d.sky, 0, 1),
         collage: numberWithin(input.collage, d.collage, 0, 2),
         renderQuality: RENDER_QUALITIES.includes(input.renderQuality) ? input.renderQuality : d.renderQuality,
+        energyBursts: numberWithin(input.energyBursts, d.energyBursts, 0, 2),
+        shapeBursts: numberWithin(input.shapeBursts, d.shapeBursts, 0, 2),
+        clearText: input.clearText !== false,
+        wordGlow: numberWithin(input.wordGlow, d.wordGlow, 0, 2),
+        transitionStyle: TRANSITION_STYLES.includes(input.transitionStyle) ? input.transitionStyle : d.transitionStyle,
     };
 };
 

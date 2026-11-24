@@ -433,13 +433,14 @@ export const exitPose = (fx: ExitFx, p: number, ctx: FxContext): GlyphPose => {
 };
 
 /** 强调：u = 被唱到后过了多少秒（< 0 为还没唱到），duration = 这个字被唱的时长。 */
-export const singPose = (fx: SingFx, u: number, duration: number, rand: number, motion: number): SingPose => {
+export const singPose = (fx: SingFx, u: number, duration: number, rand: number, motion: number, wordGlow = 0): SingPose => {
     const pose = restSing();
-    if (u < 0 || fx === 'none') return pose;
+    if (u < 0 || (fx === 'none' && wordGlow <= 0)) return pose;
     const hold = Math.max(duration, 0.12);
     // 唱的时候保持、唱完 0.35 秒内收起的包络。
     const envelope = clamp01(u / 0.08) * (1 - clamp01((u - hold) / 0.35));
     switch (fx) {
+        case 'none': break;
         case 'bounce': {
             const T = 0.3;
             if (u < T) pose.dy = -0.26 * Math.sin((u / T) * Math.PI);
@@ -501,6 +502,20 @@ export const singPose = (fx: SingFx, u: number, duration: number, rand: number, 
             pose.color = clamp01(u / 0.1);
             pose.scale = 1 + 0.14 * Math.exp(-u / 0.12) * clamp01(u / 0.03);
             break;
+        }
+    }
+    if (wordGlow > 0) {
+        // Sung-word glow: lit for exactly the sung time, and a long held word breathes until it ends.
+        const g = wordGlow;
+        pose.flash = Math.min(1, pose.flash + 0.28 * g * envelope);
+        if (hold > 0.8) {
+            const build = clamp01(u / 0.6) * (1 - clamp01((u - hold) / 0.25));
+            const breath = 0.5 - 0.5 * Math.cos(((u - 0.3) / 1.2) * Math.PI * 2);
+            pose.flash = Math.min(1, pose.flash + 0.18 * g * build * breath);
+            pose.scale += 0.025 * g * build * (0.4 + 0.6 * breath);
+            // A small pop as the held word ends.
+            const end = u - hold;
+            if (end >= 0 && end < 0.25) pose.scale += 0.05 * g * Math.sin((end / 0.25) * Math.PI);
         }
     }
     if (motion !== 1) {
