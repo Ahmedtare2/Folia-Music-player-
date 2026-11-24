@@ -247,6 +247,18 @@ export interface FoliaNativeBridgePluginContract {
     resolveRelativeFile?: (options: { treeUri: string; relativePath: string }) => Promise<{ entry: FoliaSafEntryDescriptor | null }>;
     checkFileReadable?: (options: { contentUri: string; treeUri?: string }) => Promise<{ readable: boolean; size?: number; lastModified?: number }>;
     getVideoEncoderInfo?: () => Promise<FoliaVideoEncoderInfo>;
+    videoExportStart?: (options: {
+        mime: 'video/avc' | 'video/hevc';
+        width: number;
+        height: number;
+        fps: number;
+        audioContentUri?: string;
+        audioStartSec?: number;
+        audioDurationSec?: number;
+    }) => Promise<{ sessionId: string; audioSamples?: number; audioError?: string }>;
+    videoExportWriteChunks?: (options: { sessionId: string; data: string; meta: Array<[number, number, number]> }) => Promise<void>;
+    videoExportFinish?: (options: { sessionId: string; displayName: string }) => Promise<{ uri: string; bytes: number; displayName: string }>;
+    videoExportAbort?: (options: { sessionId: string }) => Promise<void>;
     readFileBase64?: (options: {
         contentUri: string;
         treeUri?: string;
@@ -1634,4 +1646,16 @@ export const getNativeVideoEncoderInfo = async (): Promise<FoliaVideoEncoderInfo
     const plugin = getNativePlugin();
     if (!plugin?.getVideoEncoderInfo) return null;
     return plugin.getVideoEncoderInfo();
+};
+
+/** Video export: the native MP4 writer (null when the app has no native part). */
+export const getNativeVideoExportPlugin = () => {
+    const plugin = getNativePlugin();
+    if (!plugin?.videoExportStart || !plugin.videoExportWriteChunks || !plugin.videoExportFinish || !plugin.videoExportAbort) return null;
+    return {
+        start: plugin.videoExportStart.bind(plugin),
+        writeChunks: plugin.videoExportWriteChunks.bind(plugin),
+        finish: plugin.videoExportFinish.bind(plugin),
+        abort: plugin.videoExportAbort.bind(plugin),
+    };
 };

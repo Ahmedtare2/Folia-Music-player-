@@ -78,6 +78,8 @@ public class FoliaNativeBridgePlugin extends Plugin {
     private final ExecutorService playbackExecutor = Executors.newFixedThreadPool(2);
     // Whole-file staging copies can take seconds; on their own thread they no longer queue the per-play readable check behind them.
     private final ExecutorService stagingExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService exportExecutor = Executors.newSingleThreadExecutor();
+    private final java.util.HashMap<String, FoliaVideoExporter> videoExporters = new java.util.HashMap<>();
     private final ExecutorService ioExecutor = Executors.newFixedThreadPool(4);
 
     public static final String MEDIA_CACHE_ROOT_DIR = "folia_media_cache";
@@ -1038,6 +1040,121 @@ public class FoliaNativeBridgePlugin extends Plugin {
             res.put("stagedPaths", stagedPaths);
             res.put("cacheDir", FoliaSafStreamHandler.getStagedAudioCacheDir(context).getAbsolutePath());
             call.resolve(res);
+        });
+    }
+
+    private void setExportKeepScreenOn(boolean on) {
+        final Activity activity = getActivity();
+        if (activity == null) return;
+        activity.runOnUiThread(() -> {
+            if (on) {
+                activity.getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            } else {
+                activity.getWindow().clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            }
+        });
+    }
+
+    /** Video export: opens an MP4 writer and prepares the AAC audio of the song (this can take a while for a full song). */
+    @PluginMethod
+    public void videoExportStart(PluginCall call) {
+        final String mime = call.getString("mime", "video/avc");
+        final int width = call.getInt("width", 0);
+        final int height = call.getInt("height", 0);
+        final int fps = call.getInt("fps", 30);
+        final String audioUri = call.getString("audioContentUri", "");
+        final double startSec = call.getDouble("audioStartSec", 0.0);
+        final double durationSec = call.getDouble("audioDurationSec", 0.0);
+        exportExecutor.execute(() -> {
+            try {
+                FoliaVideoExporter exporter = new FoliaVideoExporter(getContext(), mime, width, height, fps);
+                if (audioUri != null && !audioUri.isEmpty() && durationSec > 0) {
+                    exporter.prepareAudio(Uri.parse(audioUri), (long) (startSec * 1000000.0), (long) (durationSec * 1000000.0));
+                }
+                String id = java.util.UUID.randomUUID().toString();
+                synchronized (videoExporters) {
+                    videoExporters.put(id, exporter);
+                }
+                setExportKeepScreenOn(true);
+                JSObject res = new JSObject();
+                res.put("sessionId", id);
+                res.put("audioSamples", exporter.getAudioSampleCount());
+                if (exporter.getAudioError() != null) res.put("audioError", exporter.getAudioError());
+                call.resolve(res);
+            } catch (Throwable error) {
+                call.reject(String.valueOf(error));
+            }
+        });
+    }
+
+    /** Video export: a batch of encoded chunks. data is the chunks joined together (base64), meta is [[size, ptsUs, keyFrame], ...]. */
+    @PluginMethod
+    public void videoExportWriteChunks(PluginCall call) {
+        final String id = call.getString("sessionId", "");
+        final String data = call.getString("data", "");
+        final JSArray meta = call.getArray("meta");
+        exportExecutor.execute(() -> {
+            try {
+                FoliaVideoExporter exporter;
+                synchronized (videoExporters) {
+                    exporter = videoExporters.get(id);
+                }
+                if (exporter == null) throw new IllegalStateException("unknown export session");
+                byte[] bytes = Base64.decode(data, Base64.NO_WRAP);
+                int offset = 0;
+                for (int i = 0; i < meta.length(); i++) {
+                    org.json.JSONArray row = meta.getJSONArray(i);
+                    int size = row.getInt(0);
+                    long ptsUs = row.getLong(1);
+                    boolean key = row.getInt(2) != 0;
+                    exporter.writeVideo(bytes, offset, size, ptsUs, key);
+                    offset += size;
+                }
+                call.resolve();
+            } catch (Throwable error) {
+                call.reject(String.valueOf(error));
+            }
+        });
+    }
+
+    /** Video export: closes the MP4 and saves it to Movies/Folia. */
+    @PluginMethod
+    public void videoExportFinish(PluginCall call) {
+        final String id = call.getString("sessionId", "");
+        final String displayName = call.getString("displayName", "folia-export.mp4");
+        exportExecutor.execute(() -> {
+            try {
+                FoliaVideoExporter exporter;
+                synchronized (videoExporters) {
+                    exporter = videoExporters.remove(id);
+                }
+                if (exporter == null) throw new IllegalStateException("unknown export session");
+                String[] saved = exporter.finishAndSave(displayName);
+                setExportKeepScreenOn(false);
+                JSObject res = new JSObject();
+                res.put("uri", saved[0]);
+                res.put("bytes", Long.parseLong(saved[1]));
+                res.put("displayName", displayName);
+                call.resolve(res);
+            } catch (Throwable error) {
+                setExportKeepScreenOn(false);
+                call.reject(String.valueOf(error));
+            }
+        });
+    }
+
+    /** Video export: throws the unfinished file away. */
+    @PluginMethod
+    public void videoExportAbort(PluginCall call) {
+        final String id = call.getString("sessionId", "");
+        exportExecutor.execute(() -> {
+            FoliaVideoExporter exporter;
+            synchronized (videoExporters) {
+                exporter = videoExporters.remove(id);
+            }
+            if (exporter != null) exporter.abort();
+            setExportKeepScreenOn(false);
+            call.resolve();
         });
     }
 

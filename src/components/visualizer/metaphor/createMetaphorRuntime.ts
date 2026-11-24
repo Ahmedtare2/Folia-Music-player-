@@ -85,6 +85,8 @@ export interface MetaphorRuntimeOptions {
     /** WebGL 上下文丢了：外壳重建运行时。 */
     onContextLost: () => void;
     signal: AbortSignal;
+    /** Video export only: draw at exactly this pixel ratio instead of the screen's (host CSS size x ratio = video size). */
+    fixedPixelRatio?: number;
 }
 
 interface MetaphorSet {
@@ -191,6 +193,8 @@ export class MetaphorRuntime {
     private audioRaw = false;
     private audioAt = 0;
     private debugTime: number | null = null;
+    /** Video export: the audio level (0..1) and step (s) for the frame being drawn; replaces the live audio and the clock. */
+    private exportSample: { level: number; dt: number } | null = null;
     /** 正在画的 cue。 */
     private current = -1;
     /** 每拆一次套就加一：等空闲时备的那一套靠它认出自己过时了。 */
@@ -339,6 +343,18 @@ export class MetaphorRuntime {
         }
     }
 
+    /**
+     * Video export: draws one frame at exactly `seconds` with a given audio level (0..1) and returns the canvas.
+     * Deterministic: no live clock, no live audio, no smart-beat events. After the first call the live loop stays off.
+     */
+    renderExportFrame(seconds: number, level: number, dt: number): HTMLCanvasElement {
+        if (!this.exportSample) this.audioRaw = false;
+        this.exportSample = { level, dt };
+        this.debugTime = seconds;
+        this.render();
+        return this.renderer.domElement;
+    }
+
     swapSong(song: MetaphorSong) {
         this.song = song;
         this.rebuildProgram();
@@ -465,7 +481,7 @@ export class MetaphorRuntime {
         // 量排版尺寸，不量 getBoundingClientRect：样式小图把大舞台缩小了画，量到的会是缩小后的尺寸
         const { clientWidth: width, clientHeight: height } = this.options.host;
         if (width < 1 || height < 1) return;
-        const pixelRatio = resolveLyricPixelRatio(Math.min(2, window.devicePixelRatio || 1), this.renderScale);
+        const pixelRatio = this.options.fixedPixelRatio ?? resolveLyricPixelRatio(Math.min(2, window.devicePixelRatio || 1), this.renderScale);
         if (width === this.width && height === this.height && pixelRatio === this.pixelRatio) return;
         this.width = width;
         this.height = height;
@@ -684,10 +700,11 @@ export class MetaphorRuntime {
     }
 
     private sampleAudio(now: number) {
-        const raw = this.options.audioPower.get();
+        const exportSample = this.exportSample;
+        const raw = exportSample ? exportSample.level : this.options.audioPower.get();
         if (raw > 1) this.audioRaw = true;
         const level = this.paused || !Number.isFinite(raw) ? 0 : Math.min(1, Math.max(0, this.audioRaw ? raw / 255 : raw));
-        const dt = this.audioAt > 0 ? Math.min(0.1, (now - this.audioAt) / 1000) : 0.016;
+        const dt = exportSample ? exportSample.dt : this.audioAt > 0 ? Math.min(0.1, (now - this.audioAt) / 1000) : 0.016;
         this.audioAt = now;
         this.audio += (level - this.audio) * (1 - Math.exp(-dt / (level > this.audio ? 0.3 : 0.9)));
     }
@@ -739,7 +756,7 @@ export class MetaphorRuntime {
         if (!still) {
             if (this.showText) count = writeMetaphorPairs(set.layout.glyphs, safeTime, this.shapeData, count);
             // 智能动感的「湮灭对撞」：对撞挪到拍上，平常的拍从对撞点放小环。没就绪、关着时走原来的那一组
-            const strength = isBeatFxReady() ? getBeatEffectStrength(BEAT_EFFECT_IDS.metaphorAnnihilation) : 0;
+            const strength = !this.exportSample && isBeatFxReady() ? getBeatEffectStrength(BEAT_EFFECT_IDS.metaphorAnnihilation) : 0;
             const events = strength > 0 ? getBeatFxEvents() : null;
             const collisions = events ? this.snappedCollisions(set, cue, events) : set.collisions;
             count = writeMetaphorCollisions(collisions, cueTime, this.shapeData, count);
@@ -778,6 +795,8 @@ export class MetaphorRuntime {
     private frame = () => {
         this.raf = 0;
         if (this.disposed) return;
+        // Video export draws frames itself; the live loop must not add extra frames (it would move the audio smoothing).
+        if (this.exportSample) return;
         this.render();
         if (!this.paused && this.debugTime === null) this.raf = requestAnimationFrame(this.frame);
     };

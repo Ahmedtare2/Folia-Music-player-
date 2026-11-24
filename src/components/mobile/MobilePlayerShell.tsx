@@ -61,6 +61,7 @@ import { useSystemBarSettingsStore } from '../../stores/useSystemBarSettingsStor
 import { useShallow } from 'zustand/react/shallow';
 import MobileEqualizerSheet from './MobileEqualizerSheet';
 import MobileOnlineHub from './MobileOnlineHub';
+import { MobileVideoExportTestCard } from './MobileVideoExportCard';
 import { MobileLetterRail, MobilePerformanceCard, MobilePlaybackTimingCard, MobileVideoExportCheckCard } from './MobileLibraryExtras';
 import MobileMiniPlayer from './MobileMiniPlayer';
 import MobileNowPlayingSheet from './MobileNowPlayingSheet';
@@ -1776,6 +1777,7 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                                 <MobilePerformanceCard accentColor={accentColor} />
                                 <MobilePlaybackTimingCard accentColor={accentColor} />
                                 <MobileVideoExportCheckCard accentColor={accentColor} />
+                                <MobileVideoExportTestCard accentColor={accentColor} song={matchedPlayingLocalSong} currentSong={currentSong} lyrics={lyrics} theme={theme} />
 
                                 {/* Section 4: Real 10-Band Audio Equalizer & Effects */}
                                 <section
