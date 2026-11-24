@@ -211,6 +211,53 @@ export const resolveLocalSongAlbumText = (song: LocalSong, unknownAlbumLabel = '
     return album || unknownAlbumLabel;
 };
 
+// ---- A-Z title ordering (Latin A-Z, then Arabic, then digits/symbols as "#") and the letter index beside the list.
+const ARABIC_LETTER_ORDER = 'ابتثجحخدذرزسشصضطظعغفقكلمنهوي';
+const ARABIC_MARKS_RE = /[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED\u0640]/g;
+const ARABIC_CHAR_RE = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
+const ARABIC_FOLD: Record<string, string> = {
+    'أ': 'ا', 'إ': 'ا', 'آ': 'ا', 'ٱ': 'ا', 'ى': 'ي', 'ئ': 'ي', 'ی': 'ي', 'ؤ': 'و', 'ة': 'ه', 'ہ': 'ه', 'ک': 'ك', 'ء': 'ا',
+};
+const titleCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+export type TitleSortInfo = { group: 0 | 1 | 2; letter: string; rank: number; text: string };
+
+export const getTitleSortInfo = (rawTitle: string): TitleSortInfo => {
+    let text = (rawTitle || '').normalize('NFKC').replace(ARABIC_MARKS_RE, '');
+    text = text.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    text = text.replace(/^[^\p{L}\p{N}]+/u, '');
+    const first = text.charAt(0);
+    if (/[A-Za-z]/.test(first)) {
+        return { group: 0, letter: first.toUpperCase(), rank: first.toUpperCase().charCodeAt(0), text: text.toLowerCase() };
+    }
+    if (first && ARABIC_CHAR_RE.test(first)) {
+        const folded = ARABIC_FOLD[first] ?? first;
+        const index = ARABIC_LETTER_ORDER.indexOf(folded);
+        const letter = index >= 0 ? folded : 'ا';
+        const body = Array.from(text).map(ch => ARABIC_FOLD[ch] ?? ch).join('');
+        return { group: 1, letter, rank: index >= 0 ? index : 0, text: body };
+    }
+    return { group: 2, letter: '#', rank: 0, text: text.toLowerCase() };
+};
+
+const compareTitleInfo = (a: TitleSortInfo, b: TitleSortInfo): number => (
+    a.group - b.group
+    || a.rank - b.rank
+    || titleCollator.compare(a.text, b.text)
+);
+
+const songTitleForSort = (song: LocalSong): string => song.title?.trim() || song.fileName || '';
+
+/** Letters present in the (title-sorted) list, in list order, and the index of the first song under each. */
+export const buildTitleLetterIndex = (songs: readonly LocalSong[]): { letters: string[]; firstIndex: Map<string, number> } => {
+    const firstIndex = new Map<string, number>();
+    songs.forEach((song, index) => {
+        const { letter } = getTitleSortInfo(songTitleForSort(song));
+        if (!firstIndex.has(letter)) firstIndex.set(letter, index);
+    });
+    return { letters: Array.from(firstIndex.keys()), firstIndex };
+};
+
 export const filterAndSortLocalSongs = (
     songs: readonly LocalSong[],
     query: string,
@@ -229,6 +276,12 @@ export const filterAndSortLocalSongs = (
                 || folder.includes(trimmed);
         })
         : [...songs];
+
+    if (sortOrder === 'title') {
+        const keyed = filtered.map(song => ({ song, info: getTitleSortInfo(songTitleForSort(song)) }));
+        keyed.sort((a, b) => compareTitleInfo(a.info, b.info));
+        return keyed.map(item => item.song);
+    }
 
     return filtered.sort((a, b) => {
         if (sortOrder === 'recent') {

@@ -63,6 +63,7 @@ import { showLatticeFmNotice, usePlaybackEntryViewStore } from '../../../../stor
 import { useStableActionSurface } from '../../../../hooks/useStableCallbacks';
 import { hasBeforePlayHook, notifyPlaybackFailed, runBeforePlayHook } from '../../../../services/hostExtensionHooks';
 import { errorMessage } from '../../../../utils/errorText';
+import { beginSkipTiming, markSkipTiming } from '../../../../utils/skipTimings';
 
 // src/components/app/playback/start/usePlaybackQueueController.ts
 
@@ -654,6 +655,7 @@ export function usePlaybackQueueController({
         }
 
         if (isLocal) {
+            beginSkipTiming('track change');
             // The newest record of this song from the library merged with the live in-memory handle:
             // IndexedDB strips `fileHandle` on write, so keeping `inMemorySong.fileHandle` avoids
             // redundant SAF directory tree resolution on every Next/Previous track switch.
@@ -686,6 +688,7 @@ export function usePlaybackQueueController({
                 return;
             }
             const resolvedLocalData = localData;
+            markSkipTiming('song record loaded');
 
             const localQueue = queueContext
                 .map(queuedSong => {

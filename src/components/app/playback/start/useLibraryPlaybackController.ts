@@ -6,6 +6,8 @@ import { getFromCacheWithMigration, getLocalSong, getLocalSongs, removeFromCache
 import { getCachedCoverUrl, loadCachedOrFetchCover } from '../../../../services/coverCache';
 import { ensureLocalSongCoverAsset } from '../../../../services/localMusicService';
 import { prestageAndroidSafAudioTracks } from '../../../../services/android/foliaAndroidBridge';
+import { ensureSkipTiming, markSkipTiming } from '../../../../utils/skipTimings';
+import { persistPlaybackCacheSoon } from '../persistPlaybackCache';
 import { addSongsToLocalPlaylist, buildCanonicalLocalSongIdIndex, createLocalPlaylist, getLocalPlaylists, setLocalSongFavorite } from '../../../../services/localPlaylistService';
 import { applyLocalLibraryEntityDisplay, buildLocalQueue, buildNavidromeQueue, buildUnifiedLocalSong, buildUnifiedNavidromeSong, resolveLocalSongMetadata } from '../../../../services/playbackAdapters';
 import { getPrefetchedData, prefetchNearbySongs } from '../../../../services/prefetchService';
@@ -80,6 +82,38 @@ const toReportedLocalSong = (localSong: LocalSong): SongResult | null => {
         return buildUnifiedLocalSong({ localSong, matchedSong: null, coverUrl: null, preferOnlineMetadata: false });
     } catch {
         return null;
+    }
+};
+
+// Warms what the NEXT skips will need while the current song plays: the next tracks are staged from the phone's
+// storage (one native job at a time, never in front of the current song) and their lyrics are parsed into the
+// in-memory lyric cache, so pressing next does not start from zero.
+const warmUpcomingLocalTracks = (current: LocalSong, queue: LocalSong[]) => {
+    try {
+        if (queue.length < 2) return;
+        const index = queue.findIndex(item => item.id === current.id);
+        if (index < 0) return;
+        const upcoming: LocalSong[] = [];
+        for (let offset = 1; offset <= 3; offset += 1) {
+            const candidate = queue[(index + offset) % queue.length];
+            if (candidate && candidate.id !== current.id && !upcoming.some(item => item.id === candidate.id)) upcoming.push(candidate);
+        }
+        if (upcoming.length === 0) return;
+        void prestageAndroidSafAudioTracks([current.safContentUri, ...upcoming.map(item => item.safContentUri)]);
+        const priority = useLyricSettingsStore.getState().localLyricsPriority;
+        window.setTimeout(() => {
+            void (async () => {
+                for (const song of upcoming.slice(0, 2)) {
+                    try {
+                        await resolveLocalSongLyrics(song, priority);
+                    } catch {
+                        // a track whose lyrics fail to parse is handled when it is actually played
+                    }
+                }
+            })();
+        }, 400);
+    } catch {
+        // warming is best effort
     }
 };
 
@@ -682,7 +716,9 @@ export function useLibraryPlaybackController({
         const stillWanted = startPlay();
         interruptStagePlaybackForMainTransition();
 
+        ensureSkipTiming('play local song');
         const audio = await loadLocalSongAudio(localSong);
+        markSkipTiming('file opened + cover checked');
         if (!audio) {
             // Another song was asked for while the file was read: this failure is not the listener's
             // any more, and is neither said nor told.
@@ -710,6 +746,7 @@ export function useLibraryPlaybackController({
         };
         if (givesUp()) return;
         const initialMeta = await resolveLocalMetadataUI(preparedLocalSong, null);
+        markSkipTiming('metadata + lyrics ready');
         if (givesUp()) return;
         const initialSongKey = getPlaybackSongKey(initialMeta.unifiedSong);
         const recoveredRepresentation = audio.recoveredCopy(initialSongKey);
@@ -740,6 +777,8 @@ export function useLibraryPlaybackController({
         }
         showSong(initialMeta.unifiedSong);
         setAudioSrc(playbackUrl);
+        markSkipTiming('audio source set');
+        warmUpcomingLocalTracks(preparedLocalSong, queue);
 
         if (initialMeta.coverUrl) {
             loadCachedOrFetchCover(`cover_local_${preparedLocalSong.id}`, initialMeta.coverUrl).then((resolvedCoverUrl) => {
@@ -759,7 +798,7 @@ export function useLibraryPlaybackController({
                 ? buildLocalQueue(queue, initialMeta.unifiedSong, initialMeta.catalog)
                 : [initialMeta.unifiedSong];
         setPlayQueue(finalQueue);
-        void persistLastPlaybackCache(initialMeta.unifiedSong, finalQueue);
+        void persistPlaybackCacheSoon(initialMeta.unifiedSong, finalQueue);
         // As playSong does for an online song: this song and the one after it are analysed for the
         // blend between them, and online songs queued nearby are fetched ahead.
         if (finalQueue.length > 1) {

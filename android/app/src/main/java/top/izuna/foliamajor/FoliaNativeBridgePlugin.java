@@ -76,6 +76,8 @@ public class FoliaNativeBridgePlugin extends Plugin {
     // Dedicated fast executor for foreground playback readability checks & path resolution so
     // background library scanning or metadata hydration never blocks track switching.
     private final ExecutorService playbackExecutor = Executors.newFixedThreadPool(2);
+    // Whole-file staging copies can take seconds; on their own thread they no longer queue the per-play readable check behind them.
+    private final ExecutorService stagingExecutor = Executors.newSingleThreadExecutor();
     private final ExecutorService ioExecutor = Executors.newFixedThreadPool(4);
 
     public static final String MEDIA_CACHE_ROOT_DIR = "folia_media_cache";
@@ -1024,7 +1026,7 @@ public class FoliaNativeBridgePlugin extends Plugin {
             return;
         }
 
-        playbackExecutor.execute(() -> {
+        stagingExecutor.execute(() -> {
             List<File> stagedFiles = FoliaSafStreamHandler.prestageAudioUris(context, uris);
             JSArray stagedPaths = new JSArray();
             for (File f : stagedFiles) {
@@ -1037,6 +1039,63 @@ public class FoliaNativeBridgePlugin extends Plugin {
             res.put("cacheDir", FoliaSafStreamHandler.getStagedAudioCacheDir(context).getAbsolutePath());
             call.resolve(res);
         });
+    }
+
+    /** Reports the phone's native H.264 / HEVC video encoders (used by the 4K video export check). */
+    @PluginMethod
+    public void getVideoEncoderInfo(PluginCall call) {
+        JSObject res = new JSObject();
+        try {
+            res.put("model", Build.MANUFACTURER + " " + Build.MODEL);
+            res.put("sdk", Build.VERSION.SDK_INT);
+            res.put("soc", Build.VERSION.SDK_INT >= 31 ? Build.SOC_MODEL : Build.HARDWARE);
+            try {
+                android.app.ActivityManager am =
+                    (android.app.ActivityManager) getContext().getSystemService(Context.ACTIVITY_SERVICE);
+                android.app.ActivityManager.MemoryInfo mi = new android.app.ActivityManager.MemoryInfo();
+                am.getMemoryInfo(mi);
+                res.put("totalRamMb", mi.totalMem / (1024L * 1024L));
+            } catch (Throwable ignored) {
+            }
+            JSArray encoders = new JSArray();
+            android.media.MediaCodecInfo[] infos =
+                new android.media.MediaCodecList(android.media.MediaCodecList.ALL_CODECS).getCodecInfos();
+            for (android.media.MediaCodecInfo info : infos) {
+                if (!info.isEncoder()) continue;
+                for (String type : info.getSupportedTypes()) {
+                    if (!"video/avc".equalsIgnoreCase(type) && !"video/hevc".equalsIgnoreCase(type)) continue;
+                    try {
+                        JSObject entry = new JSObject();
+                        String name = info.getName();
+                        entry.put("name", name);
+                        entry.put("mime", type);
+                        boolean hardware = Build.VERSION.SDK_INT >= 29
+                            ? info.isHardwareAccelerated()
+                            : (!name.startsWith("OMX.google") && !name.startsWith("c2.android"));
+                        entry.put("hardware", hardware);
+                        android.media.MediaCodecInfo.VideoCapabilities vc =
+                            info.getCapabilitiesForType(type).getVideoCapabilities();
+                        boolean supports4k = vc.isSizeSupported(3840, 2160);
+                        entry.put("supports4k", supports4k);
+                        if (supports4k) {
+                            try {
+                                double maxFps = vc.getSupportedFrameRatesFor(3840, 2160).getUpper();
+                                entry.put("maxFps4k", maxFps);
+                                entry.put("supports4k60", maxFps >= 59.0);
+                            } catch (Throwable ignored) {
+                            }
+                        }
+                        entry.put("maxBitrateMbps", vc.getBitrateRange().getUpper() / 1000000);
+                        encoders.put(entry);
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+            res.put("encoders", encoders);
+        } catch (Throwable error) {
+            res.put("error", String.valueOf(error));
+        }
+        call.resolve(res);
     }
 
     @PluginMethod

@@ -61,6 +61,7 @@ import { useSystemBarSettingsStore } from '../../stores/useSystemBarSettingsStor
 import { useShallow } from 'zustand/react/shallow';
 import MobileEqualizerSheet from './MobileEqualizerSheet';
 import MobileOnlineHub from './MobileOnlineHub';
+import { MobileLetterRail, MobilePerformanceCard, MobilePlaybackTimingCard, MobileVideoExportCheckCard } from './MobileLibraryExtras';
 import MobileMiniPlayer from './MobileMiniPlayer';
 import MobileNowPlayingSheet from './MobileNowPlayingSheet';
 import {
@@ -71,6 +72,7 @@ import {
     type MobilePrimaryTab,
     type MobileSongSortOrder,
     buildMobileLibraryCollections,
+    buildTitleLetterIndex,
     computeRestoredLibraryScrollState,
     filterAndSortLocalSongs,
     isLocalSongCurrentlyPlaying,
@@ -465,6 +467,34 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
         () => filterAndSortLocalSongs(localSongs, searchQuery, sortOrder),
         [localSongs, searchQuery, sortOrder],
     );
+
+    const titleLetterIndex = useMemo(
+        () => (sortOrder === 'title' ? buildTitleLetterIndex(filteredSongs) : null),
+        [filteredSongs, sortOrder],
+    );
+    const pendingLetterJumpRef = useRef<string | null>(null);
+    const handleLetterJump = (letter: string) => {
+        const index = titleLetterIndex?.firstIndex.get(letter);
+        const target = index === undefined ? undefined : filteredSongs[index];
+        if (!target) return;
+        pendingLetterJumpRef.current = target.id;
+        const needed = (index ?? 0) + MAX_RENDERED_SONGS_STEP;
+        if (visibleSongLimit < needed) setVisibleSongLimit(needed);
+        runPendingLetterJump();
+    };
+    const runPendingLetterJump = () => {
+        const id = pendingLetterJumpRef.current;
+        const container = songsListScrollRef.current;
+        if (!id || !container) return;
+        const row = container.querySelector<HTMLElement>(`[data-song-id="${id.replace(/"/g, '\\"')}"]`);
+        if (!row) return;
+        container.scrollTop += row.getBoundingClientRect().top - container.getBoundingClientRect().top;
+        savedScrollOffsetsRef.current.songs = container.scrollTop;
+        pendingLetterJumpRef.current = null;
+    };
+    useEffect(() => {
+        if (pendingLetterJumpRef.current) runPendingLetterJump();
+    });
 
     const collections = useMemo(
         () => buildMobileLibraryCollections(
@@ -1159,7 +1189,8 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                                         </div>
                                     </div>
 
-                                    {/* Scrollable Windowed Song List */}
+                                    {/* Scrollable Windowed Song List, with the A-Z letter rail beside it */}
+                                    <div className="relative flex min-h-0 flex-1 flex-col">
                                     <div
                                         ref={songsListScrollRef}
                                         data-testid="mobile-songs-scroll-container"
@@ -1172,7 +1203,7 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                                                 }
                                             }
                                         }}
-                                        className="flex-1 overflow-y-auto overscroll-contain space-y-1 pb-4"
+                                        className={`flex-1 overflow-y-auto overscroll-contain space-y-1 pb-4 ${titleLetterIndex && titleLetterIndex.letters.length > 1 ? 'pr-6' : ''}`}
                                     >
                                         {filteredSongs.slice(0, visibleSongLimit).map((song, idx) =>
                                             renderSongRow(song, filteredSongs, idx),
@@ -1182,6 +1213,14 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                                                 No tracks matching "{searchQuery}"
                                             </div>
                                         )}
+                                    </div>
+                                    {titleLetterIndex && titleLetterIndex.letters.length > 1 && (
+                                        <MobileLetterRail
+                                            letters={titleLetterIndex.letters}
+                                            accentColor={accentColor}
+                                            onSelect={handleLetterJump}
+                                        />
+                                    )}
                                     </div>
                                 </div>
                             )
@@ -1732,6 +1771,11 @@ export const MobilePlayerShell: React.FC<MobilePlayerShellProps> = ({
                                         </div>
                                     </div>
                                 </section>
+
+                                {/* Performance self-test and track-change timing log */}
+                                <MobilePerformanceCard accentColor={accentColor} />
+                                <MobilePlaybackTimingCard accentColor={accentColor} />
+                                <MobileVideoExportCheckCard accentColor={accentColor} />
 
                                 {/* Section 4: Real 10-Band Audio Equalizer & Effects */}
                                 <section

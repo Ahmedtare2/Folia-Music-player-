@@ -181,6 +181,24 @@ export interface FoliaNativePlaybackClockAnchor {
 }
 
 
+export type FoliaVideoEncoderEntry = {
+    name: string;
+    mime: string;
+    hardware: boolean;
+    supports4k: boolean;
+    supports4k60?: boolean;
+    maxFps4k?: number;
+    maxBitrateMbps?: number;
+};
+
+export type FoliaVideoEncoderInfo = {
+    model?: string;
+    sdk?: number;
+    soc?: string;
+    totalRamMb?: number;
+    encoders?: FoliaVideoEncoderEntry[];
+};
+
 export interface FoliaNativeBridgePluginContract {
     pickDirectory?: () => Promise<FoliaSafPickedDirectory | { cancelled?: boolean }>;
     pickAudioFiles?: (options?: { mimeType?: string }) => Promise<FoliaSafPickedFilesResult | { cancelled?: boolean }>;
@@ -228,6 +246,7 @@ export interface FoliaNativeBridgePluginContract {
     scanDirectoryTree?: (options: { treeUri: string; documentId?: string }) => Promise<{ entries: FoliaSafEntryDescriptor[] }>;
     resolveRelativeFile?: (options: { treeUri: string; relativePath: string }) => Promise<{ entry: FoliaSafEntryDescriptor | null }>;
     checkFileReadable?: (options: { contentUri: string; treeUri?: string }) => Promise<{ readable: boolean; size?: number; lastModified?: number }>;
+    getVideoEncoderInfo?: () => Promise<FoliaVideoEncoderInfo>;
     readFileBase64?: (options: {
         contentUri: string;
         treeUri?: string;
@@ -1608,4 +1627,11 @@ export const bindAudioElementToNativeExoPlayer = (
             void origPlay;
         },
     });
+};
+
+/** Stage 0 of the 4K video export: what the phone's native video encoders can do. Null when the native part is missing. */
+export const getNativeVideoEncoderInfo = async (): Promise<FoliaVideoEncoderInfo | null> => {
+    const plugin = getNativePlugin();
+    if (!plugin?.getVideoEncoderInfo) return null;
+    return plugin.getVideoEncoderInfo();
 };
