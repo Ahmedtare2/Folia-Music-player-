@@ -7,7 +7,7 @@ export type ExportAspectId = '16:9' | '9:16' | '1:1' | '4:5' | '4:3' | '21:9';
 export type ExportAspect = { id: ExportAspectId; label: string; hint: string; ratio: number };
 
 export const EXPORT_ASPECTS: readonly ExportAspect[] = [
-    { id: '16:9', label: '16:9', hint: 'YouTube, TV', ratio: 16 / 9 },
+    { id: '16:9', label: '16:9', hint: 'Widescreen, TV', ratio: 16 / 9 },
     { id: '9:16', label: '9:16', hint: 'Shorts, Reels, TikTok', ratio: 9 / 16 },
     { id: '1:1', label: '1:1', hint: 'Square', ratio: 1 },
     { id: '4:5', label: '4:5', hint: 'Instagram feed', ratio: 4 / 5 },
