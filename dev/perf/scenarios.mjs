@@ -31,6 +31,7 @@ const STYLES = [
     ['sonnet', '商籁', 'Pixi'],
     ['tempera', 'Tempera', 'Pixi'],
     ['lumiere', '绘光', 'Pixi'],
+    ['filmgate', 'Filmgate', 'Canvas2D'],
     ['cadenza', 'Mindscape', 'DOM + 2D 画布'],
     ['partita', '云阶', 'DOM'],
     ['fume', 'Fume', 'DOM + 2D 画布'],
@@ -106,6 +107,7 @@ export const SCENARIOS = [
 
     songChange('diorama', '镜台'),
     songChange('lumiere', '绘光'),
+    songChange('filmgate', 'Filmgate'),
     songChange('sonnet', '商籁'),
     songChange('tempera', 'Tempera'),
 ];
