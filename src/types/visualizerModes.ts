@@ -23,6 +23,7 @@ export const BUILTIN_VISUALIZER_MODES = [
     'hanabi',
     'lumiere',
     'filmgate',
+    'astral',
     'machi',
     'metaphor',
     'monet',
