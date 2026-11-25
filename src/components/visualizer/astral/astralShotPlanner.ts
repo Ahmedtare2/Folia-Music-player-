@@ -1,5 +1,6 @@
 import type { Line } from '../../../types';
 import { isInterludeLine } from '../../../utils/lyrics/parserCore';
+import { pickStation } from './astralStations';
 import type { Shot, ShotKind } from './astralCameraPath';
 
 // src/components/visualizer/astral/astralShotPlanner.ts
@@ -104,6 +105,7 @@ export const planSegments = ({ lines, seed }: PlanInput): Segment[] => {
     let previous: ShotKind | null = null;
     let before: ShotKind | null = null;
     let chorusRun = 0;
+    const recentStations: string[] = [];
     slots.forEach((slot, i) => {
         const table = TABLES[slot.section];
         const h = mix(base, i * 7919 + slot.lineIndex);
@@ -126,7 +128,15 @@ export const planSegments = ({ lines, seed }: PlanInput): Segment[] => {
         if (duration < 2 && (kind === 'flythrough' || kind === 'spiral' || kind === 'gate')) kind = 'push';
         const side: 1 | -1 = (h >>> 5) % 2 === 0 ? 1 : -1;
         const variation = ((h >>> 9) % 1000) / 1000;
-        segments.push({ index: i, start: slot.start, end: slot.end, lineIndex: slot.lineIndex, section: slot.section, shot: { kind, side, variation } });
+        let station: string | undefined;
+        if (kind !== 'gate' && !(i === 0 && slot.section !== 'gap')) {
+            // Every other stretch visits a figure of the hall; a chorus line starting a new chorus returns home.
+            station = pickStation(h >>> 3, recentStations.slice(-3), slot.section === 'chorus' && chorusRun === 0 && i > 0);
+            kind = 'station';
+            recentStations.push(station);
+        }
+        const shot: Shot = station ? { kind, side, variation, station } : { kind, side, variation };
+        segments.push({ index: i, start: slot.start, end: slot.end, lineIndex: slot.lineIndex, section: slot.section, shot });
         before = previous;
         previous = kind;
     });

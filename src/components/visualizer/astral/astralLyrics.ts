@@ -57,7 +57,7 @@ uniform float uHalo;
 void main() {
     vec2 p = abs(vUv - 0.5) * 2.0;
     float e = pow(max(p.x, 0.0), 3.0) + pow(max(p.y, 0.0), 2.6);
-    float a = (1.0 - smoothstep(0.55, 1.0, e)) * 0.66;
+    float a = (1.0 - smoothstep(0.55, 1.0, e)) * 0.8;
     vec3 c = mix(vec3(0.02, 0.035, 0.08), vec3(0.18, 0.13, 0.06), uHalo * (1.0 - e));
     gl_FragColor = vec4(c, a * uFade);
     #include <colorspace_fragment>

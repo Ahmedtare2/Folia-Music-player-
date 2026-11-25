@@ -42,7 +42,7 @@ export const PLANETS: readonly PlanetSpec[] = [
     { id: 'saturn', kind: 'ringed', position: { x: 7.0, y: 9.6, z: 0.8 }, radius: 1.8, bob: 0.22, period: 31, seedOffset: 0.5 },
     { id: 'mars', kind: 'mars', position: { x: -2.9, y: 2.5, z: 10.5 }, radius: 0.95, bob: 0.12, period: 19, seedOffset: 0.7 },
     { id: 'moon', kind: 'moon', position: { x: -7.8, y: 3.6, z: 5.2 }, radius: 1.15, bob: 0.2, period: 17, seedOffset: 0.9 },
-    { id: 'colossus', kind: 'dark', position: { x: 12.2, y: 3.4, z: 9.5 }, radius: 7.2, bob: 0.3, period: 41, seedOffset: 0.2 },
+    { id: 'colossus', kind: 'dark', position: { x: 21, y: 3.4, z: -3 }, radius: 6, bob: 0.3, period: 41, seedOffset: 0.2 },
     { id: 'amber', kind: 'amber', position: { x: -10.5, y: 17.5, z: 6 }, radius: 1.5, bob: 0.2, period: 27, seedOffset: 0.4 },
     { id: 'tiny1', kind: 'tiny', position: { x: -2.6, y: 8.6, z: 2.4 }, radius: 0.45, bob: 0.1, period: 13, seedOffset: 0.6 },
     { id: 'tiny2', kind: 'tiny', position: { x: 3.4, y: 3.0, z: 3.4 }, radius: 0.32, bob: 0.1, period: 11, seedOffset: 0.8 },
@@ -75,8 +75,12 @@ export const KEEP_OUTS: readonly KeepOut[] = [
     { kind: 'cylinderY', x: 6.2, z: -1.4, r: 1.3 + CAMERA_MARGIN, y0: 0, y1: 9 },
     // The backdrop panel (the gate hole is a gap in it, see GATE_HOLE_RADIUS: the camera passes through the hole only).
     // Planets.
-    ...PLANETS.filter(p => p.id !== 'colossus').map(p => ({ kind: 'sphere', c: p.position, r: p.radius + CAMERA_MARGIN } as const)),
-    { kind: 'sphere', c: PLANETS.find(p => p.id === 'colossus')!.position, r: 7.2 + CAMERA_MARGIN },
+    ...PLANETS.map(p => ({ kind: 'sphere', c: p.position, r: p.radius + CAMERA_MARGIN } as const)),
+    // Figures: hall telescope, the astronomer pair and the constellation ring.
+    { kind: 'cylinderY', x: 9.8, z: 15, r: 1.5 + CAMERA_MARGIN * 0.4, y0: 0, y1: 6 },
+    { kind: 'cylinderY', x: -4.6, z: 14, r: 1.1 + CAMERA_MARGIN * 0.4, y0: 0, y1: 6 },
+    { kind: 'cylinderY', x: 4.6, z: 14, r: 1.1 + CAMERA_MARGIN * 0.4, y0: 0, y1: 6 },
+    { kind: 'sphere', c: { x: -5.5, y: 8.5, z: 6 }, r: 2.1 + CAMERA_MARGIN },
 ];
 
 const clampFloorY = 0.9;

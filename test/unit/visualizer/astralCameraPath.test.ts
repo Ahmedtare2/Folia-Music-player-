@@ -1,3 +1,4 @@
+import { STATIONS } from '@/components/visualizer/astral/astralStations';
 import { describe, expect, it } from 'vitest';
 import {
     applyAspect, applyIntensity, blendPose, constrainPose, copyPose, createPose, gateOpenAt, HERO_POSE, shotPose, SHOT_MIN_SECONDS, type ShotKind,
@@ -7,9 +8,9 @@ import { isInsideKeepOut } from '@/components/visualizer/astral/astralSceneLayou
 const KINDS = Object.keys(SHOT_MIN_SECONDS) as ShotKind[];
 
 describe('ASTRAL camera path', () => {
-    it('has the ten movement types', () => {
+    it('has the ten movement types plus gate and station', () => {
         // Ten camera movements, plus the gate round trip.
-        expect(KINDS.filter(k => k !== 'gate')).toHaveLength(10);
+        expect(KINDS.filter(k => k !== 'gate' && k !== 'station')).toHaveLength(10);
         expect(KINDS).toContain('gate');
     });
 
@@ -19,7 +20,7 @@ describe('ASTRAL camera path', () => {
                 for (const variation of [0, 0.5, 1]) {
                     for (let i = 0; i <= 40; i += 1) {
                         const p = i / 40;
-                        const pose = shotPose({ kind, side, variation }, p, i, createPose());
+                        const pose = shotPose({ kind, side, variation, station: STATIONS[Math.floor(variation * 2 * (STATIONS.length - 1) + i) % STATIONS.length]!.id }, p, i, createPose());
                         constrainPose(pose, kind === 'gate' || kind === 'flythrough');
                         expect(Number.isFinite(pose.px + pose.py + pose.pz + pose.tx + pose.ty + pose.tz)).toBe(true);
                         expect(isInsideKeepOut({ x: pose.px, y: pose.py, z: pose.pz }, kind === 'gate' || kind === 'flythrough')).toBe(false);

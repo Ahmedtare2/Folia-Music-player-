@@ -1,0 +1,90 @@
+name: Build Windows EXE (10/11 64-bit)
+
+# Builds the Folia desktop app for Windows 10 and 11 (x64) with electron-builder and puts the installer on the same
+# GitHub Release as the APK (tag android-release-latest). It runs by itself after the Android workflow finishes
+# (so it always builds the source that was just imported from folia-android-source.zip) and can also be run by hand.
+
+on:
+  workflow_run:
+    workflows: ['Import Source ZIP and Build Android Release & Debug APKs']
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-windows-exe-${{ github.event.workflow_run.head_branch || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  windows-exe:
+    name: Build Folia Setup .exe (x64)
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out the branch with the imported source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_branch || github.ref_name }}
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Set up Rust (the Windows wallpaper helper)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Apply the latest source overrides from the ZIP
+        run: node packaging/android/restore-latest-overrides.mjs
+
+      - name: Install npm dependencies
+        run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+
+      - name: Build the desktop web bundle
+        env:
+          ELECTRON: 'true'
+          ELECTRON_DEV: 'false'
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: npx vite build
+
+      - name: Build the wallpaper helper
+        run: npm run build:wallpaper-helper
+
+      - name: Package the Windows installer (NSIS, x64)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx electron-builder --win nsis --x64 --publish never
+
+      - name: List the installer
+        run: ls -la release/*.exe
+
+      - name: Upload the installer as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Folia-Windows-x64-Setup
+          path: release/*.exe
+          if-no-files-found: error
+
+      - name: Publish the installer next to the APK on the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="android-release-latest"
+          FILE="$(ls release/Folia-Setup-*.exe | head -n 1)"
+          VERSION="$(node -p "require('./package.json').version")"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$FILE" --clobber
+          else
+            gh release create "$TAG" "$FILE" --title "Folia Release (v${VERSION})" --notes "Windows 10/11 64-bit installer: $(basename "$FILE")"
+          fi
+          echo "Published $(basename "$FILE") to release $TAG"

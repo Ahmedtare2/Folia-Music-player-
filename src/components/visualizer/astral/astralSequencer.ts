@@ -42,7 +42,7 @@ export interface ConductorOutput {
 }
 
 const BLEND_MIN = 0.7;
-const BLEND_MAX = 2.0;
+const BLEND_MAX = 2.6;
 const SEEK_JUMP_SECONDS = 2.5;
 const RETURN_SHOT: Shot = { kind: 'gate', side: 1, variation: 0.5 };
 /** A return keeps the camera on its own shot for this long (playback seconds), then hands back to the plan. */
@@ -144,7 +144,7 @@ export const createConductor = (initial: ConductorOptions): Conductor => {
                     currentShot = segment.shot;
                     segStart = segment.start;
                     segEnd = segment.end;
-                    if (!first) beginBlend(Math.min(1.8, Math.max(0, (segEnd - segStart) * 0.4)));
+                    if (!first) beginBlend(segment.shot.kind === 'station' ? Math.min(2.6, Math.max(1.0, (segEnd - segStart) * 0.45)) : Math.min(1.8, Math.max(0, (segEnd - segStart) * 0.4)));
                     if (segment.shot.kind === 'gate') {
                         if (segment.index !== lastGateSegment) {
                             // A gate shot is a round trip that must finish: it is played as a locked return, not cut by the next line.

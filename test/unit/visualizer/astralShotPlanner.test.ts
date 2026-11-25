@@ -17,7 +17,7 @@ describe('ASTRAL shot planner', () => {
         const b = planSegments({ lines: song(), seed: 'song-a' });
         const c = planSegments({ lines: song(), seed: 'song-b' });
         expect(a).toEqual(b);
-        expect(a.map(s => s.shot.kind)).not.toEqual(c.map(s => s.shot.kind));
+        expect(a.map(s => `${s.shot.kind}:${s.shot.station ?? ''}`)).not.toEqual(c.map(s => `${s.shot.kind}:${s.shot.station ?? ''}`));
         expect(hashSeed('x')).toBe(hashSeed('x'));
     });
 
@@ -64,5 +64,20 @@ describe('ASTRAL shot planner', () => {
         const s = segmentAt(plan, 'g', 15);
         expect(s.start).toBeLessThanOrEqual(15);
         expect(s.end).toBeGreaterThan(15);
+    });
+});
+
+describe('ASTRAL line stations', () => {
+    it('gives every sung line a station, never repeats one of the last three, and sends a new chorus home', async () => {
+        const { HOME_STATION } = await import('../../../src/components/visualizer/astral/astralStations');
+        const segs = planSegments({ lines: song(), seed: 'song-a' });
+        const stationSegs = segs.filter(s => s.shot.kind === 'station');
+        expect(stationSegs.length).toBeGreaterThan(3);
+        const ids = stationSegs.map(s => s.shot.station!);
+        ids.forEach((id, i) => {
+            if (id === HOME_STATION) return;
+            expect(ids.slice(Math.max(0, i - 3), i)).not.toContain(id);
+        });
+        expect(planSegments({ lines: song(), seed: 'song-a' })).toEqual(segs);
     });
 });

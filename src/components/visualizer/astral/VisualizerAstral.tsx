@@ -11,6 +11,8 @@ import { useLyricRenderQuality } from '../renderQuality/useLyricRenderQuality';
 import { useVisualizerRuntime } from '../runtime';
 import { useFirstFrameDrawn } from '../styleTransition/firstFrame';
 import VisualizerShell from '../VisualizerShell';
+import { stationFocus } from './astralStations';
+import type { AstralWorldFrame } from './astralWorld';
 import VisualizerSubtitleOverlay from '../VisualizerSubtitleOverlay';
 import { applyAspect } from './astralCameraPath';
 import { createAstralAudioSampler } from './astralAudio';
@@ -49,7 +51,7 @@ const AstralRig: React.FC<RigProps> = ({ live, onDrawn, world }) => {
     const mounted = useRef(true);
     const lastStamp = useRef(-1);
     const lastDrawMs = useRef(-1e9);
-    const frame = useRef({
+    const frame = useRef<AstralWorldFrame>({
         time: 0, dt: 0,
         audio: { bass: 0, lowMid: 0, mid: 0, vocal: 0, treble: 0, power: 0, kick: 0, beat: 0 },
         camera: { x: 0, y: 0, z: 0 }, gateOpen: 0, orbitalActivity: 1, atmosphere: 1, reactivity: 1, still: false,
@@ -119,6 +121,7 @@ const AstralRig: React.FC<RigProps> = ({ live, onDrawn, world }) => {
             }
         }
         cam.updateMatrixWorld();
+        frame.current.cameraQuaternion = cam.quaternion;
 
         const sig = sampler.signals;
         const f = frame.current;
@@ -131,6 +134,13 @@ const AstralRig: React.FC<RigProps> = ({ live, onDrawn, world }) => {
         f.atmosphere = tuning.atmosphere;
         f.reactivity = state.reduce ? 0 : tuning.audioReactivity;
         f.still = state.still;
+        if (out.shot.kind === 'station' && !state.still) {
+            const fc = stationFocus(out.shot.station);
+            const segment = conductor.segments[out.segmentIndex];
+            // The ring locks on while the station's line is sung and releases in the gaps.
+            const sung = !!segment && segment.lineIndex >= 0 && t >= segment.start - 0.2 && t <= segment.end + 0.3;
+            f.focus = { ...fc, strength: sung ? 1 : 0 };
+        } else f.focus = undefined;
         world.update(f);
 
         const visHeight = 2 * LYRIC_DISTANCE * Math.tan((FOV * Math.PI) / 360);

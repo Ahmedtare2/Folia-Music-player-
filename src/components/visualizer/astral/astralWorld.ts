@@ -6,6 +6,7 @@ import {
 import {
     createDialTexture, createGlowTexture, createGlyphBandTexture, createNumeralRingTexture, createRingStripeTexture,
 } from './astralEngraving';
+import { FIGURES } from './astralStations';
 import { createPlanetMaterials, type PlanetMaterials } from './astralPlanetMaterials';
 
 // src/components/visualizer/astral/astralWorld.ts
@@ -42,6 +43,9 @@ export interface AstralWorldFrame {
     reactivity: number;
     /** Static mode: hero composition, nothing animates. */
     still: boolean;
+    /** The station whose line is sung: a glow ring locks onto it. Strength 0 hides it. */
+    cameraQuaternion?: THREE.Quaternion;
+    focus?: { x: number; y: number; z: number; r: number; strength: number };
 }
 
 interface Detail {
@@ -123,6 +127,7 @@ export const createAstralWorld = (options: AstralWorldOptions): AstralWorld => {
     const fillLight = d.lights ? new THREE.PointLight('#8ab0ff', 22, 24, 2) : null;
     if (fillLight) { fillLight.position.set(0, 9, 13); root.add(fillLight); }
 
+    let constellation: THREE.Group | null = null;
     const fog = new THREE.FogExp2('#030612', 0.013);
 
     // ── Backdrop dome (deep navy gradient) ──────────────────────────────────────────────────────
@@ -600,6 +605,60 @@ export const createAstralWorld = (options: AstralWorldOptions): AstralWorld => {
         lens.position.set(tube.position.x + 3.5, 13.4, 3.6); lens.rotation.set(0.9, 0.4, 0);
     }
 
+    // ── Hall figures: a telescope on a pedestal, a pair of astronomer statues, a floating constellation ring ──
+    {
+        const scopeG = new THREE.Group();
+        scopeG.position.set(FIGURES.telescope.x, 0, FIGURES.telescope.z);
+        zoneA.add(scopeG);
+        addLathe(scopeG, [[0, 0], [1.5, 0], [1.5, 0.5], [0.95, 0.7], [0.7, 2.6], [1.0, 2.8], [0, 2.8]], slate);
+        const yoke = addMesh(scopeG, track(new THREE.SphereGeometry(0.55, 18, 12)), brassBright); yoke.position.y = 3.1;
+        const body = addMesh(scopeG, track(new THREE.CylinderGeometry(0.42, 0.62, 4.6, 18)), brass);
+        body.position.set(0.3, 4.4, 0.6); body.rotation.set(-1.0, 0.3, -0.25);
+        const bandA = addMesh(scopeG, track(new THREE.TorusGeometry(0.5, 0.06, 8, 20)), brassBright);
+        bandA.position.set(1.0, 5.9, -1.0); bandA.rotation.set(-1.0 + Math.PI / 2, 0.3, -0.25);
+        const eyepiece = addMesh(scopeG, track(new THREE.CylinderGeometry(0.15, 0.2, 0.7, 12)), brassBright);
+        eyepiece.position.set(-0.1, 3.0, 2.2); eyepiece.rotation.set(-1.0, 0.3, -0.25);
+        for (const sx of [FIGURES.statueLeft.x, FIGURES.statueRight.x]) {
+            const g = new THREE.Group();
+            g.position.set(sx, 0, FIGURES.statueLeft.z);
+            g.rotation.y = sx < 0 ? 0.5 : -0.5;
+            zoneA.add(g);
+            addMesh(g, track(new THREE.BoxGeometry(1.7, 0.9, 1.7)), slate).position.y = 0.45;
+            addLathe(g, [[0, 0.9], [0.75, 0.9], [0.62, 1.8], [0.48, 3.0], [0.38, 3.5], [0, 3.5]], slateBlue);
+            const head = addMesh(g, track(new THREE.SphereGeometry(0.3, 16, 12)), slate); head.position.y = 3.85;
+            const hood = addMesh(g, track(new THREE.ConeGeometry(0.42, 0.7, 14)), slateBlue); hood.position.y = 4.15;
+            const arm = addMesh(g, track(new THREE.CylinderGeometry(0.11, 0.14, 1.5, 10)), slateBlue);
+            arm.position.set(0.5, 3.8, 0.45); arm.rotation.set(0.9, 0, -0.5);
+            const orb = addMesh(g, track(new THREE.SphereGeometry(0.28, 16, 12)), brassBright); orb.position.set(0.95, 4.55, 1.0);
+            orb.add(glowSprite('#ffd9a0', 1.8, 0.5));
+        }
+        const cons = new THREE.Group();
+        cons.position.set(FIGURES.constellation.x, FIGURES.constellation.y, FIGURES.constellation.z);
+        zoneA.add(cons);
+        const consRing = addMesh(cons, track(new THREE.TorusGeometry(1.8, 0.04, 8, 64)), brassBright);
+        consRing.rotation.x = 1.2;
+        const pts: number[] = []; const segs: number[] = [];
+        for (let i = 0; i < 9; i += 1) {
+            const a = i * 2.399; const rr = 0.35 + ((i * 37) % 10) / 10 * 1.2;
+            pts.push(Math.cos(a) * rr, Math.sin(a) * rr * 0.8, ((i * 53) % 10 - 5) * 0.08);
+        }
+        for (let i = 0; i < 8; i += 1) segs.push(pts[i * 3]!, pts[i * 3 + 1]!, pts[i * 3 + 2]!, pts[i * 3 + 3]!, pts[i * 3 + 4]!, pts[i * 3 + 5]!);
+        const lineGeo = track(new THREE.BufferGeometry()); lineGeo.setAttribute('position', new THREE.Float32BufferAttribute(segs, 3));
+        cons.add(new THREE.LineSegments(lineGeo, track(new THREE.LineBasicMaterial({ color: '#9fc0ff', transparent: true, opacity: 0.45, fog: false }))));
+        for (let i = 0; i < 9; i += 1) {
+            const star = glowSprite('#fff4d6', 0.55, 0.95); star.position.set(pts[i * 3]!, pts[i * 3 + 1]!, pts[i * 3 + 2]!); cons.add(star);
+        }
+        constellation = cons;
+    }
+
+    // ── Focus marker: a glow ring and halo that lock onto the station whose line is sung ──
+    const focusRing = addMesh(root, track(new THREE.TorusGeometry(1, 0.012, 6, 96)), track(new THREE.MeshBasicMaterial({ color: '#ffe2b0', transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending, fog: false })));
+    focusRing.visible = false;
+    const focusHalo = glowSprite('#ffd9a0', 1, 0);
+    focusHalo.visible = false;
+    root.add(focusHalo);
+    let focusStrength = 0;
+
     // ── Public state ────────────────────────────────────────────────────────────────────────────
     const tmpV = new THREE.Vector3();
     let kickGlow = 0;
@@ -721,6 +780,22 @@ export const createAstralWorld = (options: AstralWorldOptions): AstralWorld => {
         const beyond = frame.gateOpen > 0.02 || frame.camera.z < PANEL_Z + 6;
         zoneB.visible = beyond;
         zoneC.visible = beyond && (frame.camera.z < -20 || frame.gateOpen > 0.5);
+        if (constellation) { constellation.rotation.y = Math.sin(t * 0.12) * 0.35 * act; constellation.rotation.z = t * 0.02 * act; }
+        // Focus marker: eases in on the station, breathes with the kick.
+        const wanted = frame.focus && !still ? frame.focus.strength : 0;
+        focusStrength += (wanted - focusStrength) * Math.min(1, frame.dt * 4 || (wanted > 0 ? 1 : 0));
+        const on = focusStrength > 0.01 && !!frame.focus;
+        focusRing.visible = on; focusHalo.visible = on;
+        if (on && frame.focus) {
+            const r = frame.focus.r * (1 + kickGlow * 0.04);
+            focusRing.position.set(frame.focus.x, frame.focus.y, frame.focus.z);
+            focusRing.scale.setScalar(r);
+            focusRing.quaternion.copy(frame.cameraQuaternion ?? focusRing.quaternion);
+            (focusRing.material as THREE.MeshBasicMaterial).opacity = focusStrength * (0.38 + kickGlow * 0.25);
+            focusHalo.position.set(frame.focus.x, frame.focus.y, frame.focus.z);
+            focusHalo.scale.setScalar(r * 2.6);
+            (focusHalo.material as THREE.SpriteMaterial).opacity = focusStrength * (0.16 + kickGlow * 0.1);
+        }
         orrery.updateMatrixWorld(false);
     };
 

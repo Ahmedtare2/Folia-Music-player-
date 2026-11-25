@@ -213,7 +213,8 @@ export default async function viteConfig(_config: ConfigEnv): Promise<UserConfig
       };
 
   return {
-    base: process.env.ELECTRON === 'true' ? './' : '/',
+    // FOLIA_WEB_BASE: the sub-path of a static web host (for example GitHub Pages serves a project at /<repo>/).
+    base: process.env.ELECTRON === 'true' ? './' : (process.env.FOLIA_WEB_BASE || '/'),
     worker: {
       format: 'es'
     },
@@ -281,7 +282,7 @@ export default async function viteConfig(_config: ConfigEnv): Promise<UserConfig
       VitePWA({
         disable: isAndroidBuild,
         registerType: 'autoUpdate',
-        includeAssets: ['icon.svg'],
+        includeAssets: ['icon.svg', 'apple-touch-icon.png', 'pwa-192.png', 'pwa-512.png', 'pwa-maskable-512.png'],
         devOptions: {
           enabled: !isAndroidBuild
         },
@@ -312,13 +313,16 @@ export default async function viteConfig(_config: ConfigEnv): Promise<UserConfig
           theme_color: '#09090b',
           background_color: '#09090b',
           display: 'standalone',
+          // start_url and scope are relative to the manifest, so the app also installs from a sub-path host.
+          start_url: '.',
+          scope: '.',
+          id: '.',
+          // iOS uses the apple-touch-icon in index.html; the PNGs serve Android/Chrome installs and the manifest check.
           icons: [
-            {
-              src: 'icon.svg',
-              sizes: '512x512',
-              type: 'image/svg+xml',
-              purpose: 'any maskable'
-            }
+            { src: 'pwa-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+            { src: 'pwa-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
+            { src: 'pwa-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+            { src: 'icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' }
           ]
         }
       })

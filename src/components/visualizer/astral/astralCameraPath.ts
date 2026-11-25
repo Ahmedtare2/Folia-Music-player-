@@ -1,3 +1,4 @@
+import { stationKeys } from './astralStations';
 import {
     CAMERA_MAX_Y, GATE, HERO_POSITION, HERO_TARGET, keepCameraOut, ORRERY_CENTER, PLANETS, STAR_POS, type Vec3,
 } from './astralSceneLayout';
@@ -10,7 +11,7 @@ import {
 // carried in camera space, can never turn upside down.
 
 export type ShotKind =
-    | 'hold' | 'push' | 'pull' | 'orbit' | 'track' | 'crane' | 'flythrough' | 'spiral' | 'pan' | 'reveal' | 'gate';
+    | 'hold' | 'push' | 'pull' | 'orbit' | 'track' | 'crane' | 'flythrough' | 'spiral' | 'pan' | 'reveal' | 'gate' | 'station';
 
 export interface Shot {
     kind: ShotKind;
@@ -18,6 +19,8 @@ export interface Shot {
     side: 1 | -1;
     /** Small deterministic variation 0..1 (distance, height, which planet to follow). */
     variation: number;
+    /** For kind 'station': the id of the figure the camera visits. */
+    station?: string;
 }
 
 export interface Pose {
@@ -29,7 +32,7 @@ export const createPose = (): Pose => ({ px: 0, py: 0, pz: 0, tx: 0, ty: 0, tz: 
 
 /** Longest and shortest time a shot takes to play out. A line shorter than the minimum gets a cut-off (blended) shot. */
 export const SHOT_MIN_SECONDS: Record<ShotKind, number> = {
-    hold: 4, push: 5, pull: 5, orbit: 7, track: 6, crane: 6, flythrough: 8, spiral: 8, pan: 5, reveal: 7, gate: 11,
+    hold: 4, push: 5, pull: 5, orbit: 7, track: 6, crane: 6, flythrough: 8, spiral: 8, pan: 5, reveal: 7, gate: 11, station: 4,
 };
 export const SHOT_MAX_SECONDS = 18;
 
@@ -169,6 +172,8 @@ export const shotKeys = (shot: Shot): readonly Key[] => {
                 key(0, 3.2, 21, ht.x, ht.y, ht.z),
             ];
         }
+        case 'station':
+            return stationKeys(shot.station, shot.side, shot.variation).map(k => key(k.p.x, k.p.y, k.p.z, k.t.x, k.t.y, k.t.z));
         default:
             return [key(hp.x, hp.y, hp.z, ht.x, ht.y, ht.z), key(hp.x, hp.y, hp.z, ht.x, ht.y, ht.z)];
     }
@@ -182,7 +187,7 @@ export const gateOpenAt = (kind: ShotKind, p: number): number => {
 
 const sampleCache = new Map<string, readonly Key[]>();
 const keysFor = (shot: Shot) => {
-    const id = `${shot.kind}|${shot.side}|${shot.variation.toFixed(2)}`;
+    const id = `${shot.kind}|${shot.side}|${shot.variation.toFixed(2)}|${shot.station ?? ''}`;
     let keys = sampleCache.get(id);
     if (!keys) {
         keys = shotKeys(shot);
