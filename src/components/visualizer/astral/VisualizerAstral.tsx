@@ -194,7 +194,7 @@ const VisualizerAstral: React.FC<VisualizerProps> = (props) => {
         currentTime, currentLineIndex, lines, theme, subtitleTheme, audioPower, audioBands, showText = true,
         staticMode = false, paused = false, lyricsFontScale = 1, subtitleFontScale = 1, astralTuning,
         subtitleOverlayOpacity, subtitleOverlayBackground, subtitleUpcomingLyricsBlur, isPlayerChromeHidden = false,
-        hideTranslationSubtitle = false, showSubtitleTranslation = true, subtitleContentMode, isPreviewMode = false,
+        hideTranslationSubtitle = false, subtitleOverlayLayout, isPreviewMode = false,
     } = props;
     const { t } = useTranslation();
     const firstFrameDrawn = useFirstFrameDrawn();
@@ -251,8 +251,7 @@ const VisualizerAstral: React.FC<VisualizerProps> = (props) => {
                 subtitleFontScale={subtitleFontScale}
                 isPlayerChromeHidden={isPlayerChromeHidden}
                 hideTranslationSubtitle={hideTranslationSubtitle}
-                showSubtitleTranslation={showSubtitleTranslation}
-                subtitleContentMode={subtitleContentMode}
+                subtitleOverlayLayout={subtitleOverlayLayout}
             />
         </VisualizerShell>
     );

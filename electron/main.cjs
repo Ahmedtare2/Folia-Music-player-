@@ -10,14 +10,30 @@ const { spawn } = require('child_process');
 const Store = require('electron-store').default || require('electron-store');
 const crypto = require('crypto');
 const { createStageApi } = require('./stageApi.cjs');
+const { resolveStageConnectionFilePath } = require('./stageConnectionFile.cjs');
+const { isCursorInsideUnlockHotspot, createUnlockHoverRequests, resolveUnlockHotspot } = require('./mainWindowClickThrough.cjs');
+const { shouldHideToTrayOnClose, shouldRebuildBeforeMacWallpaper, shouldRebuildAfterMacWallpaper } = require('./nativeTrafficLights.cjs');
 const { createModSystem } = require('./modSystem/modSystem.cjs');
-const { MOD_PROTOCOL_PRIVILEGED_SCHEME } = require('./modSystem/modProtocol.cjs');
+const { resolveNativeFile } = require('./modSystem/nativeFiles.cjs');
+const { COMMUNITY_MODS_SETTING_KEY, migrateCommunityModsSetting } = require('./modSystem/communityMods.cjs');
+const { MOD_PROTOCOL_PRIVILEGED_SCHEME, legacyMediaPrivilegedSchemes } = require('./modSystem/modProtocol.cjs');
+const { BUILTIN_LEGACY_MEDIA_SCHEMES } = require('./modSystem/builtinSources.cjs');
 const { createWindowPlaybackHandoffStore } = require('./windowPlaybackHandoff.cjs');
 const { applyTileMemoryBudget } = require('./tileMemoryBudget.cjs');
+const { BACKGROUND_THROTTLING_SETTING_KEY, createBackgroundThrottling } = require('./backgroundThrottling.cjs');
+const {
+  GPU_PREFERENCE_SETTING_KEY,
+  applyGpuPreference,
+  createActiveGpuReader,
+  logGpuPreference,
+  normalizeGpuPreference,
+} = require('./gpuPreference.cjs');
 const {
   REMOTE_CONTROL_HIDE_TITLEBAR_SETTING_KEY,
   REMOTE_CONTROL_CLICK_THROUGH_SETTING_KEY,
   REMOTE_CONTROL_EXPAND_COVER_SETTING_KEY,
+  REMOTE_CONTROL_TEXT_SHADE_SETTING_KEY,
+  REMOTE_CONTROL_WINDOW_POSITION_SETTING_KEY,
   readRemoteControlWindowSettings,
   shouldShowRemoteUnlockTrayItem,
   applyRemoteControlMouseIgnore,
@@ -28,6 +44,10 @@ const {
   getInitialRemoteControlWindowPosition,
   isPointOverRemoteControlStrip,
   clampRemoteControlWindowX,
+  resolveRemoteControlWindowPosition,
+  getRemoteControlQueueExpansion,
+  getRemoteControlWindowBounds,
+  getRemoteControlCardPosition,
 } = require('./remoteControlWindowGeometry.cjs');
 const wallpaperWatchdogModule = require('./wallpaper/wallpaperWatchdog.cjs');
 const { requestWallpaperEntryConfirmation } = require('./wallpaper/wallpaperEntryRequest.cjs');
@@ -36,6 +56,14 @@ const { createWindowsWallpaperTargetResolver } = require('./wallpaper/windowsWal
 const { createWindowsWallpaperMouseInjector } = require('./wallpaper/windowsWallpaperMouse.cjs');
 const macWallpaperModule = require('./wallpaper/macWallpaperController.cjs');
 const {
+  MAX_HIT_PANELS,
+  coversWholeWallpaper,
+  createMacWallpaperHitPanels,
+  readStageManagerDesktop,
+  toScreenHitRects,
+} = require('./wallpaper/macWallpaperHitPanels.cjs');
+const { createMacDesktopClickGuard, isAccessibilityTrusted } = require('./wallpaper/macDesktopClickGuard.cjs');
+const {
   WALLPAPER_DISPLAY_SETTING_KEY,
   normalizeWallpaperDisplayChoice,
   resolveWallpaperDisplay,
@@ -43,22 +71,18 @@ const {
   shouldMoveWallpaper,
   describeWallpaperDisplays,
 } = require('./wallpaper/wallpaperDisplay.cjs');
-const { createKugouApiBridge } = require('./kugou/kugouApiBridge.cjs');
 const { createExternalUrlOpener } = require('./externalUrlPolicy.cjs');
 const { createSenderGuardedHandler } = require('./ipcAccessGuard.cjs');
-const { createBodianApiBridge } = require('./bodian/bodianApiBridge.cjs');
-const { createBodianMediaPolicy } = require('./bodian/mediaCors.cjs');
-const { createYtmApiBridge } = require('./ytm/ytmApiBridge.cjs');
-const { createYtmSandbox } = require('./ytm/sandbox.cjs');
-const { YTM_AUDIO_PRIVILEGED_SCHEME, YTM_AUDIO_SCHEME } = require('./ytm/audio.cjs');
-const { createSpotifyApiBridge } = require('./spotify/spotifyApiBridge.cjs');
-const { SPOTIFY_AUDIO_PRIVILEGED_SCHEME, SPOTIFY_AUDIO_SCHEME } = require('./spotify/audio.cjs');
-const { createQqAuthSessionRepository } = require('./qq/qqAuthSessionRepository.cjs');
 const { DEFAULT_DISCORD_APPLICATION_ID, createDiscordPresenceController } = require('./discordPresence.cjs');
 const { createVoiceInputPauseMonitor } = require('./voiceInputPause.cjs');
+const { createWindowSystemMenuGuard } = require('./windowSystemMenu.cjs');
+const { createMacDockMenu } = require('./macDockMenu.cjs');
+const { createWindowsThumbar } = require('./windowsThumbar.cjs');
 const { createDisplaySleepBlocker } = require('./displaySleepBlocker.cjs');
 const { createVideoExportFileWriter } = require('./videoExportFileWriter.cjs');
 const { finalizeVideoExportFile } = require('./videoExportMp4.cjs');
+const { createExportFfmpegResolver } = require('./alphaExport/exportFfmpeg.cjs');
+const { registerAlphaExportIpc } = require('./alphaExport/alphaExportIpc.cjs');
 const { createLyricApi } = require('./lyricApi.cjs');
 const { createLocalCoverAssetStore, getLocalCoverAssetDirectory } = require('./localCoverAssets.cjs');
 const {
@@ -66,14 +90,19 @@ const {
   getReleaseUrl,
   getUpdateDiscoveryConfig,
   getUpdateProviderConfig,
-  parseUpdateMetadataVersion,
   resolveReleaseChannel,
 } = require('./updateChannels.cjs');
-const { resolveCacheLimit, selectEvictions } = require('./audioCachePrune.cjs');
+const { discoverUpdateVersion, settleWithin } = require('./updateCheckMirrors.cjs');
+const { createUpdateDownloadPhase } = require('./updateDownloadPhase.cjs');
+const { createSourcePruneLimit, resolveCacheLimit, selectEvictions, sourceCacheEntries, sourceCacheEntryOf } = require('./audioCachePrune.cjs');
 const { removeAudioCacheFileOfSize } = require('./audioCacheRemove.cjs');
 const { createAnalysisHost } = require('./analysis/host.cjs');
+const { createAcousticsHost } = require('./acoustics/host.cjs');
+const { steamAudioLibraryPath } = require('./acoustics/phonon.cjs');
+const { createSceneScreenHost } = require('./scenes/screenCapture.cjs');
 const { createDebugHost, runtimeLine } = require('./debug/debugHost.cjs');
-const { createCrashLog, installCrashHandlers } = require('./debug/crashLog.cjs');
+const { createPerfCheckHost } = require('./perfCheck.cjs');
+const { createCrashLog, installCrashHandlers, flushPageStorage } = require('./debug/crashLog.cjs');
 const { measureLeftovers, removeDownloadedLeftovers } = require('./analysis/modelPaths.cjs');
 const { resolveLinuxPasswordStore } = require('./linuxPasswordStore.cjs');
 const { resolveLinuxVulkanChoice, logLinuxVulkanChoice } = require('./linuxVulkan.cjs');
@@ -81,17 +110,25 @@ const { isWindowAlwaysOnTopSupported } = require('./windowAlwaysOnTopSupport.cjs
 const { createGlobalShortcutController, usesGlobalShortcutsPortal } = require('./globalShortcuts.cjs');
 const { createTranscodeService } = require('./transcode/service.cjs');
 const { TRANSCODE_PROTOCOL_SCHEME } = require('./transcode/protocol.cjs');
+const { createMpvRuntime } = require('./hifi/mpvRuntime.cjs');
+const { createMpvRuntimeInstaller } = require('./hifi/mpvRuntimeInstaller.cjs');
+const { createSourceBridge } = require('./hifi/sourceBridge.cjs');
+const { createMpvSession } = require('./hifi/mpvSession.cjs');
+const { registerHifiIpc } = require('./hifi/hifiIpc.cjs');
+const { createPipewireProbe, collectOwnPids } = require('./hifi/pipewireProbe.cjs');
+const { createApprovedMpvPathStore, isReservedHifiSettingKey } = require('./hifi/approvedMpvPath.cjs');
+const { registerMprisIpc } = require('./hifi/mpris/mprisIpc.cjs');
 const { sanitizeDualTheme: sanitizeGeneratedDualTheme } = require('../shared/themeSanitizer.cjs');
 const {
-  detectOpenAICompatibleProvider,
-  normalizeOpenAIChatCompletionsUrl,
+  aiProviderLabel,
   runAiConnectionTest,
   runAiJsonCompletion,
   runGeminiThemeCompletion,
 } = require('./aiTextClient.cjs');
+const { registerAiModelDiscovery } = require('./ai/modelDiscoveryIpc.cjs');
 const { createAiCredentialStore, isAiCredentialKey, isReservedAiCredentialKey } = require('./aiCredentialStore.cjs');
 const {
-  SEGMENTATION_GEMINI_GENERATION_CONFIG,
+  SEGMENTATION_GEMINI_SCHEMA,
   SEGMENTATION_JSON_SCHEMA,
   SEGMENTATION_MAX_OUTPUT_TOKENS,
   SEGMENTATION_SCHEMA_NAME,
@@ -134,24 +171,27 @@ protocol.registerSchemesAsPrivileged([
     },
   },
   MOD_PROTOCOL_PRIVILEGED_SCHEME,
-  YTM_AUDIO_PRIVILEGED_SCHEME,
-  SPOTIFY_AUDIO_PRIVILEGED_SCHEME,
+  // Old media addresses of built-in sources that saved data may still hold (a platform's folia-<id>://): the
+  // mod system answers them from the mod's _media routes (builtinSources.cjs's legacyMediaSchemes).
+  ...legacyMediaPrivilegedSchemes(BUILTIN_LEGACY_MEDIA_SCHEMES),
 ]);
 
-// Trusts only the known KuGou media CDN hostname mismatch while preserving TLS checks elsewhere.
+// Certificate errors are refused, TLS checks kept everywhere, except where a source declares a host.
 app.on('certificate-error', (event, _webContents, requestUrl, error, _certificate, callback) => {
-  let isAllowedKugouMediaRequest = false;
-  try {
-    const parsedUrl = new URL(requestUrl);
-    isAllowedKugouMediaRequest =
-      parsedUrl.protocol === 'https:' &&
-      parsedUrl.hostname === 'fs.youthandroid2.kugou.com' &&
-      error === 'net::ERR_CERT_COMMON_NAME_INVALID';
-  } catch {
-    isAllowedKugouMediaRequest = false;
-  }
+  // Folium 2.0: a running source mod's manifest may name hosts whose certificate name mismatch is accepted
+  // (`sources[].certificateExceptions`, listed in its enable confirmation).
+  const isDeclaredBySourceMod = (() => {
+    try {
+      const parsedUrl = new URL(requestUrl);
+      return parsedUrl.protocol === 'https:'
+        && error === 'net::ERR_CERT_COMMON_NAME_INVALID'
+        && Boolean(modSystem?.allowsCertificateException(parsedUrl.hostname));
+    } catch {
+      return false;
+    }
+  })();
 
-  if (isAllowedKugouMediaRequest) {
+  if (isDeclaredBySourceMod) {
     event.preventDefault();
     callback(true);
     return;
@@ -239,63 +279,100 @@ if (process.platform === 'darwin' && process.arch === 'x64') {
 }
 
 const store = new Store({ projectName: 'Folia' });
+// Read before anything writes the store: an empty one is a fresh profile, which the start prompt asks which
+// sources it uses (Folium 2.0 plan §5.3, modSystem.cjs). An upgraded profile always has something in it.
+const isFreshProfile = store.size === 0;
+// Folium 2.0: the community mods switch, given once to a profile that has none (communityMods.cjs), before
+// anything reads it or the mod system's master switch (on by default from Folium 2.0).
+const communityModsMigrated = migrateCommunityModsSetting(store);
+if (communityModsMigrated !== null) {
+  console.info(`[Mods] community mods switch recorded for this profile: ${communityModsMigrated ? 'on (the mod system was on)' : 'off'}`);
+}
+// Before ready: the GPU process reads its switches when it starts.
+const gpuPreferenceApplied = applyGpuPreference({ app, store });
+const readActiveGpu = createActiveGpuReader(app);
 const transcodeService = createTranscodeService({
   app,
   protocol,
   net: electronNet,
   onCacheWrite: pruneMediaCache,
 });
-// KuGou credentials stay inside the main process and are encrypted lazily after Electron is ready.
-// The bridge refuses Linux's plaintext `basic_text` fallback and degrades to an in-memory session.
-const kugouApiBridge = createKugouApiBridge({ store, safeStorage });
-const bodianMediaPolicy = createBodianMediaPolicy();
-const bodianApiBridge = createBodianApiBridge({ store, safeStorage,
-  onAudioSource: url => bodianMediaPolicy.register(url),
-  requestFactory: (options, onResponse) => {
-    const request = electronNet.request(options);
-    request.on('response', onResponse);
-    return request;
-  },
+// HiFi: an mpv child plays local and Navidrome songs bit-perfectly. Main only spawns it, relays the
+// main window's commands and pushes state back, with error codes and no text of its own. The
+// 127.0.0.1 source bridge starts on the first load, mpv on the first load or device listing.
+let hifiIpc = null;
+const hifiRuntimeManifest = require('../shared/mpvRuntimeManifest.json');
+const getHifiUserDataPath = () => app.getPath('userData');
+const hifiSystemVersion = process.platform === 'darwin' ? process.getSystemVersion() : null;
+// 原生毛玻璃在 Windows 上靠 Acrylic 背景材质，Windows 11 22H2（build 22621）起才有；更早的系统上
+// 存着的开关当作关，免得窗口背景被设成全透明却没有材质（preload 的 nativeBlurSupported 同一判断）。
+const NATIVE_BLUR_SUPPORTED = process.platform !== 'win32'
+  || Number(String(require('os').release()).split('.')[2]) >= 22621;
+const hifiInstaller = createMpvRuntimeInstaller({
+  manifest: hifiRuntimeManifest,
+  getUserDataPath: getHifiUserDataPath,
+  fetchFn: (url, options) => electronNet.fetch(url, options),
+  systemVersion: hifiSystemVersion,
+  onProgress: progress => hifiIpc?.broadcastInstallProgress(progress),
 });
-// YouTube Music talks to Google from its own network partition and without a cookie jar: the
-// account is carried by a request header, and stored cookies would tie the guest sessions to it.
-// (The library sends one cookie of its own making, a random visitor id and the time zone, on the
-// request that opens each session; nothing Google sets is kept or sent back.) Sessions exist only
-// after app ready, hence the lazy lookup; like the update check, the partition follows the system
-// proxy.
-const ytmSandbox = createYtmSandbox({ BrowserWindow, session, isAllowed: () => Boolean(mainWindow && !mainWindow.isDestroyed()) });
-let ytmNetwork = null;
-const getYtmNetwork = () => {
-  if (!ytmNetwork) {
-    const ses = session.fromPartition('folia-ytm');
-    ytmNetwork = ses.setProxy({ mode: 'system' }).catch(() => {}).then(() => ses);
-  }
-  return ytmNetwork;
-};
-const ytmApiBridge = createYtmApiBridge({ store, safeStorage,
-  fetch: async (input, init) => (await getYtmNetwork()).fetch(input instanceof URL ? input.href : input, { ...init, credentials: 'omit' }),
-  evaluate: code => ytmSandbox.evaluate(code),
-  language: () => getMainLocaleKey(),
-  // The browser window of the web sign-in runs on this folder; the bridge removes it when a
-  // sign-in ends.
-  signInFolder: () => path.join(app.getPath('userData'), 'ytm-sign-in'),
+const hifiRuntime = createMpvRuntime({
+  manifest: hifiRuntimeManifest,
+  getUserDataPath: getHifiUserDataPath,
+  isInstalling: () => hifiInstaller.isInstalling(),
+  systemVersion: hifiSystemVersion,
 });
-let spotifyNetwork = null;
-const getSpotifyNetwork = () => {
-  if (!spotifyNetwork) {
-    const ses = session.fromPartition('folia-spotify');
-    spotifyNetwork = ses.setProxy({ mode: 'system' }).catch(() => {}).then(() => ses);
-  }
-  return spotifyNetwork;
-};
-const spotifyApiBridge = createSpotifyApiBridge({ store, safeStorage,
-  fetch: async (input, init) => (await getSpotifyNetwork()).fetch(input instanceof URL ? input.href : input, { ...init, credentials: 'omit' }),
-  openExternal: url => shell.openExternal(url),
-  language: () => getMainLocaleKey(),
-  audioDirectory: () => path.join(getConfiguredCacheDirectory(), 'spotify'),
-  onAudioKept: limitBytes => pruneMediaCache(limitBytes),
+const hifiBridge = createSourceBridge({
+  http,
+  fetchFn: (url, options) => electronNet.fetch(url, options),
+  requestRead: (ownerId, request) => hifiIpc.requestRead(ownerId, request),
+  randomBytes: crypto.randomBytes,
 });
-const qqAuthSessionRepository = createQqAuthSessionRepository({ store, safeStorage });
+const hifiSession = createMpvSession({
+  resolveRuntime: () => hifiIpc.resolveRuntime(),
+  bridge: hifiBridge,
+  randomBytes: crypto.randomBytes,
+  onState: state => hifiIpc?.broadcastState(state),
+  onClock: update => hifiIpc?.broadcastClock(update),
+  onError: event => hifiIpc?.broadcastError(event),
+});
+// The manual mpv path main itself got from the system file dialog. The renderer can only use or
+// clear it through hifi:configure, never name a program for main to run. It lives in a file of its
+// own under userData/hifi-runtime/, out of the shared store that save-settings writes.
+const hifiApprovedMpvPath = createApprovedMpvPathStore({ getUserDataPath: getHifiUserDataPath });
+// Linux: what PipeWire reports (pw-dump) about mpv's stream on its way to the device. Only what
+// PipeWire says; whether the DAC really gets that rate is for a person to confirm on the hardware.
+// Folia's own processes (main plus every Electron child) mark its own streams, such as the web
+// engine's.
+const hifiOutputProbe = createPipewireProbe({
+  getOwnPids: () => collectOwnPids(process.pid, app.getAppMetrics()),
+});
+hifiIpc = registerHifiIpc({
+  ipcMain,
+  isTrustedSender: event => isTrustedMainWindowContents(event.sender),
+  session: hifiSession,
+  runtime: hifiRuntime,
+  installer: hifiInstaller,
+  outputProbe: hifiOutputProbe,
+  dialog,
+  getMainWindow: () => mainWindow,
+  webContentsFromId: id => electronWebContents.fromId(id),
+  getApprovedMpvPath: () => hifiApprovedMpvPath.get(),
+  setApprovedMpvPath: value => hifiApprovedMpvPath.set(value),
+});
+// Linux: while HiFi plays, main registers MPRIS on the session bus itself. A silent keep-alive in
+// the page would be a Chromium stream on the same PipeWire device, and PipeWire switches the
+// device's sample rate only while nothing else plays on it (#835). Windows and macOS keep the
+// keep-alive: their shared outputs never switch rates.
+const hifiMpris = process.platform === 'linux'
+  ? registerMprisIpc({
+    ipcMain,
+    isTrustedSender: event => isTrustedMainWindowContents(event.sender),
+    getMainWindow: () => mainWindow,
+    getArtworkDirectory: () => path.join(app.getPath('userData'), 'mpris-artwork'),
+  })
+  : null;
+// Last resort for every way out, app.exit() included: an mpv left behind would keep playing.
+process.on('exit', () => hifiSession.killSync());
 // AI API keys are sealed with safeStorage instead of sitting in config.json as plaintext, and never
 // leave the main process: the renderer only sees AI_API_KEYS_CONFIGURED (#586).
 const aiCredentials = createAiCredentialStore({ store, safeStorage });
@@ -315,6 +392,9 @@ const WALLPAPER_ZGUARD_SETTING_KEY = 'wallpaper_zguard';
 // disables even a bottom Dock. Exiting wallpaper mode or quitting restores the user's original Dock
 // state either way.
 const WALLPAPER_MAC_AUTOHIDE_DOCK_SETTING_KEY = 'wallpaper_mac_autohide_dock';
+// Set once Folia has asked macOS for the Accessibility grant (issue #698), so a user who declined
+// is not asked again on every launch.
+const WALLPAPER_MAC_ACCESSIBILITY_ASKED_KEY = 'wallpaper_mac_accessibility_asked';
 
 // Thin wrappers over electron/wallpaper/wallpaperWatchdog.cjs so the call sites across the file keep their
 // existing signatures while the predicates stay a single source of truth in the module.
@@ -359,6 +439,19 @@ function resolveWindowToLayerPath() {
   return fs.existsSync(candidate) ? candidate : null;
 }
 
+// app.exit() does not wait for the pages' storage (localStorage, a sign-in among it) to reach the
+// disk: it is asked to be written first (crashLog.cjs `flushPageStorage`). That only asks, so the
+// exit is not held. `what` names the exit in the line that says the asking failed.
+const exitAfterAskingStorageWritten = (code, what) => {
+  try {
+    flushPageStorage();
+  } catch (error) {
+    console.error(`[Wallpaper] Failed to ask for the pages' storage to be written before the ${what}`, error);
+  }
+  hifiSession.killSync();
+  app.exit(code);
+};
+
 // Enables wallpaper mode on Wayland: spawn windowtolayer wrapping a fresh Folia child, then the
 // old process exits once the wrapper has spawned. Spawn failure (ENOENT/EACCES) arrives on the
 // async 'error' event, never as a synchronous throw, so we revert the setting instead of crashing.
@@ -393,7 +486,7 @@ function launchWrappedSelf({ onError } = {}) {
       } catch (error) {
         console.error('[Mods] Failed to take up the start note', error);
       }
-      app.exit(0);
+      exitAfterAskingStorageWritten(0, 'restart');
     });
   });
 }
@@ -407,7 +500,8 @@ const wallpaperWatchdog = wallpaperWatchdogModule.createWallpaperWatchdog({
   execPath: () => process.execPath,
   argv: () => process.argv.slice(1),
   getPpid: () => process.ppid,
-  exit: (code) => app.exit(code),
+  // As at the restart above: the pages' storage is asked to be written before app.exit().
+  exit: (code) => exitAfterAskingStorageWritten(code, 'relaunch'),
   killFn: process.kill.bind(process),
   probeIntervalMs: 2000,
 });
@@ -440,16 +534,20 @@ function isWindowsWallpaperTransparentSupported() {
 // The user preference (TRANSPARENT_PLAYER_BACKGROUND) is independent of what the current
 // window can render: wallpaper mode on the classic desktop derives an opaque window. After an
 // attach reports a different architecture than the window was built for, bring them back in
-// sync with one rebuild.
+// sync with one rebuild. This often lands right after the rebuild that entered wallpaper mode,
+// while the new page is still restoring: the playback handoff carries the session on regardless.
 function reconcileWindowsWallpaperWindowTransparency() {
-  if (process.platform !== 'win32' || !isWindowsWallpaperMode() || !mainWindow || mainWindow.isDestroyed()) {
+  const needsRebuild = () => {
+    if (process.platform !== 'win32' || !isWindowsWallpaperMode() || !mainWindow || mainWindow.isDestroyed()) {
+      return false;
+    }
+    const desiredTransparent = isTransparentPlayerBackgroundEnabled() && isWindowsWallpaperTransparentSupported();
+    return mainWindow.__wallpaperWindowTransparent !== desiredTransparent;
+  };
+  if (!needsRebuild()) {
     return;
   }
-  const desiredTransparent = isTransparentPlayerBackgroundEnabled() && isWindowsWallpaperTransparentSupported();
-  if (mainWindow.__wallpaperWindowTransparent === desiredTransparent) {
-    return;
-  }
-  recreateMainWindowWithTransparencyMode(isTransparentPlayerBackgroundEnabled(), null);
+  void rebuildMainWindowWithPlaybackHandoff('wallpaper window transparency', needsRebuild);
 }
 
 // The helper ships as resources/folia-wallpaper-helper.exe (built by
@@ -543,7 +641,7 @@ const windowsWallpaper = windowsWallpaperModule.createWindowsWallpaperController
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('wallpaper-mode-changed', getPublicSettings());
     }
-    recreateMainWindowWithTransparencyMode(isTransparentPlayerBackgroundEnabled(), null);
+    void rebuildMainWindowWithPlaybackHandoff('wallpaper mode given up');
   },
   onReattachNeeded: () => {
     rebuildWindowsWallpaperSession();
@@ -593,12 +691,28 @@ async function relaunchForWallpaperModeChange(nextEnabled, expectedGeneration = 
       // present simple full screen correctly anymore (measured: content 33pt low, empty
       // menu-bar strip above the wallpaper — sticky for the life of the window). Rebuild
       // it so the entry runs on a fresh window, like the always-correct startup path.
-      if (mainWindow && !mainWindow.isDestroyed() && mainWindow.__macAlwaysOnTopElectronTouched === true) {
+      // 带系统红绿灯的窗口同样重建：壁纸模式要完全无边框的窗口，这时设置已写入，重建出来的就没有红绿灯。
+      // 进不去（桥不可用、没有输入监控权限）或还在原生全屏时不重建，见 nativeTrafficLights.cjs。
+      const hasLiveWindow = mainWindow && !mainWindow.isDestroyed();
+      const wallpaperController = getMacWallpaperController();
+      const rebuildForTrafficLights = hasLiveWindow && shouldRebuildBeforeMacWallpaper({
+        nativeTrafficLights: mainWindow.__nativeTrafficLights === true,
+        canEnterWallpaper: Boolean(wallpaperController && wallpaperController.isAvailable() && wallpaperController.hasPermission()),
+        fullscreen: mainWindow.isFullScreen(),
+      });
+      if (hasLiveWindow && (mainWindow.__macAlwaysOnTopElectronTouched === true || rebuildForTrafficLights)) {
         await rebuildMainWindowForMacWallpaper();
       }
       enterMacWallpaperMode();
     } else {
       exitMacWallpaperMode();
+      // 壁纸会话用的是无边框窗口；开着「原生红绿灯」时退出后重建一次，红绿灯才回得来。
+      if (mainWindow && !mainWindow.isDestroyed() && shouldRebuildAfterMacWallpaper({
+        settingEnabled: readStoredBoolean(USE_NATIVE_MAC_TRAFFIC_LIGHTS_SETTING_KEY, false),
+        nativeTrafficLights: mainWindow.__nativeTrafficLights === true,
+      })) {
+        await rebuildMainWindowForMacWallpaper();
+      }
     }
     return;
   }
@@ -950,6 +1064,21 @@ let macWallpaperEnterPollElapsed = 0;
 let macWallpaperEnterPollTimer = null;
 let macWallpaperSettleTimer = null;
 let macWallpaperSettleAttempts = 0;
+// Click catchers over the wallpaper's controls, so a click on them never reaches Finder's desktop
+// and Stage Manager does not react to it (issue #698; macWallpaperHitPanels.cjs). The renderer
+// reports the controls' rects (viewport CSS px).
+let macWallpaperHitPanelsInstance = null;
+let macWallpaperHitRects = [];
+// Stage Manager (issue #698). With the desktop items hidden while it is on: one catcher over the
+// whole wallpaper (macWallpaperHitPanels.cjs), no grant needed. With the icons shown: the click
+// guard library (macDesktopClickGuard.cjs) once Folia holds the Accessibility grant, else the
+// catchers over the controls only and a one-time hint. Stage Manager's settings and the grant are
+// re-read on a slow timer while the wallpaper takes input, so changes apply without a restart.
+let macWallpaperStageState = { enabled: false, hidesDesktopItems: false, trusted: false };
+let macWallpaperStageManagerTimer = null;
+let macWallpaperClickGuardInstance = null;
+let macWallpaperAccessibilityHinted = false;
+const MAC_WALLPAPER_STAGE_MANAGER_POLL_MS = 3000;
 const MAC_WALLPAPER_TAP_RETRY_DELAY_MS = 2000;
 const MAC_WALLPAPER_TAP_FAILURE_THRESHOLD = 3;
 const MAC_WALLPAPER_DRAG_FLUSH_MS = 16;
@@ -1108,6 +1237,9 @@ function scheduleMacWallpaperFrameSettleVerify() {
     } catch (error) {
       // ignore
     }
+    // The window may have moved to another display at the same size: the renderer reports no new
+    // rects then, so the catchers follow the frame here.
+    syncMacWallpaperHitPanels();
   }, MAC_WALLPAPER_FRAME_SETTLE_DELAY_MS);
 }
 
@@ -1272,6 +1404,8 @@ function deferMacWallpaperEnterUntilFullScreenExit() {
 
 function notifyMacWallpaperModeChanged() {
   refreshTrayMenu();
+  // macOS switches wallpaper mode in place, not always through save-settings: every change ends here.
+  backgroundThrottling.refresh();
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('wallpaper-mode-changed', getPublicSettings());
   }
@@ -1444,6 +1578,8 @@ function exitMacWallpaperMode() {
   }
   const wasActive = isMacWallpaperActive;
   isMacWallpaperActive = false;
+  macWallpaperHitRects = [];
+  syncMacWallpaperHitPanels(); // takes the click catchers down
   if (!mainWindow || mainWindow.isDestroyed()) {
     macWallpaperSavedState = null;
     if (wasActive) {
@@ -1683,6 +1819,9 @@ function startMacWallpaperInteraction() {
       // ignore
     }
     isMacWallpaperInteractionEnabled = false;
+    // The grant may have been revoked mid-session: catchers without a tap would leave the
+    // controls dead to every click.
+    syncMacWallpaperHitPanels();
     notifyMacWallpaperInputMonitoringNeeded();
     return false;
   }
@@ -1694,6 +1833,7 @@ function startMacWallpaperInteraction() {
       console.warn('[WallpaperMac] event tap keeps failing, wallpaper is now non-interactive');
       isMacWallpaperInteractionEnabled = false;
       controller.stop();
+      syncMacWallpaperHitPanels();
       notifyMacWallpaperInputMonitoringNeeded();
       return false;
     }
@@ -1711,6 +1851,7 @@ function startMacWallpaperInteraction() {
     return false;
   }
   macWallpaperTapFailures = 0;
+  syncMacWallpaperHitPanels();
   return true;
 }
 
@@ -1723,6 +1864,134 @@ function stopMacWallpaperInteraction() {
     } catch (error) {
       // ignore
     }
+  }
+  syncMacWallpaperHitPanels();
+}
+
+function getMacWallpaperHitPanels(controller) {
+  if (!macWallpaperHitPanelsInstance) {
+    macWallpaperHitPanelsInstance = createMacWallpaperHitPanels({
+      // One above the Finder icons (the wallpaper sits one below them): above the desktop,
+      // below every normal window, the Dock and the menu bar.
+      level: controller.desktopLevel() + 2,
+      primaryHeight: () => screen.getPrimaryDisplay().bounds.height,
+    });
+  }
+  return macWallpaperHitPanelsInstance;
+}
+
+// Puts the click catchers over the controls the renderer last reported (or one over the whole
+// wallpaper while Stage Manager hides the desktop items), or takes them all down.
+// They are only up while the tap runs: a catcher takes the click away from Finder, and only the
+// tap hands it on to the wallpaper, so without it the controls would go dead.
+function syncMacWallpaperHitPanels() {
+  if (process.platform !== 'darwin') {
+    return;
+  }
+  const controller = getMacWallpaperController();
+  const live = isMacWallpaperActive
+    && isMacWallpaperInteractionEnabled
+    && !macWallpaperPendingEnter
+    && controller
+    && controller.isRunning()
+    && mainWindow
+    && !mainWindow.isDestroyed();
+  if (!live) {
+    if (macWallpaperStageManagerTimer) {
+      clearInterval(macWallpaperStageManagerTimer);
+      macWallpaperStageManagerTimer = null;
+    }
+    if (macWallpaperClickGuardInstance) {
+      macWallpaperClickGuardInstance.stop();
+    }
+    if (macWallpaperHitPanelsInstance) {
+      macWallpaperHitPanelsInstance.clear();
+    }
+    return;
+  }
+  if (!macWallpaperStageManagerTimer) {
+    macWallpaperStageState = readMacWallpaperStageState();
+    macWallpaperStageManagerTimer = setInterval(() => {
+      const next = readMacWallpaperStageState();
+      const prev = macWallpaperStageState;
+      if (next.enabled !== prev.enabled || next.hidesDesktopItems !== prev.hidesDesktopItems || next.trusted !== prev.trusted) {
+        macWallpaperStageState = next;
+        syncMacWallpaperHitPanels();
+      }
+    }, MAC_WALLPAPER_STAGE_MANAGER_POLL_MS);
+    if (typeof macWallpaperStageManagerTimer.unref === 'function') {
+      macWallpaperStageManagerTimer.unref();
+    }
+  }
+  try {
+    const bounds = mainWindow.getBounds();
+    const frame = { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height };
+    const stage = macWallpaperStageState;
+    const coversWhole = coversWholeWallpaper(stage);
+    const wantsGuard = stage.enabled && !stage.hidesDesktopItems;
+    let guardRunning = false;
+    if (wantsGuard && stage.trusted) {
+      guardRunning = getMacWallpaperClickGuard().start(frame);
+    } else if (macWallpaperClickGuardInstance) {
+      macWallpaperClickGuardInstance.stop();
+    }
+    // Granted while Folia was running: macOS can report the grant but refuse the tap until Folia
+    // restarts. Same one-time hint, which says to restart Folia.
+    const staleGrant = wantsGuard && stage.trusted && !guardRunning
+      && macWallpaperClickGuardInstance?.lastFailure() === 'tap-failed';
+    if (staleGrant && !macWallpaperAccessibilityHinted) {
+      macWallpaperAccessibilityHinted = true;
+      notifyMacWallpaperAccessibilitySuggested();
+    }
+    if (wantsGuard && !stage.trusted && !macWallpaperAccessibilityHinted
+      && store.get(WALLPAPER_MAC_ACCESSIBILITY_ASKED_KEY) !== true) {
+      macWallpaperAccessibilityHinted = true;
+      store.set(WALLPAPER_MAC_ACCESSIBILITY_ASKED_KEY, true);
+      getMacWallpaperClickGuard().requestAccess();
+      notifyMacWallpaperAccessibilitySuggested();
+    }
+    const rects = coversWhole
+      ? [frame]
+      : toScreenHitRects(macWallpaperHitRects, bounds, mainWindow.webContents.getZoomFactor());
+    getMacWallpaperHitPanels(controller).apply(rects);
+  } catch (error) {
+    console.warn('[WallpaperMac] hit panel sync failed:', error && error.message);
+  }
+}
+
+// Stage Manager's switch and "hide desktop items", plus whether Folia holds the Accessibility
+// grant the click guard needs. Both cheap: CFPreferences and AXIsProcessTrusted, no child process.
+function readMacWallpaperStageState() {
+  const stage = readStageManagerDesktop() || { enabled: false, hidesDesktopItems: false };
+  return {
+    enabled: stage.enabled === true,
+    hidesDesktopItems: stage.hidesDesktopItems === true,
+    trusted: stage.enabled === true && stage.hidesDesktopItems !== true && isAccessibilityTrusted(),
+  };
+}
+
+// Packaged: Resources/libfolia_click_guard.dylib (built by packaging/macos/build-desktop-click-guard.mjs).
+// FOLIA_DESKTOP_CLICK_GUARD_PATH overrides it for local runs.
+function resolveMacDesktopClickGuardPath() {
+  if (process.env.FOLIA_DESKTOP_CLICK_GUARD_PATH) {
+    return process.env.FOLIA_DESKTOP_CLICK_GUARD_PATH;
+  }
+  return path.join(process.resourcesPath, 'libfolia_click_guard.dylib');
+}
+
+function getMacWallpaperClickGuard() {
+  if (!macWallpaperClickGuardInstance) {
+    macWallpaperClickGuardInstance = createMacDesktopClickGuard({ libraryPath: resolveMacDesktopClickGuardPath });
+  }
+  return macWallpaperClickGuardInstance;
+}
+
+// Stage Manager is on with the desktop icons shown and Folia lacks the Accessibility grant: clicks
+// on the bare wallpaper still send the stage aside. Asked once per session; never turns the
+// wallpaper off.
+function notifyMacWallpaperAccessibilitySuggested() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('wallpaper-accessibility-suggested', null);
   }
 }
 
@@ -1903,6 +2172,15 @@ const mainProcessStartupPromise = prepareMainProcessStartup();
 const APP_LOCALE_KEY = 'APP_LOCALE';
 const mainLocale = {
   'zh-CN': {
+    dockNotPlaying: '未播放',
+    dockRepeat: '循环模式：{mode}',
+    dockRepeatOff: '关闭循环',
+    dockRepeatAll: '列表循环',
+    dockRepeatOne: '单曲循环',
+    dockPrevious: '上一首',
+    dockPlay: '播放',
+    dockPause: '暂停',
+    dockNext: '下一首',
     trayShowWindow: '显示窗口',
     trayHideWindow: '隐藏窗口',
     trayOpenRemote: '遥控窗口',
@@ -1925,10 +2203,22 @@ const mainLocale = {
     dialogCancel: '取消',
     crashTitle: 'Folia 遇到了问题',
     crashMessage: '程序发生了一次崩溃，日志已保存。把它发给开发者能帮助定位问题。',
+    crashBlockedStartMessage: '页面进程刚启动就被结束了，通常是安全软件拦下了 Folia。',
+    crashBlockedStartDetail: '卡巴斯基不认识 Folia.exe 时，会把它放进受限制的组，由「系统监控」拦下页面进程。\n\n办法：在卡巴斯基的「受信任的应用程序」里添加 Folia.exe，并勾选「不监控应用程序活动」。只把信任组改成「受信任」不管用。其他安全软件请把 Folia.exe 加进信任名单或排除项。\n\n改完后退出 Folia 再重新打开。日志已保存在下面的位置，还是不行请把它发给开发者。',
+    crashQuit: '退出 Folia',
     crashOpenFolder: '打开日志所在文件夹',
     crashClose: '关闭',
   },
   'zh-TW': {
+    dockNotPlaying: '未播放',
+    dockRepeat: '迴圈模式：{mode}',
+    dockRepeatOff: '關閉迴圈',
+    dockRepeatAll: '清單迴圈',
+    dockRepeatOne: '單曲迴圈',
+    dockPrevious: '上一首',
+    dockPlay: '播放',
+    dockPause: '暫停',
+    dockNext: '下一首',
     trayShowWindow: '顯示視窗',
     trayHideWindow: '隱藏視窗',
     trayOpenRemote: '遙控視窗',
@@ -1951,10 +2241,22 @@ const mainLocale = {
     dialogCancel: '取消',
     crashTitle: 'Folia 遇到了問題',
     crashMessage: '程式發生了一次崩潰，日誌已儲存。把它發給開發者能幫助定位問題。',
+    crashBlockedStartMessage: '頁面程序剛啟動就被結束了，通常是安全軟體攔下了 Folia。',
+    crashBlockedStartDetail: '卡巴斯基不認識 Folia.exe 時，會把它放進受限制的組，由「系統監控」攔下頁面程序。\n\n辦法：在卡巴斯基的「受信任的應用程式」裡新增 Folia.exe，並勾選「不監控應用程式活動」。只把信任組改成「受信任」不管用。其他安全軟體請把 Folia.exe 加進信任名單或排除項。\n\n改完後退出 Folia 再重新開啟。日誌已儲存在下面的位置，還是不行請把它發給開發者。',
+    crashQuit: '退出 Folia',
     crashOpenFolder: '開啟日誌所在資料夾',
     crashClose: '關閉',
   },
   en: {
+    dockNotPlaying: 'Not Playing',
+    dockRepeat: 'Repeat: {mode}',
+    dockRepeatOff: 'Off',
+    dockRepeatAll: 'All',
+    dockRepeatOne: 'One',
+    dockPrevious: 'Previous Track',
+    dockPlay: 'Play',
+    dockPause: 'Pause',
+    dockNext: 'Next Track',
     trayShowWindow: 'Show Window',
     trayHideWindow: 'Hide Window',
     trayOpenRemote: 'Remote Window',
@@ -1977,10 +2279,22 @@ const mainLocale = {
     dialogCancel: 'Cancel',
     crashTitle: 'Folia ran into a problem',
     crashMessage: 'The app crashed and a log has been saved. Sending it to the developer helps track the problem down.',
+    crashBlockedStartMessage: 'The page process was ended as soon as it started. Security software is usually what blocks it.',
+    crashBlockedStartDetail: 'When Kaspersky does not recognize Folia.exe, it puts it in a restricted group and its System Watcher stops the page process.\n\nWhat helps: in Kaspersky, add Folia.exe to "Trusted applications" and tick "Do not monitor application activity". Moving it to the Trusted group alone does not help. In other security software, add Folia.exe to the trusted list or the exclusions.\n\nThen quit Folia and open it again. A log has been saved at the path below; if this keeps happening, send it to the developer.',
+    crashQuit: 'Quit Folia',
     crashOpenFolder: 'Open Log Folder',
     crashClose: 'Close',
   },
   in: {
+    dockNotPlaying: 'Tidak diputar',
+    dockRepeat: 'Ulangi: {mode}',
+    dockRepeatOff: 'Nonaktif',
+    dockRepeatAll: 'Semua',
+    dockRepeatOne: 'Satu',
+    dockPrevious: 'Lagu Sebelumnya',
+    dockPlay: 'Putar',
+    dockPause: 'Jeda',
+    dockNext: 'Lagu Berikutnya',
     trayShowWindow: 'Tampilkan Jendela',
     trayHideWindow: 'Sembunyikan Jendela',
     trayOpenRemote: 'Jendela Remote',
@@ -2003,12 +2317,53 @@ const mainLocale = {
     dialogCancel: 'Batal',
     crashTitle: 'Folia mengalami masalah',
     crashMessage: 'Aplikasi mengalami crash dan log telah disimpan. Mengirimkannya ke pengembang membantu menemukan masalahnya.',
+    crashBlockedStartMessage: 'Proses halaman dihentikan begitu dimulai, biasanya karena perangkat lunak keamanan memblokir Folia.',
+    crashBlockedStartDetail: 'Jika Kaspersky tidak mengenali Folia.exe, aplikasi ini dimasukkan ke grup terbatas dan System Watcher menghentikan proses halaman.\n\nSolusinya: di Kaspersky, tambahkan Folia.exe ke "Aplikasi tepercaya" dan centang "Jangan pantau aktivitas aplikasi". Hanya memindahkannya ke grup Tepercaya tidak membantu. Di perangkat lunak keamanan lain, tambahkan Folia.exe ke daftar tepercaya atau pengecualian.\n\nSetelah itu keluar dari Folia dan buka lagi. Log telah disimpan di lokasi di bawah ini; jika masih terjadi, kirimkan ke pengembang.',
+    crashQuit: 'Keluar dari Folia',
     crashOpenFolder: 'Buka Folder Log',
     crashClose: 'Tutup',
   },
+  vi: {
+    dockNotPlaying: 'Không phát',
+    dockRepeat: 'Lặp lại: {mode}',
+    dockRepeatOff: 'Tắt',
+    dockRepeatAll: 'Tất cả',
+    dockRepeatOne: 'Một bài',
+    dockPrevious: 'Bài trước',
+    dockPlay: 'Phát',
+    dockPause: 'Tạm dừng',
+    dockNext: 'Bài tiếp theo',
+    trayShowWindow: 'Hiện cửa sổ',
+    trayHideWindow: 'Ẩn cửa sổ',
+    trayOpenRemote: 'Cửa sổ điều khiển',
+    trayUnlockRemote: 'Mở khóa cửa sổ điều khiển',
+    trayTransparentBackground: 'Nền trong suốt',
+    trayToggleClickThrough: 'Nhấp xuyên qua',
+    trayAlwaysOnTop: 'Luôn trên cùng',
+    trayAlwaysOnTopUnavailable: 'Luôn trên cùng (không khả dụng trên Wayland)',
+    trayHideTaskbar: 'Ẩn biểu tượng thanh tác vụ',
+    trayDesktopLyricMode: 'Lời bài hát màn hình chính',
+    trayToggleWallpaperMode: 'Chế độ hình nền',
+    trayWallpaperDisplay: 'Màn hình hiển thị hình nền',
+    trayWallpaperDisplayAuto: 'Tự động',
+    trayWallpaperDisplayPrimary: 'Màn hình chính',
+    trayResetWindow: 'Đặt lại cửa sổ',
+    trayQuit: 'Thoát',
+    dialogImportTitle: 'Không thể nhập thư mục này',
+    dialogImportMessage: 'Không thể nhập trực tiếp thư mục hệ thống hoặc thư mục người dùng thông thường.\nVui lòng chọn một thư mục chuyên lưu nhạc.',
+    dialogChooseOther: 'Chọn thư mục khác',
+    dialogCancel: 'Hủy',
+    crashTitle: 'Folia đã gặp sự cố',
+    crashMessage: 'Ứng dụng đã gặp sự cố và tệp nhật ký đã được lưu. Gửi nhật ký cho nhà phát triển sẽ giúp giải quyết vấn đề.',
+    crashBlockedStartMessage: 'Tiến trình trang bị kết thúc ngay khi vừa khởi động, thường là do phần mềm bảo mật chặn Folia.',
+    crashBlockedStartDetail: 'Khi Kaspersky không nhận ra Folia.exe, nó xếp ứng dụng vào nhóm bị hạn chế và System Watcher chặn tiến trình trang.\n\nCách khắc phục: trong Kaspersky, thêm Folia.exe vào "Ứng dụng tin cậy" và chọn "Không giám sát hoạt động của ứng dụng". Chỉ chuyển sang nhóm Tin cậy thì không có tác dụng. Với phần mềm bảo mật khác, hãy thêm Folia.exe vào danh sách tin cậy hoặc danh sách loại trừ.\n\nSau đó thoát Folia và mở lại. Nhật ký đã được lưu ở vị trí bên dưới; nếu vẫn lỗi, hãy gửi nhật ký cho nhà phát triển.',
+    crashQuit: 'Thoát Folia',
+    crashOpenFolder: 'Mở thư mục nhật ký',
+    crashClose: 'Đóng',
+  },
 };
 
-// Maps an arbitrary BCP 47 tag onto one of the four locales the main process ships.
+// Maps an arbitrary BCP 47 tag onto one of the five locales the main process ships.
 // Returns null for unsupported tags so callers can keep walking the preference list.
 function normalizeMainLocaleKey(value) {
   if (typeof value !== 'string' || !value) {
@@ -2018,6 +2373,9 @@ function normalizeMainLocaleKey(value) {
   const lowered = value.toLowerCase();
   if (lowered === 'in' || lowered.startsWith('id')) {
     return 'in';
+  }
+  if (lowered === 'vi' || lowered.startsWith('vi-')) {
+    return 'vi';
   }
   // Same script/region split the renderer applies in src/i18n/config.ts: an explicit
   // Hant / TW / HK / MO subtag means traditional, a bare `zh` stays simplified.
@@ -2068,7 +2426,7 @@ function detectSystemLocaleKey() {
 // modules with their own dialog copy (the mod loader) can ask for the key.
 function getMainLocaleKey() {
   const stored = store.get(APP_LOCALE_KEY);
-  if (stored === 'zh-CN' || stored === 'zh-TW' || stored === 'en' || stored === 'in') {
+  if (stored === 'zh-CN' || stored === 'zh-TW' || stored === 'en' || stored === 'in' || stored === 'vi') {
     return stored;
   }
   return detectSystemLocaleKey();
@@ -2196,11 +2554,21 @@ installCrashHandlers({
       || (contents === mainWindow?.webContents && shouldReloadMainRenderer(mainWindow, details))
     ))
   ),
+  beforeExit: () => hifiSession.killSync(),
 });
 
 
 let mainWindow = null;
 let modSystem = null;
+// macOS only; off macOS every call on it does nothing.
+const macDockMenu = createMacDockMenu({
+  app,
+  Menu,
+  isSupported: process.platform === 'darwin',
+  getMainWindow: () => mainWindow,
+  getLocale: () => getMainLocale(),
+  sendTransport: (action) => sendThumbarAction(action),
+});
 let remoteControlWindow = null;
 let appTray = null;
 let latestRemoteControlSnapshot = null;
@@ -2214,22 +2582,45 @@ let remoteControlSkipTaskbarEnabled = false;
 let remoteControlHideTitlebarEnabled = false;
 let remoteControlClickThroughEnabled = false;
 let remoteControlExpandCoverEnabled = true;
+let remoteControlTextShadeEnabled = false;
 let mainWindowAlwaysOnTop = false;
 let mainWindowClickThroughEnabled = false;
 let mainWindowClickThroughUnlockHover = false;
 let mainWindowClickThroughUnlockHoverTimer = null;
 let mainWindowSkipTaskbarEnabled = false;
 let videoExportWindowRestoreState = null;
+// The 后台节流 switch; refresh() wherever one of its stand-down reasons can change.
+const backgroundThrottling = createBackgroundThrottling({
+  isEnabled: () => readStoredBoolean(BACKGROUND_THROTTLING_SETTING_KEY, false),
+  getStandDownReason: () => {
+    if (isWallpaperModeEnabled()) return 'wallpaper mode';
+    if (videoExportWindowRestoreState) return 'video export';
+    if (obsBrowserSourceClients.size > 0) return 'OBS browser source';
+    return null;
+  },
+});
 // Chromium's fragmented MP4 leaves the movie duration at the first fragment (#549); patch it
 // from the fragment timeline once recording ends.
 const videoExportFileWriter = createVideoExportFileWriter({ finalizeFile: finalizeVideoExportFile });
+// The ffmpeg of the transparent export (the user's choice in Settings, else a checked search), shared by
+// the host's own export and the mods' api.render.exportVideo.
+const exportFfmpegResolver = createExportFfmpegResolver({ store, appGetAppPath: () => app.getAppPath() });
 let autoUpdater = null;
+// The updater's own check of GitHub is running: its failure is handled where it was started (the
+// mirrors get asked), so the updater's 'error' event leaves the state alone meanwhile.
+let updaterCheckRunning = false;
+// The updater's requests have no working timeout in Electron (it hangs its timer on a 'socket' event
+// Electron's net requests never fire), so a stalled connection to GitHub would hold the check forever.
+const UPDATER_CHECK_TIMEOUT_MS = 20000;
 // Backed by the settings store so a handoff survives a full process relaunch (wallpaper mode)
 const windowPlaybackHandoffStore = createWindowPlaybackHandoffStore({
   storage: store,
   ttlMs: 60_000,
 });
 const pendingWindowPlaybackHandoffRequests = new Map();
+// When the main window was last asked for its playback: a window that read a handoff after that and
+// never answered was asked before its page listened (see recreateMainWindowWithTransparencyMode).
+let lastWindowPlaybackHandoffRequestAt = Number.POSITIVE_INFINITY;
 let pendingWindowStateSave = null;
 let windowStateSaveTimer = null;
 let wallpaperModeRelaunchTimer = null;
@@ -2237,9 +2628,10 @@ let wallpaperModeRelaunchGeneration = 0;
 const x11WallpaperWindows = new WeakSet();
 // Must match CLICK_THROUGH_UNLOCK_HOTSPOT in src/utils/clickThroughUnlockHotspot.ts (the renderer
 // runs the same hit test on mousemove). The width covers the unlock button both at right-[180px]
-// and at right-[224px] (titlebar showing the fullscreen button).
+// and at right-[224px] (titlebar showing the fullscreen button), plus the keep-on-top and media
+// buttons that come up to its left while click-through is on.
 const MAIN_WINDOW_CLICK_THROUGH_UNLOCK_HOTSPOT = {
-  width: 84,
+  width: 206,
   height: 40,
   rightInset: 176,
   topInset: 4,
@@ -2274,6 +2666,8 @@ const REMOTE_CONTROL_ALWAYS_ON_TOP_SETTING_KEY = 'REMOTE_CONTROL_ALWAYS_ON_TOP';
 const REMOTE_CONTROL_SKIP_TASKBAR_SETTING_KEY = 'REMOTE_CONTROL_SKIP_TASKBAR';
 const MAIN_WINDOW_ALWAYS_ON_TOP_SETTING_KEY = 'MAIN_WINDOW_ALWAYS_ON_TOP';
 const TRANSPARENT_PLAYER_BACKGROUND_SETTING_KEY = 'TRANSPARENT_PLAYER_BACKGROUND';
+// macOS 原生红绿灯（设置 → 桌面）：默认关，开了才把自绘的最小化/最大化/关闭换成系统红绿灯。
+const USE_NATIVE_MAC_TRAFFIC_LIGHTS_SETTING_KEY = 'USE_NATIVE_MAC_TRAFFIC_LIGHTS';
 const VOICE_INPUT_PAUSE_ENABLED_SETTING_KEY = 'VOICE_INPUT_PAUSE_ENABLED';
 const PREVENT_DISPLAY_SLEEP_DURING_PLAYBACK_SETTING_KEY = 'PREVENT_DISPLAY_SLEEP_DURING_PLAYBACK';
 // Master switch for the experimental mod system. Off by default: with it off no
@@ -2321,6 +2715,14 @@ const THUMBAR_BUTTON_ICONS = process.platform === 'win32'
     next: loadThumbarIcon('next.png'),
   }
   : null;
+
+// Windows only; off Windows every call on it does nothing.
+const windowsThumbar = createWindowsThumbar({
+  isSupported: process.platform === 'win32',
+  getWindow: () => mainWindow,
+  icons: THUMBAR_BUTTON_ICONS,
+  sendAction: (action) => sendThumbarAction(action),
+});
 
 // macOS menu bar icons should be monochrome template images with transparent backgrounds.
 function createTrayIconImage() {
@@ -2396,16 +2798,22 @@ function getPublicSettings() {
     [REMOTE_CONTROL_HIDE_TITLEBAR_SETTING_KEY]: readStoredBoolean(REMOTE_CONTROL_HIDE_TITLEBAR_SETTING_KEY, false),
     [REMOTE_CONTROL_CLICK_THROUGH_SETTING_KEY]: readStoredBoolean(REMOTE_CONTROL_CLICK_THROUGH_SETTING_KEY, false),
     [REMOTE_CONTROL_EXPAND_COVER_SETTING_KEY]: readStoredBoolean(REMOTE_CONTROL_EXPAND_COVER_SETTING_KEY, true),
+    [REMOTE_CONTROL_TEXT_SHADE_SETTING_KEY]: readStoredBoolean(REMOTE_CONTROL_TEXT_SHADE_SETTING_KEY, false),
     [MAIN_WINDOW_ALWAYS_ON_TOP_SETTING_KEY]: readStoredBoolean(MAIN_WINDOW_ALWAYS_ON_TOP_SETTING_KEY, false),
     [TRANSPARENT_PLAYER_BACKGROUND_SETTING_KEY]: readStoredBoolean(TRANSPARENT_PLAYER_BACKGROUND_SETTING_KEY, false),
     [DISCORD_RICH_PRESENCE_ENABLED_SETTING_KEY]: readStoredBoolean(DISCORD_RICH_PRESENCE_ENABLED_SETTING_KEY, false),
     [LYRIC_API_ENABLED_SETTING_KEY]: readStoredBoolean(LYRIC_API_ENABLED_SETTING_KEY, false),
     [VOICE_INPUT_PAUSE_ENABLED_SETTING_KEY]: readStoredBoolean(VOICE_INPUT_PAUSE_ENABLED_SETTING_KEY, false),
     [PREVENT_DISPLAY_SLEEP_DURING_PLAYBACK_SETTING_KEY]: readStoredBoolean(PREVENT_DISPLAY_SLEEP_DURING_PLAYBACK_SETTING_KEY, false),
-    [MOD_SYSTEM_ENABLED_SETTING_KEY]: readStoredBoolean(MOD_SYSTEM_ENABLED_SETTING_KEY, false),
+    // On by default from Folium 2.0; a profile that switched it off keeps it off.
+    [MOD_SYSTEM_ENABLED_SETTING_KEY]: readStoredBoolean(MOD_SYSTEM_ENABLED_SETTING_KEY, true),
+    // Shown only: it is written through folia-mods:set-community (a native confirmation), never save-settings.
+    [COMMUNITY_MODS_SETTING_KEY]: readStoredBoolean(COMMUNITY_MODS_SETTING_KEY, false),
+    [BACKGROUND_THROTTLING_SETTING_KEY]: readStoredBoolean(BACKGROUND_THROTTLING_SETTING_KEY, false),
     [UPDATE_CHANNEL_SETTING_KEY]: getCurrentReleaseChannel().id,
-    'enable_player_page_native_blur': store.get('enable_player_page_native_blur') === true,
+    'enable_player_page_native_blur': NATIVE_BLUR_SUPPORTED && store.get('enable_player_page_native_blur') === true,
     'wallpaper_attach_mode': process.platform === 'win32' ? wallpaperWindowsAttachMode : null,
+    [GPU_PREFERENCE_SETTING_KEY]: normalizeGpuPreference(store.get(GPU_PREFERENCE_SETTING_KEY)),
     [WALLPAPER_MODE_SETTING_KEY]: isWallpaperModeEnabled(),
     [WALLPAPER_ENTRY_CONFIRMED_SETTING_KEY]: readStoredBoolean(WALLPAPER_ENTRY_CONFIRMED_SETTING_KEY, false),
     [WALLPAPER_MAC_AUTOHIDE_DOCK_SETTING_KEY]: readStoredBoolean(WALLPAPER_MAC_AUTOHIDE_DOCK_SETTING_KEY, true),
@@ -2462,6 +2870,7 @@ function buildObsBrowserSourceStatus() {
 }
 
 function broadcastObsBrowserSourceStatus() {
+  backgroundThrottling.refresh();
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('obs-browser-source-status-changed', buildObsBrowserSourceStatus());
   }
@@ -2475,6 +2884,7 @@ remoteControlSkipTaskbarEnabled = readStoredBoolean(REMOTE_CONTROL_SKIP_TASKBAR_
   remoteControlHideTitlebarEnabled = remoteWindowSettings.hideTitlebar;
   remoteControlClickThroughEnabled = remoteWindowSettings.clickThrough;
   remoteControlExpandCoverEnabled = remoteWindowSettings.expandCover;
+  remoteControlTextShadeEnabled = remoteWindowSettings.textShade;
 }
 mainWindowAlwaysOnTop = readStoredBoolean(MAIN_WINDOW_ALWAYS_ON_TOP_SETTING_KEY, false);
 
@@ -2487,7 +2897,8 @@ const stageApi = createStageApi({
   stageApiTokenSettingKey: STAGE_API_TOKEN_SETTING_KEY,
   stageApiPortSettingKey: STAGE_API_PORT_SETTING_KEY,
   defaultStageApiPort: DEFAULT_STAGE_API_PORT,
-  getNeteasePort: () => neteaseBackend.getPort(),
+  // Local tools read the address and token from here instead of asking the user to copy the token.
+  connectionFilePath: resolveStageConnectionFilePath({ userDataDir: app.getPath('userData') }),
 });
 
 const lyricApi = createLyricApi({
@@ -2517,12 +2928,36 @@ const displaySleepBlocker = createDisplaySleepBlocker(powerSaveBlocker);
 // own estimators whenever they answer null, which is what the web build always gets.
 // The developer debug module: the runtime log and the memory monitor, both switched from
 // Settings > Developer. Created BEFORE the analysis host, which logs through it.
-createDebugHost({ app, ipcMain, store, BrowserWindow });
+createDebugHost({ app, ipcMain, store, BrowserWindow, isTrustedSender: isFirstPartyWindowContents });
+// The performance check's window (electron/perfCheck.cjs, src/components/perfCheck/).
+const perfCheckHost = createPerfCheckHost({
+  app,
+  ipcMain,
+  BrowserWindow,
+  screen,
+  preloadPath: path.join(__dirname, 'preload.cjs'),
+  iconPath: APP_ICON_PATH,
+  loadAppEntry,
+  isolateFirstPartyWindow,
+  isFirstPartyWindowContents,
+  getMainWindow: () => mainWindow,
+});
 logLinuxVulkanChoice(linuxVulkan, linuxGraphicsMode);
 
 const analysisHost = createAnalysisHost({
-  app, ipcMain, getModelsDir: getBundledModelsDirectory,
+  app, ipcMain, getModelsDir: getBundledModelsDirectory, isTrustedSender: isFirstPartyWindowContents,
 });
+
+// The scene engine's room sound (window.electron.sceneAcoustics): Steam Audio in a child process of its own,
+// rooms cached under userData. Only the main window plays scenes. See electron/acoustics/host.cjs.
+createAcousticsHost({
+  app, ipcMain,
+  isTrusted: (event) => isTrustedMainWindowContents(event.sender),
+  libraryFile: steamAudioLibraryPath({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, appRoot: path.join(__dirname, '..') }),
+  getCacheDir: () => path.join(app.getPath('userData'), 'scene-acoustics'),
+});
+// A small picture of a scene's screen, which lights the scene (window.electron.sceneScreen). See electron/scenes/screenCapture.cjs.
+createSceneScreenHost({ ipcMain, isTrusted: (event) => isTrustedMainWindowContents(event.sender) });
 
 function buildPlaybackSyncBridgeStatus() {
   return {
@@ -2659,10 +3094,6 @@ function setMainWindowFullscreen(win, fullscreen) {
   win.setFullScreen(fullscreen);
 }
 
-function isWindowsThumbarSupported() {
-  return process.platform === 'win32';
-}
-
 function sendThumbarAction(action) {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return;
@@ -2671,51 +3102,12 @@ function sendThumbarAction(action) {
   mainWindow.webContents.send('thumbar-action', action);
 }
 
-function updateWindowThumbarButtons(state = {}) {
-  if (!isWindowsThumbarSupported() || !mainWindow || mainWindow.isDestroyed()) {
-    return false;
-  }
-
-  const {
-    hasActiveTrack = false,
-    canGoPrevious = false,
-    canGoNext = false,
-    isPlaying = false,
-  } = state;
-
-  if (!hasActiveTrack) {
-    try {
-      return mainWindow.setThumbarButtons([]);
-    } catch (error) {
-      console.warn('[Electron] Failed to clear Windows thumbar buttons', error);
-      return false;
-    }
-  }
-
-  try {
-    return mainWindow.setThumbarButtons([
-      {
-        tooltip: 'Previous Track',
-        icon: THUMBAR_BUTTON_ICONS.previous,
-        flags: canGoPrevious ? [] : ['disabled'],
-        click: () => sendThumbarAction('previous'),
-      },
-      {
-        tooltip: isPlaying ? 'Pause' : 'Play',
-        icon: isPlaying ? THUMBAR_BUTTON_ICONS.pause : THUMBAR_BUTTON_ICONS.play,
-        click: () => sendThumbarAction('play-pause'),
-      },
-      {
-        tooltip: 'Next Track',
-        icon: THUMBAR_BUTTON_ICONS.next,
-        flags: canGoNext ? [] : ['disabled'],
-        click: () => sendThumbarAction('next'),
-      },
-    ]);
-  } catch (error) {
-    console.warn('[Electron] Failed to set Windows thumbar buttons', error);
-    return false;
-  }
+// Windows builds a new taskbar button for a window shown after being hidden, and Electron forgets
+// the old thumbar when the window hides (SetThumbarButtonsAdded(false) in native_window_views.cc,
+// #28390), so the next write is what re-adds the buttons. Nothing writes on show, so the cached
+// buttons are replayed here instead of waiting for the next playback change.
+function replayMainWindowThumbarButtons() {
+  return windowsThumbar.replay({ taskbarButtonVisible: !mainWindowSkipTaskbarEnabled });
 }
 
 function getDefaultCacheDirectory() {
@@ -2842,6 +3234,10 @@ function setMainWindowSkipTaskbarEnabled(enabled) {
   mainWindowSkipTaskbarEnabled = Boolean(enabled);
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.setSkipTaskbar(mainWindowSkipTaskbarEnabled);
+    if (!mainWindowSkipTaskbarEnabled) {
+      // The taskbar button is back; Electron re-adds the buttons only when it remembers adding them.
+      replayMainWindowThumbarButtons();
+    }
   }
   refreshTrayMenu();
   return mainWindowSkipTaskbarEnabled;
@@ -2878,6 +3274,7 @@ function buildRemoteControlWindowSettings() {
     hideTitlebar: remoteControlHideTitlebarEnabled,
     clickThrough: remoteControlClickThroughEnabled,
     expandCover: remoteControlExpandCoverEnabled,
+    textShade: remoteControlTextShadeEnabled,
     alwaysOnTopSupported: windowAlwaysOnTopSupported,
   };
 }
@@ -2998,6 +3395,8 @@ async function enableDesktopLyricsLeavingWallpaperMode() {
 }
 
 function refreshTrayMenu() {
+  // The Dock menu shares the tray's triggers (locale, window coming and going); it skips unchanged menus.
+  macDockMenu.refresh();
   if (!appTray) {
     return;
   }
@@ -3272,6 +3671,47 @@ function isTrustedRemoteControlContents(webContents) {
   );
 }
 
+// The first-party predicate: the two windows that run the app with the preload - the main window and
+// the remote-control window, which runs the same app and therefore the same online providers.
+// Comparing webContents identity rejects every other window; it cannot stop script already running
+// inside a trusted window - that is the CSP and preload layer's job, not this check's. A function
+// declaration so that handlers registered anywhere in this file can name it.
+function isFirstPartyWindowContents(event) {
+  return isTrustedMainWindowContents(event.sender) || isTrustedRemoteControlContents(event.sender);
+}
+
+// IPC 处理函数只给第一方窗口：别的来源直接拒（D605，登记在 dev/dedicatus/ipcChannels.mjs）。
+function firstParty(channel, handler) {
+  return createSenderGuardedHandler({ channel, isTrusted: isFirstPartyWindowContents, handler });
+}
+
+// 带 preload 的第一方窗口不开别的窗口，也不导航到应用以外的页面（D605 复核，2026-11-08）：window.open、
+// target="_blank"、中键点链接开出来的窗口会继承同一个 preload；窗口自己导航到外面的页面，那个页面同样带着
+// preload，还会被上面的判断当成第一方。外面的地址一律交给系统浏览器（openExternalUrl 只放行 http(s)）。
+function isolateFirstPartyWindow(win) {
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    void openExternalUrl(url);
+    return { action: 'deny' };
+  });
+  win.webContents.on('will-navigate', (event, url) => {
+    if (isSameAppPage(win.webContents.getURL(), url)) return;
+    event.preventDefault();
+    void openExternalUrl(url);
+  });
+}
+
+// 应用自己的页面：开发时同一个源（Vite，默认 http://localhost:3000），打包后同一个 index.html（file:，查询参数可以不同）。
+function isSameAppPage(currentUrl, nextUrl) {
+  try {
+    const current = new URL(currentUrl);
+    const next = new URL(nextUrl);
+    if (current.protocol === 'file:') return next.protocol === 'file:' && next.pathname === current.pathname;
+    return next.origin === current.origin;
+  } catch {
+    return false;
+  }
+}
+
 function getMainWindowUrl() {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return '';
@@ -3338,15 +3778,6 @@ function setupFileSystemAccessPermissionHandlers() {
 function setupCorsBypassHandlers() {
   const ses = session.defaultSession;
 
-  const getKugouMediaRequestInfo = details => {
-    const parsedUrl = new URL(details.url);
-    const isMediaRequest = details.resourceType === 'media' || parsedUrl.hostname.startsWith('fs.');
-    return isMediaRequest ? {
-      protocol: parsedUrl.protocol,
-      hostname: parsedUrl.hostname,
-      resourceType: details.resourceType,
-    } : null;
-  };
   ses.webRequest.onHeadersReceived((details, callback) => {
     const responseHeaders = { ...details.responseHeaders };
     const originUrl = details.url;
@@ -3356,13 +3787,8 @@ function setupCorsBypassHandlers() {
       const parsedUrl = new URL(originUrl);
       const hostname = parsedUrl.hostname;
       isTargetDomain =
-        hostname === 'qq.com' ||
-        hostname.endsWith('.qq.com') ||
-        hostname === 'y.gtimg.cn' ||
-        hostname === 'kugou.com' ||
-        hostname.endsWith('.kugou.com') ||
-        // Bodian audio and cover CDNs may omit CORS headers needed by Web Audio and canvas/WebGL.
-        bodianMediaPolicy.allows(details);
+        // Folium 2.0: the rules source mods register with api.media.allow (electron/modSystem/mediaRules.cjs).
+        Boolean(modSystem?.mediaRules.allows(details));
     } catch (error) {
       isTargetDomain = false;
     }
@@ -3377,16 +3803,8 @@ function setupCorsBypassHandlers() {
     callback({ cancel: false, responseHeaders });
   });
 
-  ses.webRequest.onBeforeRedirect(details => bodianMediaPolicy.followRedirect(details));
-
-  ses.webRequest.onErrorOccurred({ urls: ['*://*.kugou.com/*'] }, details => {
-    const requestInfo = getKugouMediaRequestInfo(details);
-    if (!requestInfo) return;
-    if (requestInfo.resourceType === 'media' && details.error === 'net::ERR_FAILED') return;
-    console.warn('[KuGouMedia] request:error', {
-      ...requestInfo,
-      error: details.error,
-    });
+  ses.webRequest.onBeforeRedirect(details => {
+    modSystem?.mediaRules.followRedirect(details);
   });
 }
 
@@ -3405,14 +3823,9 @@ function removeCorsResponseHeaders(responseHeaders) {
 
 function isAllowedLyricProxyHost(hostname) {
   return (
-    hostname === 'qq.com' ||
-    hostname.endsWith('.qq.com') ||
-    hostname === 'y.gtimg.cn' ||
-    hostname === 'kugou.com' ||
-    hostname.endsWith('.kugou.com') ||
-    hostname === 'kgimg.com' ||
-    hostname.endsWith('.kgimg.com') ||
-    hostname === 'api.amll.dev'
+    hostname === 'api.amll.dev' ||
+    // Folium 2.0: `sources[].lyricRelayHosts` of a running source mod (listed in its enable confirmation).
+    Boolean(modSystem?.isLyricRelayHost(hostname))
   );
 }
 
@@ -3613,6 +4026,11 @@ function isDevUpdatePreviewEnabled() {
   return process.env.ELECTRON_DEV === 'true' && process.env.FOLIA_DEV_UPDATE_PREVIEW === 'true';
 }
 
+// The preview's version as if GitHub could not be read and a mirror found it: the download then fails.
+function isDevUpdatePreviewGithubFailed() {
+  return isDevUpdatePreviewEnabled() && process.env.FOLIA_DEV_UPDATE_PREVIEW_GITHUB_FAILED === 'true';
+}
+
 // Builds a believable next patch version so the preview stays aligned with package metadata.
 function getDevUpdatePreviewVersion() {
   const currentVersion = normalizeVersion(app.getVersion());
@@ -3646,6 +4064,10 @@ function isPackagedUpdateRuntime() {
   return app.isPackaged && process.env.ELECTRON_DEV !== 'true' && process.env.NODE_ENV !== 'development';
 }
 
+// Which of the updater's downloads (only the changed blocks, or the whole installer) is running.
+const updateDownloadPhase = createUpdateDownloadPhase();
+let lastUpdateDownloadMode = null;
+
 const updateState = {
   status: 'idle',
   currentVersion: normalizeVersion(app.getVersion()),
@@ -3654,6 +4076,12 @@ const updateState = {
   error: null,
   lastCheckedAt: null,
   downloadProgress: null,
+  // Where the last found version came from: 'github', or 'mirror' when GitHub could not be read and a
+  // public proxy answered instead. The updater can only download what it has read from GitHub itself.
+  checkedVia: null,
+  // The last request to GitHub for this update (the check, or the download) failed: the settings
+  // page then offers the two network drives up front.
+  githubFailed: false,
 };
 
 function getUpdateStatus() {
@@ -3730,6 +4158,12 @@ function setupAutoUpdater() {
 
   updater.on('update-available', (info) => {
     const version = normalizeVersion(info?.version);
+    updateDownloadPhase.setInstaller(info);
+    if (updateState.status !== 'downloading') {
+      // No download running: the next one, started by the updater itself when auto-update is on, is new.
+      updateDownloadPhase.restart();
+      lastUpdateDownloadMode = null;
+    }
     setUpdateState({
       status: 'available',
       availableVersion: version || null,
@@ -3737,6 +4171,8 @@ function setupAutoUpdater() {
       error: null,
       lastCheckedAt: Date.now(),
       downloadProgress: null,
+      checkedVia: 'github',
+      githubFailed: false,
     });
   });
 
@@ -3748,10 +4184,19 @@ function setupAutoUpdater() {
       error: null,
       lastCheckedAt: Date.now(),
       downloadProgress: null,
+      checkedVia: 'github',
+      githubFailed: false,
     });
   });
 
   updater.on('download-progress', (progress) => {
+    const { mode, fallback } = updateDownloadPhase.phaseOf(progress);
+    if (mode !== null && mode !== lastUpdateDownloadMode) {
+      console.info(fallback
+        ? '[Updater] Differential download failed, downloading the full installer'
+        : `[Updater] Downloading the update: ${mode}`);
+      lastUpdateDownloadMode = mode;
+    }
     setUpdateState({
       status: 'downloading',
       error: null,
@@ -3759,7 +4204,10 @@ function setupAutoUpdater() {
         percent: typeof progress.percent === 'number' ? progress.percent : 0,
         transferred: progress.transferred,
         total: progress.total,
+        mode,
+        fallback,
       },
+      githubFailed: false,
     });
   });
 
@@ -3769,16 +4217,31 @@ function setupAutoUpdater() {
       availableVersion: normalizeVersion(info?.version) || updateState.availableVersion,
       error: null,
       downloadProgress: null,
+      githubFailed: false,
     });
   });
 
   updater.on('error', (error) => {
+    if (updaterCheckRunning) {
+      return;
+    }
     setUpdateState({
       status: 'error',
       error: error instanceof Error ? error.message : String(error),
       downloadProgress: null,
+      githubFailed: true,
     });
   });
+}
+
+// Runs the updater's check of GitHub, waiting at most UPDATER_CHECK_TIMEOUT_MS for it. A check that
+// is given up on keeps running; the updater hands it to the next caller instead of starting another.
+function runUpdaterCheck(updater) {
+  updaterCheckRunning = true;
+  const check = Promise.resolve(updater.checkForUpdates()).finally(() => {
+    updaterCheckRunning = false;
+  });
+  return settleWithin(check, UPDATER_CHECK_TIMEOUT_MS, 'GitHub update check timed out.');
 }
 
 function configureAutoUpdaterChannel(updater) {
@@ -3794,7 +4257,9 @@ function configureAutoUpdaterChannel(updater) {
 
 async function downloadAvailableUpdate() {
   if (isDevUpdatePreviewEnabled()) {
-    setUpdateState({ status: 'downloaded', error: null, downloadProgress: null });
+    setUpdateState(isDevUpdatePreviewGithubFailed()
+      ? { status: 'error', error: 'net::ERR_CONNECTION_RESET', downloadProgress: null, githubFailed: true }
+      : { status: 'downloaded', error: null, downloadProgress: null });
     return getUpdateStatus();
   }
 
@@ -3815,13 +4280,33 @@ async function downloadAvailableUpdate() {
 
   if (!updateState.availableVersion) {
     await checkForUpdates({ manual: true });
+  } else if (updateState.checkedVia === 'mirror') {
+    // The version came through a proxy: the updater downloads only against metadata it has read
+    // from GitHub itself, so it reads it now. Failing here leaves the found version and the drives.
+    try {
+      updater.autoDownload = false;
+      await runUpdaterCheck(updater);
+    } catch (error) {
+      console.warn('[Updater] GitHub still unreachable before download', error);
+      setUpdateState({
+        status: 'error',
+        error: error instanceof Error ? error.message : String(error),
+        downloadProgress: null,
+        githubFailed: true,
+      });
+    }
   }
 
-  if (!updateState.availableVersion) {
+  if (!updateState.availableVersion || updateState.checkedVia !== 'github') {
     return getUpdateStatus();
   }
 
   try {
+    // The updater hands back the running download instead of starting another: only a new one starts over.
+    if (updateState.status !== 'downloading') {
+      updateDownloadPhase.restart();
+      lastUpdateDownloadMode = null;
+    }
     setUpdateState({ status: 'downloading', error: null, downloadProgress: null });
     await updater.downloadUpdate();
   } catch (error) {
@@ -3829,6 +4314,7 @@ async function downloadAvailableUpdate() {
       status: 'error',
       error: error instanceof Error ? error.message : String(error),
       downloadProgress: null,
+      githubFailed: true,
     });
   }
 
@@ -3845,6 +4331,8 @@ async function checkForUpdates({ manual = false } = {}) {
       error: null,
       lastCheckedAt: Date.now(),
       downloadProgress: null,
+      checkedVia: isDevUpdatePreviewGithubFailed() ? 'mirror' : 'github',
+      githubFailed: isDevUpdatePreviewGithubFailed(),
     });
     return getUpdateStatus();
   }
@@ -3875,20 +4363,36 @@ async function checkForUpdates({ manual = false } = {}) {
     }
 
     updater.autoDownload = getAutoUpdateEnabled();
-    await updater.checkForUpdates();
+    await runUpdaterCheck(updater);
   } catch (error) {
-    setUpdateState({
-      status: 'error',
-      error: error instanceof Error ? error.message : String(error),
-      lastCheckedAt: Date.now(),
-      downloadProgress: null,
-    });
+    // GitHub could not be read: the public proxies can still say whether there is a new version.
+    console.warn('[Updater] GitHub update check failed, asking the mirrors', error);
+    return checkForManualUpdateAvailability({ githubError: error });
   }
 
   return getUpdateStatus();
 }
 
-async function checkForManualUpdateAvailability() {
+// Reads one update metadata file through its own session, so refreshing proxy state cannot interrupt
+// playback, provider requests or other live connections on the default one.
+async function readUpdateMetadataText(url, signal) {
+  const ses = session.fromPartition('folia-update-check');
+  const response = await ses.fetch(url, {
+    headers: {
+      Accept: 'text/yaml, text/plain',
+      'User-Agent': `Folia/${app.getVersion()}`,
+    },
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(`Update metadata request to ${new URL(url).host} failed: ${response.status} ${response.statusText}`);
+  }
+  return response.text();
+}
+
+// Finds the newest version without the updater: from GitHub, then from the public proxies when GitHub
+// cannot be read. `githubError` says the updater has just failed to read GitHub, which is not tried again.
+async function checkForManualUpdateAvailability({ githubError = null } = {}) {
   const releaseChannel = getCurrentReleaseChannel();
   const discovery = getUpdateDiscoveryConfig(releaseChannel, FOLIA_GITHUB_REPOSITORY);
   if (!discovery) {
@@ -3896,54 +4400,38 @@ async function checkForManualUpdateAvailability() {
     return getUpdateStatus();
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15000);
   setUpdateState({ status: 'checking', error: null, downloadProgress: null });
 
+  let found = null;
   try {
-    // Keep the startup check off the app's default session so refreshing proxy state cannot
-    // interrupt playback, provider requests, or other live connections.
     const ses = session.fromPartition('folia-update-check');
     await ses.setProxy({ mode: 'system' });
     await ses.forceReloadProxyConfig();
-    const response = await ses.fetch(discovery.url, {
-      headers: {
-        Accept: 'text/yaml, text/plain',
-        'User-Agent': `Folia/${app.getVersion()}`,
-      },
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      throw new Error(`Update metadata request failed: ${response.status} ${response.statusText}`);
-    }
-
-    const metadata = await response.text();
-    const latestVersion = parseUpdateMetadataVersion(metadata);
-    if (!latestVersion) {
-      throw new Error('Update metadata did not include a version.');
-    }
-
-    const hasUpdate = compareVersions(latestVersion, app.getVersion()) > 0;
-    setUpdateState({
-      status: hasUpdate ? 'available' : 'latest',
-      availableVersion: hasUpdate ? latestVersion : null,
-      updateUrl: hasUpdate
-        ? getReleaseUrl(releaseChannel.id, latestVersion, FOLIA_RELEASES_URL)
-        : FOLIA_RELEASES_URL,
-      error: null,
-      lastCheckedAt: Date.now(),
-      downloadProgress: null,
-    });
+    found = await discoverUpdateVersion({ githubUrl: discovery.url, readText: readUpdateMetadataText, githubError });
   } catch (error) {
     setUpdateState({
       status: 'error',
       error: error instanceof Error ? error.message : String(error),
       lastCheckedAt: Date.now(),
       downloadProgress: null,
+      githubFailed: true,
     });
-  } finally {
-    clearTimeout(timeout);
+    return getUpdateStatus();
   }
+
+  const hasUpdate = compareVersions(found.version, app.getVersion()) > 0;
+  setUpdateState({
+    status: hasUpdate ? 'available' : 'latest',
+    availableVersion: hasUpdate ? found.version : null,
+    updateUrl: hasUpdate
+      ? getReleaseUrl(releaseChannel.id, found.version, FOLIA_RELEASES_URL)
+      : FOLIA_RELEASES_URL,
+    error: null,
+    lastCheckedAt: Date.now(),
+    downloadProgress: null,
+    checkedVia: found.via,
+    githubFailed: found.via === 'mirror',
+  });
 
   return getUpdateStatus();
 }
@@ -4084,7 +4572,9 @@ function getGeminiResponseSchema() {
 }
 
 const THEME_JSON_SCHEMA_NAME = 'dual_theme';
-const THEME_MAX_OUTPUT_TOKENS = 4096;
+// What the theme's answer needs. Attempts that cannot switch reasoning off get room for it on top
+// (shared/ai/aiTasks.mjs), so this no longer depends on the provider.
+const THEME_MAX_OUTPUT_TOKENS = 8192;
 const THEME_JSON_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -4305,21 +4795,30 @@ async function removeAudioCacheEntry(name) {
   ]);
 }
 
-/** Every file the media-cache budget counts: original audio, transcodes, and Spotify's encrypted files. */
+/** Every file the media-cache budget counts: original audio, transcodes, and source mods' own. */
 async function listMediaCacheEntries() {
-  const [audioEntries, transcodeEntries, spotifyEntries] = await Promise.all([
+  const [audioEntries, transcodeEntries, sourceEntries] = await Promise.all([
     listAudioCacheEntries(),
     transcodeService.listCacheEntries(),
-    spotifyApiBridge.audioFiles.list(),
+    // What the running source mods keep in caches of their own (api.cache.provideEntries): one budget with the rest.
+    modSystem ? modSystem.sourceCaches.list() : [],
   ]);
   return [
     ...audioEntries.map(entry => ({ ...entry, name: `audio:${entry.name}` })),
     ...transcodeEntries.map(entry => ({ ...entry, name: `transcode:${entry.name}` })),
-    ...spotifyEntries.map(entry => ({ ...entry, name: `spotify:${entry.name}` })),
+    ...sourceCacheEntries(sourceEntries),
   ];
 }
 
-/** Prunes original, transcoded and Spotify audio as one media-cache budget. */
+/*
+ * The media cache limit the main window last named, and a source mod's api.cache.requestPrune(limitBytes?) against it
+ * (audioCachePrune.cjs createSourcePruneLimit: until the window has named one, a request without a limit is left alone).
+ */
+const sourcePruneLimit = createSourcePruneLimit((limitBytes) => pruneMediaCache(limitBytes));
+const noteMediaCacheLimit = sourcePruneLimit.note;
+const pruneMediaCacheForSource = sourcePruneLimit.pruneForSource;
+
+/** Prunes original and transcoded audio and source mods' caches as one media-cache budget. */
 async function pruneMediaCache(limitBytes, protectedTranscodeEntry = null) {
   const resolvedLimit = resolveCacheLimit(limitBytes);
   if (resolvedLimit === Infinity) return;
@@ -4341,7 +4840,10 @@ async function pruneMediaCache(limitBytes, protectedTranscodeEntry = null) {
     for (const name of selectEvictions(entries, effectiveLimit)) {
       if (name.startsWith('audio:')) await removeAudioCacheEntry(name.slice('audio:'.length));
       else if (name.startsWith('transcode:')) await transcodeService.removeCacheEntry(name.slice('transcode:'.length));
-      else if (name.startsWith('spotify:')) await spotifyApiBridge.audioFiles.remove(name.slice('spotify:'.length));
+      else {
+        const sourceEntry = sourceCacheEntryOf(name);
+        if (sourceEntry) await modSystem?.sourceCaches.remove(sourceEntry.modId, sourceEntry.id);
+      }
     }
   } catch (error) {
     console.warn('[AudioCache] Failed to prune media cache directories', error);
@@ -4398,7 +4900,7 @@ async function clearAudioCacheDirectory() {
     await Promise.all([
       fsp.rm(getAudioCacheDirectory(), { recursive: true, force: true }),
       transcodeService.clearCache(),
-      spotifyApiBridge.audioFiles.clear(),
+      modSystem?.sourceCaches.clear(),
     ]);
   } catch (error) {
     console.warn('[AudioCache] Failed to clear cache directory', error);
@@ -4487,60 +4989,26 @@ async function clearCoverCacheDirectory() {
 }
 
 const { createNetworkRecorder } = require('./networkRecorder.cjs');
-const { createNeteaseBackend } = require('./netease/neteaseBackend.cjs');
-const { createQqBackend } = require('./qq/qqBackend.cjs');
 const { registerLoginBackendIpc } = require('./loginBackendIpc.cjs');
 
 // 主线程里内嵌后端的出站连接记录：要在它们发出请求之前开始订阅。工作线程里发出的请求另有一份记录（见 networkRecorder.cjs）。
 const networkRecorder = createNetworkRecorder();
 networkRecorder.start();
 
-function broadcastToWindows(channel, payload) {
-  BrowserWindow.getAllWindows().forEach((win) => {
-    if (!win.isDestroyed()) {
-      win.webContents.send(channel, payload);
-    }
-  });
-}
-
-// 网易云本地 API 的包不在主线程里加载，在工作线程里加载和运行（原因见 neteaseApiWorker.cjs）。
-// 拉起本身（网络请求）在 app ready 之后由 start() 进行。
-const neteaseBackend = createNeteaseBackend({
-  broadcast: broadcastToWindows,
-  // 和主线程里没人接的 rejection 同一个去处：写一份报告，不打断用户。
-  onUnhandledRejection: (reason) => {
-    crashLog.reportError('unhandledRejection', reason, { announceToUser: false });
-  },
-});
-// 确定由本进程运行应用以后就开线程，让它先加载包，不等 ready：主线程接下来有一百多毫秒在等
-// Electron 自己初始化，线程正好用上。重复启动的实例和壁纸模式的跳板进程不运行应用，不开。
-// 不放到文件开头去开得更早：量过一次（4 个慢核，推迟 jsdom 之前），线程加载完的时刻和现在分不出
-// 先后，首页却晚了约 130 毫秒能用；原因没有查。
-mainProcessStartupPromise.then((startupResult) => {
-  if (startupResult !== 'duplicate' && startupResult !== 'spawned') {
-    neteaseBackend.preload();
-  }
-}, () => {
-  // 启动准备本身失败时，ready 的处理函数里等的是同一个 promise，由那里报出来；这里不再报一遍。
-});
-
-// Runs @yakult-green-tea/qq-music-api in-process. Device identifiers remain in their existing file;
-// account credentials are owned by the API and cross this boundary only through an encrypted
-// main-process repository. The renderer continues to receive only an opaque session token.
-const qqBackend = createQqBackend({
-  broadcast: broadcastToWindows,
-  networkRecorder,
-  getStateFilePath: () => path.join(app.getPath('userData'), 'qq-auth-state', 'qq-device.json'),
-  authSessionRepository: qqAuthSessionRepository,
-});
-
 function isElectronDevRuntime() {
   return process.env.ELECTRON_DEV === 'true' || process.env.NODE_ENV === 'development';
 }
 
+// 开发时页面从哪里来：Vite，默认 3000 端口。同一台机器上并行开第二份 dev 版（另一个工作树）时，
+// 用 FOLIA_DEV_SERVER_PORT 让它连自己的那个 Vite；只换端口，主机始终是 localhost。
+function getDevServerOrigin() {
+  const port = Number(process.env.FOLIA_DEV_SERVER_PORT);
+  return `http://localhost:${Number.isInteger(port) && port > 0 && port < 65536 ? port : 3000}`;
+}
+
 function loadAppEntry(win, query = {}) {
   if (isElectronDevRuntime()) {
-    const url = new URL('http://localhost:3000');
+    const url = new URL(getDevServerOrigin());
     Object.entries(query).forEach(([key, value]) => {
       url.searchParams.set(key, String(value));
     });
@@ -4696,7 +5164,7 @@ async function handleObsBrowserSourceHttpRequest(req, res) {
     }
 
     if (isElectronDevRuntime()) {
-      const devUrl = new URL('http://localhost:3000');
+      const devUrl = new URL(getDevServerOrigin());
       devUrl.searchParams.set('obs', '1');
       devUrl.searchParams.set('token', requestUrl.searchParams.get('token') || '');
       devUrl.searchParams.set('obsPort', String(getConfiguredObsBrowserSourcePort()));
@@ -4813,6 +5281,7 @@ function requestWindowPlaybackHandoff(timeoutMs = WINDOW_PLAYBACK_HANDOFF_REQUES
     });
 
     try {
+      lastWindowPlaybackHandoffRequestAt = Date.now();
       mainWindow.webContents.send('window-playback-handoff-requested', { requestId });
     } catch (error) {
       clearTimeout(timeoutId);
@@ -4823,12 +5292,50 @@ function requestWindowPlaybackHandoff(timeoutMs = WINDOW_PLAYBACK_HANDOFF_REQUES
   });
 }
 
+// Generation of the rebuilds the main process starts for reasons of its own: a newer one supersedes
+// one still waiting for the page's answer.
+let mainProcessWindowRebuildGeneration = 0;
+
+/**
+ * Rebuilds the main window for a reason of the main process's own (the desktop's transparency, the
+ * wallpaper helper given up). The page is asked for its playback first, like every other rebuild:
+ * the players outside the window (mpv, a provider's own player) outlive it and go on to the next
+ * window, never left sounding with nobody following them. `stillWanted` is asked again once the page
+ * has answered: the rebuild may not be needed anymore by then.
+ */
+async function rebuildMainWindowWithPlaybackHandoff(reason, stillWanted = () => true) {
+  mainProcessWindowRebuildGeneration += 1;
+  const generation = mainProcessWindowRebuildGeneration;
+  const handoff = await requestWindowPlaybackHandoff();
+  if (generation !== mainProcessWindowRebuildGeneration || !stillWanted()) {
+    console.log('[Electron] main window rebuild no longer needed', { reason });
+    return false;
+  }
+  console.log('[Electron] rebuilding the main window', { reason, withHandoff: Boolean(handoff) });
+  recreateMainWindowWithTransparencyMode(isTransparentPlayerBackgroundEnabled(), handoff);
+  return true;
+}
+
+// The players outside the window, which outlive it (a provider's companion or program of its own).
+// A rebuild that hands nothing on to the next window stops them: no window follows them any more, and
+// the window that did can no longer reach them once it is replaced (its requests are refused).
+function pauseExternalPlayersNobodyFollows(reason) {
+  console.log('[Electron] no window takes the playback over; pausing the players outside the window', { reason });
+  modSystem?.notePlayersOrphaned(reason);
+}
+
 function clearPendingWindowPlaybackHandoffRequests() {
   for (const [requestId, pendingRequest] of pendingWindowPlaybackHandoffRequests.entries()) {
     clearTimeout(pendingRequest.timeoutId);
     pendingRequest.resolve(null);
     pendingWindowPlaybackHandoffRequests.delete(requestId);
   }
+}
+
+/** The snapshot without its queue, for sends that do not change it (the remote keeps the last one). */
+function withoutRemoteControlQueue(snapshot) {
+  const { queue: _queue, ...rest } = snapshot;
+  return rest;
 }
 
 function patchRemoteControlSnapshot(patch) {
@@ -4841,7 +5348,7 @@ function patchRemoteControlSnapshot(patch) {
     ...latestRemoteControlSnapshot,
     ...patch,
   };
-  sendRemoteControlSnapshot(latestRemoteControlSnapshot);
+  sendRemoteControlSnapshot(withoutRemoteControlQueue(latestRemoteControlSnapshot));
 }
 
 function publishMainWindowClickThroughState() {
@@ -4864,16 +5371,28 @@ function isCursorInsideMainWindowClickThroughUnlockHotspot() {
 
   const bounds = mainWindow.getBounds();
   const cursor = screen.getCursorScreenPoint();
-  const hotspotRight = bounds.x + bounds.width - MAIN_WINDOW_CLICK_THROUGH_UNLOCK_HOTSPOT.rightInset;
-  const hotspotLeft = hotspotRight - MAIN_WINDOW_CLICK_THROUGH_UNLOCK_HOTSPOT.width;
-  const hotspotTop = bounds.y + MAIN_WINDOW_CLICK_THROUGH_UNLOCK_HOTSPOT.topInset;
-  const hotspotBottom = hotspotTop + MAIN_WINDOW_CLICK_THROUGH_UNLOCK_HOTSPOT.height;
-
-  return cursor.x >= hotspotLeft
-    && cursor.x <= hotspotRight
-    && cursor.y >= hotspotTop
-    && cursor.y <= hotspotBottom;
+  // The hotspot is in CSS pixels; with 界面缩放 (#1264) one of them is getZoomFactor() window pixels.
+  const scale = mainWindow.webContents.getZoomFactor();
+  // Docked DevTools can make the page narrower than the native window.
+  return isCursorInsideUnlockHotspot({
+    bounds, cursor,
+    hotspot: resolveUnlockHotspot(MAIN_WINDOW_CLICK_THROUGH_UNLOCK_HOTSPOT, {
+      nativeTrafficLights: mainWindow.__nativeTrafficLights === true,
+      side: mainWindowUnlockHoverRequests.getSide(),
+      scale,
+    }),
+    side: mainWindowUnlockHoverRequests.getSide(),
+    viewportWidth: process.platform === 'darwin' ? mainWindowUnlockHoverRequests.getViewportWidth() : null,
+    viewportOrigin: process.platform === 'darwin' ? mainWindowUnlockHoverRequests.getViewportOrigin(bounds) : null,
+    scale,
+  });
 }
+
+const mainWindowUnlockHoverRequests = createUnlockHoverRequests({
+  platform: process.platform,
+  pollCursor: () => syncMainWindowClickThroughUnlockHoverFromCursor(),
+  setHover: (active) => setMainWindowClickThroughUnlockHover(active),
+});
 
 function syncMainWindowClickThroughUnlockHoverFromCursor() {
   if (!mainWindowClickThroughEnabled) {
@@ -5033,14 +5552,89 @@ function pollRemoteControlPointer() {
 }
 
 // Dragged past the outer left edge of the screens, the idle look's cover would be cut off. On
-// Windows the move can be held there as it happens; elsewhere a move cannot be refused.
+// Windows the move can be held there as it happens; elsewhere a move cannot be refused. With the
+// cover collapsed only the card in use is held, so it can reach the edge.
 function keepRemoteControlCoverOnScreen(win, event, newBounds) {
-  const x = clampRemoteControlWindowX(newBounds, screen.getAllDisplays().map(display => display.bounds));
+  const x = clampRemoteControlWindowX(
+    newBounds,
+    screen.getAllDisplays().map(display => display.bounds),
+    remoteControlExpandCoverEnabled,
+  );
   if (x !== newBounds.x) {
     // Windows then keeps the window where this puts it, and the drag slides along the edge.
     event.preventDefault();
-    win.setPosition(x, newBounds.y);
+    // setBounds rather than setPosition: this window's size is fixed (resizable: false, min ===
+    // max; only showing the queue changes it). Stating it on every move keeps the window the size
+    // the page is laid out to, instead of leaving the platform to re-derive it.
+    const { width, height } = getRemoteControlWindowBounds(newBounds, remoteControlQueueExpansion);
+    win.setBounds({ x, y: newBounds.y, width, height });
   }
+}
+
+// Switching the cover back on where the card was dragged to the edge: the strip left of the card
+// is off screen, so the window steps right until the cover fits, as a drag would have held it.
+function bringRemoteControlCoverOnScreen(win) {
+  if (process.platform !== 'win32' || !win || win.isDestroyed()) {
+    return;
+  }
+
+  const bounds = win.getBounds();
+  const x = clampRemoteControlWindowX(bounds, screen.getAllDisplays().map(display => display.bounds), true);
+  if (x !== bounds.x) {
+    const { width, height } = getRemoteControlWindowBounds(bounds, remoteControlQueueExpansion);
+    win.setBounds({ x, y: bounds.y, width, height });
+  }
+}
+
+// The play queue opens below or above the card, wherever the screen has room
+// (getRemoteControlQueueExpansion), so the window grows that way and the card stays where it is.
+// While shown it keeps that side; a queue that gets longer or shorter only changes the height.
+// What is remembered as the window's spot is always the card's (getRemoteControlCardPosition).
+let remoteControlQueueExpansion = null;
+
+function resizeRemoteControlWindow(win, bounds) {
+  const current = win.getBounds();
+  // min === max: open the limit on the side the window moves to first, or the platform clamps it.
+  if (bounds.height >= current.height) {
+    win.setMaximumSize(bounds.width, bounds.height);
+    win.setMinimumSize(bounds.width, bounds.height);
+  } else {
+    win.setMinimumSize(bounds.width, bounds.height);
+    win.setMaximumSize(bounds.width, bounds.height);
+  }
+  win.setBounds(bounds);
+}
+
+/**
+ * Shows the queue `wantedHeight` px tall (null hides it); returns where it went, or null. With
+ * `preview` it only says where it would go: the page anchors the card on that side first, so the
+ * window can then grow without the card moving. `direction` is the side the page anchored for; it
+ * is kept while it has room, as is the side of a queue already shown.
+ */
+function setRemoteControlQueueExpansion(win, wantedHeight, { preview = false, direction = null } = {}) {
+  if (!win || win.isDestroyed()) {
+    return null;
+  }
+
+  const card = getRemoteControlCardPosition(win.getBounds(), remoteControlQueueExpansion);
+  const cardBounds = getRemoteControlWindowBounds(card, null);
+  const next = Number.isFinite(wantedHeight) && wantedHeight > 0
+    ? getRemoteControlQueueExpansion(
+      cardBounds,
+      onWayland ? null : screen.getDisplayMatching(cardBounds).workArea,
+      wantedHeight,
+      remoteControlQueueExpansion?.direction ?? direction,
+    )
+    : null;
+  if (preview) {
+    return next;
+  }
+  if (next?.direction !== remoteControlQueueExpansion?.direction || next?.height !== remoteControlQueueExpansion?.height) {
+    console.info('[RemoteControl] Queue', next ? `shown ${next.direction}, ${next.height} px` : 'hidden');
+  }
+  remoteControlQueueExpansion = next;
+  resizeRemoteControlWindow(win, getRemoteControlWindowBounds(card, next));
+  return next;
 }
 
 // Wallpaper mode (Wayland): windowtolayer turns the first window it sees into the layer
@@ -5055,6 +5649,19 @@ function ensureWallpaperLayerHeldByMainWindow() {
   if (!mainWindow.isVisible()) {
     mainWindow.show();
   }
+}
+
+// Where the remote control window last sat, read back safely. A position saved on a display that is
+// no longer there (monitor unplugged, resolution changed) falls back to the centred default: what is
+// drawn (the whole window, or only the card in use with the cover collapsed) has to fit inside one
+// display's work area, so it never opens off-screen or under the taskbar.
+function getRestoredRemoteControlWindowPosition() {
+  const saved = store.get(REMOTE_CONTROL_WINDOW_POSITION_SETTING_KEY);
+  return resolveRemoteControlWindowPosition(
+    saved,
+    screen.getAllDisplays().map(display => display.workArea),
+    remoteControlExpandCoverEnabled,
+  );
 }
 
 function createRemoteControlWindow() {
@@ -5072,8 +5679,10 @@ function createRemoteControlWindow() {
 
   ensureWallpaperLayerHeldByMainWindow();
 
-  // Never resized after this: the idle look and the card in use are both drawn in this size.
-  const position = getInitialRemoteControlWindowPosition(screen.getPrimaryDisplay().workArea);
+  // Only resized to show the play queue: the idle look and the card in use are both drawn in this size.
+  const workArea = screen.getPrimaryDisplay().workArea;
+  const position = getRestoredRemoteControlWindowPosition()
+    ?? getInitialRemoteControlWindowPosition(workArea);
   const win = new BrowserWindow({
     modal: false,
     x: position.x,
@@ -5107,6 +5716,8 @@ function createRemoteControlWindow() {
   });
 
   remoteControlWindow = win;
+  isolateFirstPartyWindow(win);
+  remoteControlQueueExpansion = null;
   remoteControlPointerInside = false;
   remoteControlMouseIgnored = false;
   clearInterval(remoteControlPointerTimer);
@@ -5121,6 +5732,28 @@ function createRemoteControlWindow() {
   if (process.platform === 'win32') {
     win.on('will-move', (event, newBounds) => keepRemoteControlCoverOnScreen(win, event, newBounds));
   }
+  // Remember where the window last sat: after a drag, and again when it closes so an undragged
+  // window keeps the spot it opened on.
+  // macOS fires 'moved' on every frame of a drag and electron-store rewrites config.json
+  // synchronously on each set, so the save after a move waits until the window has settled, the
+  // same way the main window's state is saved; 'close' saves at once and drops the pending one.
+  let remoteControlPositionSaveTimer = null;
+  const clearRemoteControlPositionSaveTimer = () => {
+    clearTimeout(remoteControlPositionSaveTimer);
+    remoteControlPositionSaveTimer = null;
+  };
+  const persistRemoteControlPosition = () => {
+    clearRemoteControlPositionSaveTimer();
+    if (!win.isDestroyed()) {
+      const { x, y } = getRemoteControlCardPosition(win.getBounds(), remoteControlQueueExpansion);
+      store.set(REMOTE_CONTROL_WINDOW_POSITION_SETTING_KEY, { x, y });
+    }
+  };
+  win.on('moved', () => {
+    clearRemoteControlPositionSaveTimer();
+    remoteControlPositionSaveTimer = setTimeout(persistRemoteControlPosition, WINDOW_STATE_SAVE_DEBOUNCE_MS);
+  });
+  win.on('close', persistRemoteControlPosition);
   applyRemoteControlAlwaysOnTop(win);
   syncRemoteControlMouseIgnore();
   loadAppEntry(win, { remote: '1' });
@@ -5135,8 +5768,10 @@ function createRemoteControlWindow() {
   });
 
   win.on('closed', () => {
+    clearRemoteControlPositionSaveTimer();
     if (remoteControlWindow === win) {
       remoteControlWindow = null;
+      remoteControlQueueExpansion = null;
       clearInterval(remoteControlPointerTimer);
       remoteControlPointerTimer = null;
     }
@@ -5173,7 +5808,11 @@ function fitMainWindowBoundsToExportSize(exportSize) {
     return null;
   }
 
-  const exportDpr = mainWindow.__dpr && mainWindow.__dpr > 0 ? mainWindow.__dpr : 1;
+  // The renderer's devicePixelRatio counts the page zoom (界面缩放, #1264); window sizes are in
+  // window pixels, so take it back out to get physical pixels per window pixel.
+  const pageDpr = mainWindow.__dpr && mainWindow.__dpr > 0 ? mainWindow.__dpr : 1;
+  const zoom = mainWindow.webContents.getZoomFactor();
+  const exportDpr = zoom > 0 ? pageDpr / zoom : pageDpr;
   const cssWidth = Math.max(1, Math.round(exportSize.width / exportDpr));
   const cssHeight = Math.max(1, Math.round(exportSize.height / exportDpr));
   mainWindow.setContentSize(cssWidth, cssHeight, false);
@@ -5242,7 +5881,13 @@ function createWindow(options = {}) {
   // window remembers what it was built as so the reconcile path can detect mismatches.
   const useTransparentWindow = isTransparentPlayerBackgroundEnabled()
     && !(useWindowsWallpaper && !isWindowsWallpaperTransparentSupported());
-  const enableNativeBlur = store.get('enable_player_page_native_blur') === true;
+  // macOS 正常模式：开了「原生红绿灯」设置才用 hidden 标题栏替代自绘窗口按钮；
+  // 壁纸模式仍是完全无边框，沉进桌面层的窗口不能带着红绿灯。默认关，关时与主线行为一致。
+  const useMacNativeTrafficLights = process.platform === 'darwin'
+    && !isWallpaperModeEnabled()
+    && !useWallpaperGeometry
+    && readStoredBoolean(USE_NATIVE_MAC_TRAFFIC_LIGHTS_SETTING_KEY, false);
+  const enableNativeBlur = NATIVE_BLUR_SUPPORTED && store.get('enable_player_page_native_blur') === true;
   let win;
   try {
     win = new BrowserWindow({
@@ -5250,7 +5895,11 @@ function createWindow(options = {}) {
       type: useDesktopWindowType ? 'desktop' : undefined,
       minWidth: 350,
       minHeight: 100,
-      frame: false,
+      // macOS 正常模式：hidden 标题栏保留系统红绿灯，内容仍铺满整窗；
+      // 其余平台（以及 mac 壁纸模式）保持完全无边框。
+      ...(useMacNativeTrafficLights
+        ? { titleBarStyle: 'hidden', trafficLightPosition: { x: 14, y: 11 } }
+        : { frame: false }),
       transparent: useTransparentWindow,
       hasShadow: !useTransparentWindow,
       // Windows wallpaper mode must drop WS_THICKFRAME entirely: with it, Windows treats the
@@ -5290,6 +5939,8 @@ function createWindow(options = {}) {
     throw error;
   }
   win.__wallpaperWindowTransparent = useTransparentWindow;
+  // 这个窗口是不是带着系统红绿灯建的：设置改了要到下次建窗才生效，渲染层和解锁热区都按窗口实际的样子来。
+  win.__nativeTrafficLights = useMacNativeTrafficLights;
   win.__wallpaperGeometry = useWallpaperGeometry;
   win.__transparentFullscreen = false;
 
@@ -5308,6 +5959,8 @@ function createWindow(options = {}) {
   if (useDesktopWindowType) {
     x11WallpaperWindows.add(win);
   }
+
+  macDockMenu.attach(win);
 
   // A window that stops answering: with mods running, offer to wait or to reopen without them.
   win.on('unresponsive', () => {
@@ -5363,6 +6016,12 @@ function createWindow(options = {}) {
     const macWallpaperCrash = process.platform === 'darwin' && isMacWallpaperMode();
     if ((useWindowsWallpaper || macWallpaperCrash) && crashed) {
       win.webContents.reload();
+      return;
+    }
+    // The main page is gone and nothing loads it again (killed, out of memory, crashed past the
+    // reload limit): mpv must not play on behind a dead window. A reloaded page (above) adopts it.
+    if (win === mainWindow) {
+      void hifiSession.stop();
     }
   });
 
@@ -5390,6 +6049,18 @@ function createWindow(options = {}) {
   }
 
   mainWindow = win;
+  isolateFirstPartyWindow(win);
+  modSystem?.noteMainWindowChanged();
+  if (useMacNativeTrafficLights) {
+    // 先藏起来，等渲染层按标题栏 reveal 再放出，避免启动时红绿灯常驻在沉浸页面上。
+    // 常驻标题栏设置的用户由渲染层随即打开（那个设置只存在渲染层，这里读不到）。
+    try {
+      win.setWindowButtonVisibility(false);
+    } catch {
+      // setWindowButtonVisibility 只在 macOS 且窗口带红绿灯时有意义。
+    }
+  }
+  backgroundThrottling.attach(win);
   ensureTray();
   setMainWindowSkipTaskbarEnabled(mainWindowSkipTaskbarEnabled);
   // Full initializer, not just applyMainWindowMouseIgnoreState(): when click-through is on at
@@ -5397,7 +6068,7 @@ function createWindow(options = {}) {
   // the titlebar corner can temporarily restore mouse interaction even though the lock toggle
   // itself is no longer rendered in wallpaper mode.
   setMainWindowClickThroughEnabled(mainWindowClickThroughEnabled);
-  updateWindowThumbarButtons();
+  windowsThumbar.reset();
   win.on('resize', () => {
     saveWindowState(win, { deferred: true });
   });
@@ -5428,12 +6099,27 @@ function createWindow(options = {}) {
   win.on('unmaximize', () => {
     saveWindowState(win);
   });
-  win.on('close', () => {
+  win.on('close', (event) => {
+    // 系统红灯（以及 Cmd+W）直接关窗，不经过 window-close 通道。开了「关闭到托盘」时照自绘的关闭键办：
+    // 藏进托盘，不销毁窗口，歌接着放。退出应用（Cmd+Q、托盘的退出）先走 before-quit，照常关。
+    if (shouldHideToTrayOnClose({
+      nativeTrafficLights: win.__nativeTrafficLights === true,
+      isAppQuitting,
+      wallpaperMode: isWallpaperModeEnabled(),
+      closeToTray: readStoredBoolean(CLOSE_TO_TRAY_SETTING_KEY, false),
+      hasTray: Boolean(appTray),
+    })) {
+      event.preventDefault();
+      hideMainWindow();
+      return;
+    }
     saveWindowState(win);
   });
   win.on('closed', () => {
     if (mainWindow === win) {
       mainWindow = null;
+      modSystem?.noteMainWindowChanged();
+      macDockMenu.reset();
       // macOS keeps the app running when its window is closed, so no `before-quit` follows: for
       // the mods' start note, closing the window is the normal way out there (see `before-quit`).
       // Not for a page that had stopped answering: that is what the note is for.
@@ -5451,27 +6137,54 @@ function createWindow(options = {}) {
         }
       }
       displaySleepBlocker.stop();
+      // HiFi: mpv plays on in its own process, with no page left to pause it, move to the next
+      // song or let the device go (macOS keeps the app running here). A window rebuild hands mpv
+      // over to the new page and has replaced mainWindow before the old one closes, so this only
+      // runs when the page that drove it is gone for good: stop it, as the Web engine stops with
+      // its page.
+      void hifiSession.stop();
       mainWindowClickThroughUnlockHover = false;
       stopMainWindowClickThroughUnlockHoverMonitor();
       if (remoteControlWindow && !remoteControlWindow.isDestroyed()) {
         remoteControlWindow.close();
       }
-      // The hidden YouTube Music sandbox window would otherwise keep the app from quitting.
-      ytmSandbox.destroy();
+      // The performance check's window, still running its GPU work, would otherwise keep the app from quitting.
+      perfCheckHost.close();
       refreshTrayMenu();
     }
   });
-  win.on('show', refreshTrayMenu);
-  win.on('hide', refreshTrayMenu);
+  win.on('show', () => {
+    refreshTrayMenu();
+    replayMainWindowThumbarButtons();
+  });
+  win.on('hide', () => {
+    refreshTrayMenu();
+    windowsThumbar.noteHidden();
+  });
   win.on('minimize', refreshTrayMenu);
-  win.on('restore', refreshTrayMenu);
+  win.on('restore', () => {
+    refreshTrayMenu();
+    replayMainWindowThumbarButtons();
+  });
 
   return win;
 }
 
 function recreateMainWindowWithTransparencyMode(enabled, handoff = null) {
   store.set(TRANSPARENT_PLAYER_BACKGROUND_SETTING_KEY, Boolean(enabled));
-  rememberWindowPlaybackHandoff(handoff);
+  if (handoff) {
+    rememberWindowPlaybackHandoff(handoff);
+  } else if (windowPlaybackHandoffStore.carryForward(mainWindow, lastWindowPlaybackHandoffRequestAt)) {
+    // No answer from the window being replaced: it was asked before its page listened, then read the
+    // handoff of the rebuild before and is restoring it (a provider's player it takes over keeps
+    // sounding). The next window restores that one instead of starting with nothing.
+    console.log('[Electron] the replaced window never answered for its playback; passing on the handoff it read');
+  } else if (mainWindow && !windowPlaybackHandoffStore.peek()) {
+    // The window being replaced did not answer in time (busy, hung, gone) and the next one restores
+    // nothing: a provider's player it was following, or had already handed over, would sound on
+    // with nobody following it.
+    pauseExternalPlayersNobodyFollows('the window was rebuilt without a handoff');
+  }
 
   // Windows wallpaper mode: whatever window ends up as the main window must be re-attached —
   // the helper holds the old window's hwnd, which is about to be destroyed. Detach (graceful)
@@ -5591,14 +6304,24 @@ app.whenReady().then(async () => {
   if (startupResult === 'spawned') {
     return;
   }
+  // Partial mpv downloads and half-extracted runtimes that an exit cut off (app.exit, a crash, a
+  // forced kill) go once per launch, also for someone who never downloads again. Only the instance
+  // holding the single-instance lock sweeps them: a second launch on its way out would delete the
+  // download the first one is still writing into the shared userData folder.
+  hifiInstaller.pruneLeftovers()
+    .catch(error => console.warn('[HiFi] could not remove leftover mpv downloads', error));
 
   if (process.platform === 'win32') {
     app.setAppUserModelId(WINDOWS_APP_USER_MODEL_ID);
   }
+  logGpuPreference(gpuPreferenceApplied);
+  // The active adapter is read only when the settings page asks: the 'complete' info behind it holds the
+  // GPU process's main thread about half a second (CollectDawnInfo), and every window's frames stop with it.
+  // Measured 2026-11-10: read 10 s after launch, it froze the picture 0.5 s on every start.
 
   if (process.platform === 'linux' && typeof safeStorage.getSelectedStorageBackend === 'function') {
     const backend = safeStorage.getSelectedStorageBackend();
-    // Without a real backend the KuGou and QQ repositories keep credentials in memory only, so this
+    // Without a real backend the encrypted sign-in stores keep credentials in memory only, so this
     // line is the fastest way to tell a lost-login report apart from an authentication bug.
     if (backend === 'basic_text' || !safeStorage.isEncryptionAvailable()) {
       console.warn('[Electron] No OS credential encryption available; online accounts will not persist', {
@@ -5619,8 +6342,6 @@ app.whenReady().then(async () => {
   setupVideoExportDisplayMediaHandler();
   setupCorsBypassHandlers();
   localCoverAssetStore.registerProtocolHandler(protocol, electronNet);
-  protocol.handle(YTM_AUDIO_SCHEME, request => ytmApiBridge.handleAudioRequest(request));
-  protocol.handle(SPOTIFY_AUDIO_SCHEME, request => spotifyApiBridge.handleAudioRequest(request));
   // Transcode fallback is an optional degradation path; a failure preparing it must never keep
   // the rest of this handler, createWindow() included, from running.
   try {
@@ -5652,11 +6373,6 @@ app.whenReady().then(async () => {
   });
 
   setupAutoUpdater();
-  // Not awaited: this performs network round trips (xeapi key, anonymous token) that used to keep
-  // the window from appearing at all on a slow or blocked route. Status reaches the renderer over
-  // netease-api-status-changed, and get-netease-port reports null until the server is listening.
-  void neteaseBackend.start();
-  await qqBackend.start();
   try {
     await stageApi.startStageServerIfNeeded();
   } catch (error) {
@@ -5679,6 +6395,48 @@ app.whenReady().then(async () => {
       macController.configureDockRecovery();
       void macController.recoverStrandedDock();
     }
+  }
+  // Folium 2.0 (plan §5.2): the mod system exists before the main window, and the source mods (built-in
+  // ones first) start now, before it; ordinary mods start after it, as before (`modSystem.start()` below).
+  try {
+    modSystem = createModSystem({
+      app,
+      BrowserWindow,
+      getMainWindow: () => mainWindow,
+      getLocaleKey: getMainLocaleKey,
+      isFeatureEnabled: () => readStoredBoolean(MOD_SYSTEM_ENABLED_SETTING_KEY, true),
+      // Community mods (communityMods.cjs): read here, written by the mod system after its own confirmation.
+      isCommunityEnabled: () => readStoredBoolean(COMMUNITY_MODS_SETTING_KEY, false),
+      writeCommunityEnabled: (enabled) => store.set(COMMUNITY_MODS_SETTING_KEY, Boolean(enabled)),
+      // The windows that run the app with the preload: each shows the community mods switch by itself.
+      getFirstPartyWindows: () => [mainWindow, remoteControlWindow],
+      hostStore: store,
+      freshProfile: isFreshProfile,
+      diagnostics: loginDiagnostics,
+      reportError: (where, error) => crashLog.reportError(where, error, { announceToUser: false }),
+      requestCachePrune: (limitBytes) => pruneMediaCacheForSource(limitBytes),
+      // api.cache.legacyDir: a built-in source's cache of before, in the media cache folder the listener chose.
+      legacyCacheDir: (name) => path.join(getConfiguredCacheDirectory(), name),
+      openExternal: (url) => openExternalUrl(url),
+      resolveExportFfmpeg: () => exportFfmpegResolver.resolve(),
+      // api.native.path / load: the native files the app ships for a built-in source (electron/modSystem/nativeFiles.cjs).
+      // A file that is not there (a development run that has not built it, a broken install) is as unavailable as one
+      // the system has no build of: the source says so at once instead of starting what cannot start.
+      nativePath: (name) => {
+        const resolved = resolveNativeFile(name, {
+          platform: process.platform, isPackaged: app.isPackaged, resourcesPath: process.resourcesPath,
+          projectRoot: path.join(__dirname, '..'), env: process.env,
+        });
+        if (!resolved) return null;
+        if (fs.existsSync(resolved)) return resolved;
+        console.warn('[Mods] A native file of a built-in source is missing', { name });
+        return null;
+      },
+    });
+    modSystem.registerIpc();
+    modSystem.startSources();
+  } catch (error) {
+    console.error('[Mods] Failed to initialize the mod system', error);
   }
   createWindow();
   focusMainWindow();
@@ -5703,6 +6461,8 @@ app.whenReady().then(async () => {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('wallpaper-mode-changed', getPublicSettings());
       }
+      // Not asked for a handoff: this window was created just above and its page plays nothing yet.
+      // eslint-disable-next-line dedicatus/window-rebuild-handoff -- the window was created just above and plays nothing yet
       recreateMainWindowWithTransparencyMode(isTransparentPlayerBackgroundEnabled(), null);
     }
   }
@@ -5821,18 +6581,13 @@ app.whenReady().then(async () => {
   voiceInputPauseMonitor.syncState();
 
   try {
-    modSystem = createModSystem({
-      app,
-      BrowserWindow,
-      getMainWindow: () => mainWindow,
-      getLocaleKey: getMainLocaleKey,
-      isFeatureEnabled: () => readStoredBoolean(MOD_SYSTEM_ENABLED_SETTING_KEY, false),
-    });
-    modSystem.registerIpc();
+    if (!modSystem) {
+      throw new Error('the mod system was not made before the window');
+    }
     // Loads the enabled mods. If the last start never got to its end, it asks first whether to
     // start without mods this time, and loads once the answer is in (modSystem.cjs `start`).
     modSystem.start();
-    if (readStoredBoolean(MOD_SYSTEM_ENABLED_SETTING_KEY, false)) {
+    if (readStoredBoolean(MOD_SYSTEM_ENABLED_SETTING_KEY, true)) {
       void modSystem.probeFfmpeg();
     }
   } catch (error) {
@@ -5859,6 +6614,14 @@ let isAppQuitting = false;
 
 let isSwappingMainWindow = false;
 
+// Alt+Space opens Windows' window menu before the page sees the Space; while a key-capture field
+// records, the menu is refused for its window so the combination can be recorded (windowSystemMenu.cjs).
+const windowSystemMenuGuard = createWindowSystemMenuGuard();
+app.on('browser-window-created', (_event, window) => windowSystemMenuGuard.attach(window));
+ipcMain.on('key-capture-active', (event, active) => {
+  windowSystemMenuGuard.setCapturing(event.sender.id, active === true);
+});
+
 app.on('window-all-closed', () => {
   if (isSwappingMainWindow) {
     return;
@@ -5879,23 +6642,30 @@ app.on('window-all-closed', () => {
   }
 });
 
-// Set while a quit is held for a YouTube Music web sign-in (see before-quit).
-let isQuitHeldForYtmSignIn = false;
+// Set while a quit is held for a source mod's work (see before-quit).
+let isQuitHeldForAccounts = false;
 
 app.on('before-quit', (event) => {
-  // A YouTube Music web sign-in under way: its browser is ended, and its folder holds a whole
-  // Google session. The quit is held until that folder is removed, 3 seconds at most, and then
-  // asked for again; nothing below has run by then. A quit with no such sign-in is not held, and
-  // neither is one that arrives while another is held.
-  const ytmSignInGone = ytmApiBridge.shutdown();
-  if (ytmSignInGone && !isQuitHeldForYtmSignIn) {
-    isQuitHeldForYtmSignIn = true;
+  // Work of a source mod that must not be cut off (its api.onBeforeQuit, through modSystem.prepareQuit): a
+  // token renewal whose answer is not stored yet, as the next run may not be able to use the token it
+  // replaces; a web sign-in under way, whose ended browser leaves a folder holding a whole sign-in session
+  // to remove; a program of its own still playing. prepareQuit() answers a promise while there is such work,
+  // settled in a few seconds at most. The quit is held until it has settled, and then asked for again;
+  // nothing below has run by then. A quit with no such work is not held, and neither is one that arrives
+  // while another is held.
+  const held = [modSystem?.prepareQuit()].filter(Boolean);
+  if (held.length > 0 && !isQuitHeldForAccounts) {
+    isQuitHeldForAccounts = true;
     event.preventDefault();
-    void ytmSignInGone.then(() => app.quit());
+    void Promise.all(held).then(() => app.quit());
     return;
   }
-  isQuitHeldForYtmSignIn = false;
+  isQuitHeldForAccounts = false;
   transcodeService.dispose();
+  hifiSession.killSync();
+  // An mpv download the quit cuts off is stopped: its partial files go now if there is time, or
+  // with the installer's sweep of leftovers next time.
+  hifiInstaller.cancel();
   videoExportFileWriter.disposeSync();
   isAppQuitting = true;
   clearPendingWindowPlaybackHandoffRequests();
@@ -5942,6 +6712,16 @@ app.on('before-quit', (event) => {
     isMacWallpaperInteractionEnabled = false;
     macWallpaperSavedState = null;
     const macController = getMacWallpaperController();
+    if (macWallpaperStageManagerTimer) {
+      clearInterval(macWallpaperStageManagerTimer);
+      macWallpaperStageManagerTimer = null;
+    }
+    if (macWallpaperClickGuardInstance) {
+      macWallpaperClickGuardInstance.stop();
+    }
+    if (macWallpaperHitPanelsInstance) {
+      macWallpaperHitPanelsInstance.destroy();
+    }
     if (macController) {
       try {
         macController.stop();
@@ -5956,14 +6736,13 @@ app.on('before-quit', (event) => {
     }
   }
   void discordPresence.destroy();
-  void qqBackend.stop();
   void lyricApi.stop();
 });
 
 // Settings Management IPC
-ipcMain.handle('window-set-native-theme', (event, themeSource) => {
+ipcMain.handle('window-set-native-theme', firstParty('window-set-native-theme', (event, themeSource) => {
   nativeTheme.themeSource = themeSource;
-});
+}));
 
 // Cache the main window's device pixel ratio so export window sizing can be
 // expressed in physical pixels (see resize-main-window / video-export-prepare-window).
@@ -5978,8 +6757,23 @@ ipcMain.handle('report-device-pixel-ratio', (event, ratio) => {
   }
 });
 
-ipcMain.handle('get-settings', () => {
+ipcMain.handle('get-settings', firstParty('get-settings', () => {
   return getPublicSettings();
+}));
+
+// The GPU choice this run started with and the adapter Chromium took; null off Windows, where the
+// setting is not offered, or when the asking page is not the main window.
+ipcMain.handle('gpu-preference-state', async (event) => {
+  if (process.platform !== 'win32' || !isTrustedMainWindowContents(event.sender)) {
+    return null;
+  }
+  let activeGpu = null;
+  try {
+    activeGpu = await readActiveGpu();
+  } catch (error) {
+    console.warn('[Gpu] Could not read the active adapter for the settings page', error);
+  }
+  return { applied: gpuPreferenceApplied.preference, source: gpuPreferenceApplied.source, activeGpu };
 });
 
 // The settings page's choice of the display wallpaper mode uses (see "Wallpaper display choice").
@@ -5997,6 +6791,24 @@ ipcMain.handle('wallpaper-display-set', (event, displayId) => {
   return setWallpaperDisplayChoice(displayId);
 });
 
+// macOS wallpaper mode: the rects (viewport CSS px) of the controls on screen, for the click
+// catchers that keep those clicks away from Finder and so from Stage Manager (issue #698).
+ipcMain.on('wallpaper-hit-regions', (event, rects) => {
+  if (process.platform !== 'darwin' || !isTrustedMainWindowContents(event.sender)) {
+    return;
+  }
+  macWallpaperHitRects = Array.isArray(rects) ? rects.slice(0, MAX_HIT_PANELS) : [];
+  syncMacWallpaperHitPanels();
+});
+
+// The 后台节流 switch as the main window sees it: in force (on, not standing down), and the window
+// minimised or hidden while it is.
+ipcMain.handle('background-throttling-get', (event) => (
+  isTrustedMainWindowContents(event.sender)
+    ? backgroundThrottling.getState()
+    : { active: false, hidden: false }
+));
+
 ipcMain.handle('playback-display-sleep-set-active', (event, active) => {
   if (!isTrustedMainWindowContents(event.sender)) {
     return false;
@@ -6004,21 +6816,25 @@ ipcMain.handle('playback-display-sleep-set-active', (event, active) => {
   return displaySleepBlocker.setActive(Boolean(active));
 });
 
-ipcMain.handle('set-app-locale', (event, localeKey) => {
-  if (localeKey === 'zh-CN' || localeKey === 'zh-TW' || localeKey === 'en' || localeKey === 'in') {
+ipcMain.handle('set-app-locale', firstParty('set-app-locale', (event, localeKey) => {
+  if (localeKey === 'zh-CN' || localeKey === 'zh-TW' || localeKey === 'en' || localeKey === 'in' || localeKey === 'vi') {
     store.set(APP_LOCALE_KEY, localeKey);
     refreshTrayMenu();
   }
   return localeKey;
-});
+}));
 
-ipcMain.handle('save-settings', (event, key, value) => {
+ipcMain.handle('save-settings', firstParty('save-settings', (event, key, value) => {
   // electron-store's set() also accepts an object of key/value pairs, which would bypass the
   // per-key guards below.
   if (typeof key !== 'string') {
     return getPublicSettings();
   }
-  if (key === 'DISCORD_RICH_PRESENCE_APPLICATION_ID' || isReservedAiCredentialKey(key)) {
+  // The HiFi key is the old home of the approved mpv path (now in a file of main's own): nothing
+  // reads it any more, and the renderer has no business writing it.
+  // The community mods switch lets third-party code run: only the mod system writes it, after the user confirmed
+  // in a native dialog (folia-mods:set-community). A page in the window (a mod among them) cannot set it here.
+  if (key === 'DISCORD_RICH_PRESENCE_APPLICATION_ID' || key === COMMUNITY_MODS_SETTING_KEY || isReservedAiCredentialKey(key) || isReservedHifiSettingKey(key)) {
     return getPublicSettings();
   }
   if (isAiCredentialKey(key)) {
@@ -6037,6 +6853,12 @@ ipcMain.handle('save-settings', (event, key, value) => {
     }
     nextValue = channel;
   }
+  if (key === GPU_PREFERENCE_SETTING_KEY) {
+    if (normalizeGpuPreference(value) !== value) {
+      return getPublicSettings();
+    }
+    console.info(`[Gpu] Preference set to ${value}; takes effect on the next launch`);
+  }
   if (
     key === MINIMIZE_TO_TRAY_SETTING_KEY ||
     key === CLOSE_TO_TRAY_SETTING_KEY ||
@@ -6046,30 +6868,36 @@ ipcMain.handle('save-settings', (event, key, value) => {
     key === REMOTE_CONTROL_HIDE_TITLEBAR_SETTING_KEY ||
     key === REMOTE_CONTROL_CLICK_THROUGH_SETTING_KEY ||
     key === REMOTE_CONTROL_EXPAND_COVER_SETTING_KEY ||
+    key === REMOTE_CONTROL_TEXT_SHADE_SETTING_KEY ||
     key === TRANSPARENT_PLAYER_BACKGROUND_SETTING_KEY ||
     key === DISCORD_RICH_PRESENCE_ENABLED_SETTING_KEY ||
     key === VOICE_INPUT_PAUSE_ENABLED_SETTING_KEY ||
     key === PREVENT_DISPLAY_SLEEP_DURING_PLAYBACK_SETTING_KEY ||
     key === MOD_SYSTEM_ENABLED_SETTING_KEY ||
+    key === BACKGROUND_THROTTLING_SETTING_KEY ||
     key === WALLPAPER_MODE_SETTING_KEY ||
     key === WALLPAPER_ENTRY_CONFIRMED_SETTING_KEY ||
     key === WALLPAPER_FORWARD_MOUSE_SETTING_KEY ||
     key === WALLPAPER_ZGUARD_SETTING_KEY ||
-    key === WALLPAPER_MAC_AUTOHIDE_DOCK_SETTING_KEY
+    key === WALLPAPER_MAC_AUTOHIDE_DOCK_SETTING_KEY ||
+    key === USE_NATIVE_MAC_TRAFFIC_LIGHTS_SETTING_KEY
   ) {
     nextValue = Boolean(value);
   }
   store.set(key, nextValue);
 
+  if (key === BACKGROUND_THROTTLING_SETTING_KEY || key === WALLPAPER_MODE_SETTING_KEY) {
+    backgroundThrottling.refresh();
+  }
+
   if (key === MOD_SYSTEM_ENABLED_SETTING_KEY && modSystem) {
     // Turning the switch off deactivates every running mod immediately rather
     // than only hiding the UI; turning it on discovers and activates whatever
     // the user had already confirmed.
-    try {
-      modSystem.loadAll();
-    } catch (error) {
+    // Through reloadChanged: a source mod that stops gets its onBeforeUnload first; ordinary mods restart as before.
+    modSystem.reloadChanged({ differential: false }).catch((error) => {
       console.error('[Mods] Failed to apply the mod system switch', error);
-    }
+    });
   }
 
   if (key === WALLPAPER_MODE_SETTING_KEY) {
@@ -6133,7 +6961,7 @@ ipcMain.handle('save-settings', (event, key, value) => {
     }
   }
 
-  if (key === 'enable_player_page_native_blur') {
+  if (key === 'enable_player_page_native_blur' && NATIVE_BLUR_SUPPORTED) {
     if (!isTransparentPlayerBackgroundEnabled()) {
       if (mainWindow && !mainWindow.isDestroyed()) {
         const enableNativeBlur = Boolean(nextValue);
@@ -6162,7 +6990,7 @@ ipcMain.handle('save-settings', (event, key, value) => {
         });
       });
     } else {
-      setUpdateState({ status: 'disabled', error: null, availableVersion: null, downloadProgress: null });
+      setUpdateState({ status: 'disabled', error: null, availableVersion: null, downloadProgress: null, checkedVia: null, githubFailed: false });
     }
   }
 
@@ -6190,6 +7018,8 @@ ipcMain.handle('save-settings', (event, key, value) => {
       updateUrl: FOLIA_RELEASES_URL,
       error: null,
       downloadProgress: null,
+      checkedVia: null,
+      githubFailed: false,
     });
 
     if (getUpdateCheckEnabled() && isPackagedUpdateRuntime() && isUpdateCheckSupported()) {
@@ -6229,6 +7059,14 @@ ipcMain.handle('save-settings', (event, key, value) => {
 
   if (key === REMOTE_CONTROL_EXPAND_COVER_SETTING_KEY) {
     remoteControlExpandCoverEnabled = Boolean(nextValue);
+    if (remoteControlExpandCoverEnabled) {
+      bringRemoteControlCoverOnScreen(remoteControlWindow);
+    }
+    applyRemoteControlWindowPresentation(remoteControlWindow);
+  }
+
+  if (key === REMOTE_CONTROL_TEXT_SHADE_SETTING_KEY) {
+    remoteControlTextShadeEnabled = Boolean(nextValue);
     applyRemoteControlWindowPresentation(remoteControlWindow);
   }
 
@@ -6248,16 +7086,16 @@ ipcMain.handle('save-settings', (event, key, value) => {
   }
 
   return getPublicSettings();
-});
+}));
 
-ipcMain.handle('get-cache-directory', () => {
+ipcMain.handle('get-cache-directory', firstParty('get-cache-directory', () => {
   return {
     path: getConfiguredCacheDirectory(),
     isDefault: !store.has(CACHE_DIRECTORY_SETTING_KEY),
   };
-});
+}));
 
-ipcMain.handle('choose-cache-directory', async () => {
+ipcMain.handle('choose-cache-directory', firstParty('choose-cache-directory', async () => {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return {
       canceled: true,
@@ -6288,15 +7126,15 @@ ipcMain.handle('choose-cache-directory', async () => {
     path: selectedPath,
     isDefault: false,
   };
-});
+}));
 
-ipcMain.handle('reset-cache-directory', () => {
+ipcMain.handle('reset-cache-directory', firstParty('reset-cache-directory', () => {
   store.delete(CACHE_DIRECTORY_SETTING_KEY);
   return {
     path: getConfiguredCacheDirectory(),
     isDefault: true,
   };
-});
+}));
 
 // What earlier versions downloaded, gone from this machine: up to 330MB nothing reads now. Once per
 // launch, off the startup path; a file that will not go (in use, read-only) is tried again next time.
@@ -6321,7 +7159,7 @@ const getLegacyModelsDirectory = () => {
   return ours.includes(dir) ? null : dir;
 };
 
-ipcMain.handle('legacy-models-check', async () => {
+ipcMain.handle('legacy-models-check', firstParty('legacy-models-check', async () => {
   const dir = getLegacyModelsDirectory();
   if (!dir) {
     store.delete(LEGACY_MODELS_DIRECTORY_SETTING_KEY);
@@ -6335,9 +7173,9 @@ ipcMain.handle('legacy-models-check', async () => {
     return null;
   }
   return { dir, count: paths.length, bytes };
-});
+}));
 
-ipcMain.handle('legacy-models-resolve', async (_event, action) => {
+ipcMain.handle('legacy-models-resolve', firstParty('legacy-models-resolve', async (_event, action) => {
   const dir = getLegacyModelsDirectory();
   if (action === 'delete' && dir) {
     try {
@@ -6351,38 +7189,38 @@ ipcMain.handle('legacy-models-resolve', async (_event, action) => {
   }
   store.delete(LEGACY_MODELS_DIRECTORY_SETTING_KEY);
   return { ok: true };
-});
+}));
 
-ipcMain.handle('legacy-models-open', async () => {
+ipcMain.handle('legacy-models-open', firstParty('legacy-models-open', async () => {
   const dir = getLegacyModelsDirectory();
   return dir ? (await shell.openPath(dir)) === '' : false;
-});
+}));
 
 ipcMain.handle('updates-get-status', () => {
   return getUpdateStatus();
 });
 
-ipcMain.handle('updates-check', () => {
+ipcMain.handle('updates-check', firstParty('updates-check', () => {
   return checkForUpdates({ manual: true });
-});
+}));
 
-ipcMain.handle('updates-mark-seen', (event, version) => {
+ipcMain.handle('updates-mark-seen', firstParty('updates-mark-seen', (event, version) => {
   return markUpdateSeen(version);
-});
+}));
 
-ipcMain.handle('updates-open-release-page', (event, version) => {
+ipcMain.handle('updates-open-release-page', firstParty('updates-open-release-page', (event, version) => {
   return openUpdateReleasePage(version);
-});
+}));
 
-ipcMain.handle('open-external-url', (event, url) => {
+ipcMain.handle('open-external-url', firstParty('open-external-url', (event, url) => {
   return openExternalUrl(url);
-});
+}));
 
-ipcMain.handle('updates-download', () => {
+ipcMain.handle('updates-download', firstParty('updates-download', () => {
   return downloadAvailableUpdate();
-});
+}));
 
-ipcMain.handle('updates-quit-and-install', () => {
+ipcMain.handle('updates-quit-and-install', firstParty('updates-quit-and-install', () => {
   const updater = ensureAutoUpdater();
   if (!isAutoUpdaterSupported() || !updater || updateState.status !== 'downloaded') {
     return false;
@@ -6397,26 +7235,33 @@ ipcMain.handle('updates-quit-and-install', () => {
 
   updater.quitAndInstall(false, true);
   return true;
-});
+}));
 
-ipcMain.handle('get-audio-cache', async (event, cacheKey) => {
+ipcMain.handle('get-audio-cache', firstParty('get-audio-cache', async (event, cacheKey) => {
   return readAudioCacheEntry(cacheKey);
-});
+}));
 
-ipcMain.handle('has-audio-cache', async (event, cacheKey) => {
+ipcMain.handle('has-audio-cache', firstParty('has-audio-cache', async (event, cacheKey) => {
   return hasAudioCacheEntry(cacheKey);
-});
+}));
 
-ipcMain.handle('save-audio-cache', async (event, cacheKey, data, mimeType, limitBytes) => {
+ipcMain.handle('save-audio-cache', firstParty('save-audio-cache', async (event, cacheKey, data, mimeType, limitBytes) => {
+  noteMediaCacheLimit(limitBytes);
   await writeAudioCacheEntry(cacheKey, data, mimeType, limitBytes);
   return true;
-});
+}));
+
+// The listener's media cache limit, named before a source keeps a file in a cache of its own (see noteMediaCacheLimit).
+ipcMain.handle('set-media-cache-limit', firstParty('set-media-cache-limit', async (event, limitBytes) => {
+  noteMediaCacheLimit(limitBytes);
+  return true;
+}));
 
 // A copy playback found to be less than the song: deleted only while it is the file that was read.
-ipcMain.handle('remove-audio-cache', async (event, cacheKey, size) => {
+ipcMain.handle('remove-audio-cache', firstParty('remove-audio-cache', async (event, cacheKey, size) => {
   const { dataPath, metaPath } = getAudioCachePaths(cacheKey);
   return removeAudioCacheFileOfSize(dataPath, metaPath, size);
-});
+}));
 
 ipcMain.handle('get-audio-cache-usage', async () => {
   return getAudioCacheUsageBytes();
@@ -6426,114 +7271,78 @@ ipcMain.handle('get-audio-cache-stats', async () => {
   return getAudioCacheStats();
 });
 
-ipcMain.handle('clear-audio-cache', async () => {
+ipcMain.handle('clear-audio-cache', firstParty('clear-audio-cache', async () => {
   await clearAudioCacheDirectory();
   return true;
-});
+}));
 
-ipcMain.handle('transcode-fallback-request', async (_event, request) => {
+ipcMain.handle('transcode-fallback-request', firstParty('transcode-fallback-request', async (_event, request) => {
   return transcodeService.request(request);
-});
+}));
 
-ipcMain.handle('transcode-fallback-cancel', (_event, requestId) => {
+ipcMain.handle('transcode-fallback-cancel', firstParty('transcode-fallback-cancel', (_event, requestId) => {
   return transcodeService.cancel(requestId);
-});
+}));
 
-ipcMain.handle('get-cover-cache', async (event, cacheKey) => {
+ipcMain.handle('get-cover-cache', firstParty('get-cover-cache', async (event, cacheKey) => {
   return readCoverCacheEntry(cacheKey);
-});
+}));
 
-ipcMain.handle('save-cover-cache', async (event, cacheKey, data, mimeType) => {
+ipcMain.handle('save-cover-cache', firstParty('save-cover-cache', async (event, cacheKey, data, mimeType) => {
   await writeCoverCacheEntry(cacheKey, data, mimeType);
   return true;
-});
+}));
 
-ipcMain.handle('remove-cover-cache', async (event, cacheKey) => {
+ipcMain.handle('remove-cover-cache', firstParty('remove-cover-cache', async (event, cacheKey) => {
   await removeCoverCacheEntry(cacheKey);
   return true;
-});
+}));
 
 ipcMain.handle('get-cover-cache-usage', async () => {
   return getCoverCacheUsageBytes();
 });
 
-ipcMain.handle('clear-cover-cache', async () => {
+ipcMain.handle('clear-cover-cache', firstParty('clear-cover-cache', async () => {
   await clearCoverCacheDirectory();
   return true;
-});
+}));
 
-ipcMain.handle('has-local-cover-asset', async (_event, assetId) => {
+ipcMain.handle('has-local-cover-asset', firstParty('has-local-cover-asset', async (_event, assetId) => {
   return localCoverAssetStore.has(assetId);
-});
+}));
 
-ipcMain.handle('save-local-cover-asset', async (_event, assetId, data, mimeType) => {
+ipcMain.handle('save-local-cover-asset', firstParty('save-local-cover-asset', async (_event, assetId, data, mimeType) => {
   await localCoverAssetStore.write(assetId, data, mimeType);
   return true;
-});
+}));
 
-ipcMain.handle('remove-local-cover-asset', async (_event, assetId) => {
+ipcMain.handle('remove-local-cover-asset', firstParty('remove-local-cover-asset', async (_event, assetId) => {
   return localCoverAssetStore.remove(assetId);
-});
+}));
 
-ipcMain.handle('clear-local-cover-assets', async () => {
+ipcMain.handle('clear-local-cover-assets', firstParty('clear-local-cover-assets', async () => {
   return localCoverAssetStore.clear();
-});
+}));
 
 // 内嵌后端的端口、状态、重启、诊断快照与主动自检（electron/loginBackendIpc.cjs）。
-registerLoginBackendIpc({
-  ipcMain,
-  app,
-  safeStorage,
-  getDefaultSession: () => session.defaultSession,
-  neteaseBackend,
-  qqBackend,
+// 它交回登录诊断与自检的登记表（{ diagnostics }，Folium 2.0 接缝）：里面是还在宿主里的内嵌后端，音源模组的
+// api.diagnostics 往里登记。
+const loginBackend = registerLoginBackendIpc({
+    ipcMain,
+    app,
+    safeStorage,
+    getDefaultSession: () => session.defaultSession,
+    networkRecorder,
+    isTrustedSender: isFirstPartyWindowContents,
 });
+// 音源模组的 api.diagnostics：登记进同一张表，快照与自检和登录窗口的两个通道答的一样。
+const loginDiagnostics = {
+    register: (sourceId, backend) => loginBackend.diagnostics.register(sourceId, backend),
+    snapshot: loginBackend.snapshot,
+    selfCheck: loginBackend.selfCheck,
+};
 
-// Both channels reach the embedded KuGou API. `kugou-api-request` forwards the renderer's operation
-// and params verbatim, so it is a write-capable surface rather than a read-only one; the bridge keeps
-// its own operation allowlist, so what this guard adds is the caller surface. Trusted here means the
-// two first-party windows - the main window and the remote-control window, which runs the same app
-// and therefore the same online providers. `bodian-api-request` below gates the same way.
-//
-// Boundary, stated plainly: comparing webContents identity rejects other windows (a popup opened with
-// window.open carries the same preload). It cannot stop script already running inside a trusted
-// window - that is the CSP and preload layer's job, not this check's.
-const isFirstPartyWindowContents = (event) => (
-  isTrustedMainWindowContents(event.sender) || isTrustedRemoteControlContents(event.sender)
-);
-
-ipcMain.handle('kugou-api-status', createSenderGuardedHandler({
-  channel: 'kugou-api-status',
-  // 只回传可用性、登录状态与错误：拒绝时给一个「没有这个能力」的取值，让调用方走 unavailable 分支。
-  isTrusted: isFirstPartyWindowContents,
-  onUntrusted: () => null,
-  handler: () => kugouApiBridge.getStatus(),
-}));
-ipcMain.handle('kugou-api-request', createSenderGuardedHandler({
-  channel: 'kugou-api-request',
-  isTrusted: isFirstPartyWindowContents,
-  handler: (_event, operation, params) => kugouApiBridge.request(operation, params),
-}));
-ipcMain.handle('bodian-api-request', (event, operation, params) => {
-  if (!isTrustedMainWindowContents(event.sender)) {
-    return { ok: false, error: { code: 'unavailable', message: 'Untrusted Bodian request' } };
-  }
-  return bodianApiBridge.request(operation, params);
-});
-ipcMain.handle('ytm-api-request', (event, operation, params) => {
-  if (!isTrustedMainWindowContents(event.sender)) {
-    return { ok: false, error: { code: 'unavailable', message: 'Untrusted YouTube Music request' } };
-  }
-  return ytmApiBridge.request(operation, params);
-});
-ipcMain.handle('spotify-api-request', (event, operation, params) => {
-  if (!isTrustedMainWindowContents(event.sender)) {
-    return { ok: false, error: { code: 'unavailable', message: 'Untrusted Spotify request' } };
-  }
-  return spotifyApiBridge.request(operation, params);
-});
-
-ipcMain.handle('window-minimize', () => {
+ipcMain.handle('window-minimize', firstParty('window-minimize', () => {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return false;
   }
@@ -6550,9 +7359,9 @@ ipcMain.handle('window-minimize', () => {
   mainWindow.minimize();
   refreshTrayMenu();
   return true;
-});
+}));
 
-ipcMain.handle('window-toggle-maximize', () => {
+ipcMain.handle('window-toggle-maximize', firstParty('window-toggle-maximize', () => {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return false;
   }
@@ -6568,7 +7377,7 @@ ipcMain.handle('window-toggle-maximize', () => {
 
   mainWindow.maximize();
   return true;
-});
+}));
 
 ipcMain.handle('window-toggle-fullscreen', (event) => {
   if (!isTrustedMainWindowContents(event.sender) || !mainWindow || mainWindow.isDestroyed()) {
@@ -6585,7 +7394,7 @@ ipcMain.handle('window-toggle-fullscreen', (event) => {
   return nextFullscreen;
 });
 
-ipcMain.handle('window-close', () => {
+ipcMain.handle('window-close', firstParty('window-close', () => {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return false;
   }
@@ -6603,7 +7412,7 @@ ipcMain.handle('window-close', () => {
 
   mainWindow.close();
   return true;
-});
+}));
 
 // Sleep timer and other explicit "exit the whole app" paths. Unlike window-close this
 // quits even when closing-to-tray is enabled, and runs the before-quit cleanup.
@@ -6630,6 +7439,31 @@ ipcMain.handle('window-is-fullscreen', (event) => {
   return isMainWindowFullscreen(mainWindow);
 });
 
+// macOS 原生红绿灯显隐：渲染层把标题栏 reveal / 点击穿透状态同步过来。
+// 全屏时系统自己会藏，这里照常设置也不会冲突。
+ipcMain.handle('window-set-traffic-lights-visible', (event, visible) => {
+  if (!isTrustedMainWindowContents(event.sender) || !mainWindow || mainWindow.isDestroyed()) {
+    return false;
+  }
+  if (mainWindow.__nativeTrafficLights !== true || typeof mainWindow.setWindowButtonVisibility !== 'function') {
+    return false;
+  }
+  try {
+    mainWindow.setWindowButtonVisibility(visible === true);
+    return true;
+  } catch {
+    return false;
+  }
+});
+
+// 当前主窗口是不是带系统红绿灯建的。设置重启后才生效，渲染层靠它决定还画不画自绘的窗口按钮。
+ipcMain.handle('window-has-native-traffic-lights', (event) => {
+  if (!isTrustedMainWindowContents(event.sender) || !mainWindow || mainWindow.isDestroyed()) {
+    return false;
+  }
+  return mainWindow.__nativeTrafficLights === true;
+});
+
 ipcMain.handle('window-get-transparent-mode', (event) => {
   if (!isTrustedMainWindowContents(event.sender)) {
     return false;
@@ -6651,7 +7485,7 @@ ipcMain.handle('window-playback-handoff-consume', (event) => {
     return null;
   }
 
-  return windowPlaybackHandoffStore.consume();
+  return windowPlaybackHandoffStore.consume(mainWindow);
 });
 
 ipcMain.handle('window-playback-handoff-submit', (event, requestId, handoff) => {
@@ -6682,12 +7516,12 @@ ipcMain.handle('window-set-click-through', (event, enabled) => {
   return setMainWindowClickThroughEnabled(enabled);
 });
 
-ipcMain.handle('window-set-click-through-unlock-hover', (event, active) => {
+ipcMain.handle('window-set-click-through-unlock-hover', (event, active, viewportWidth, coordinates, side) => {
   if (!isTrustedMainWindowContents(event.sender)) {
     return false;
   }
 
-  return setMainWindowClickThroughUnlockHover(active);
+  return mainWindowUnlockHoverRequests.handle(active, viewportWidth, coordinates, mainWindow.getBounds(), mainWindow.webContents.getZoomFactor(), side);
 });
 
 ipcMain.handle('window-get-always-on-top', (event) => {
@@ -6797,11 +7631,11 @@ ipcMain.handle('lyric-api-set-enabled', (event, enabled) => {
   return lyricApi.setEnabled(Boolean(enabled));
 });
 
-ipcMain.handle('lyric-api-publish', (event, lyrics, offset) => {
+ipcMain.handle('lyric-api-publish', (event, lyrics, offset, clipStartMs) => {
   if (!isTrustedMainWindowContents(event.sender)) {
     return false;
   }
-  return lyricApi.publishLyricData(lyrics, offset);
+  return lyricApi.publishLyricData(lyrics, offset, clipStartMs);
 });
 
 ipcMain.handle('discord-presence-get-status', (event) => {
@@ -6836,21 +7670,21 @@ ipcMain.handle('voice-input-pause-get-status', (event) => {
   return voiceInputPauseMonitor.getStatus();
 });
 
-ipcMain.handle('stage-get-status', () => {
+ipcMain.handle('stage-get-status', firstParty('stage-get-status', () => {
   return stageApi.buildStageStatus();
-});
+}));
 
-ipcMain.handle('stage-set-enabled', async (_event, enabled) => {
+ipcMain.handle('stage-set-enabled', firstParty('stage-set-enabled', async (_event, enabled) => {
   return stageApi.setStageEnabled(enabled);
-});
+}));
 
-ipcMain.handle('stage-regenerate-token', async () => {
+ipcMain.handle('stage-regenerate-token', firstParty('stage-regenerate-token', async () => {
   return stageApi.regenerateStageToken();
-});
+}));
 
-ipcMain.handle('stage-clear-state', async () => {
+ipcMain.handle('stage-clear-state', firstParty('stage-clear-state', async () => {
   return stageApi.clearStageState();
-});
+}));
 
 ipcMain.handle('stage-complete-external-play', (event, result) => {
   if (!isTrustedMainWindowContents(event.sender)) {
@@ -6882,6 +7716,14 @@ ipcMain.handle('stage-complete-player-queue', (event, result) => {
   }
 
   return stageApi.completeStagePlayerQueueRequest(result);
+});
+
+ipcMain.handle('stage-complete-player-search', (event, result) => {
+  if (!isTrustedMainWindowContents(event.sender)) {
+    throw new Error('Untrusted renderer attempted to complete a Stage player search request.');
+  }
+
+  return stageApi.completeStagePlayerSearchRequest(result);
 });
 
 // Created on first use: globalShortcut only works once the app is ready, and the renderer asks
@@ -6918,7 +7760,11 @@ ipcMain.handle('global-shortcuts-set', (event, accelerators) => {
 });
 
 app.on('will-quit', () => {
+  stageApi.dispose();
   globalShortcutController?.dispose();
+  hifiSession.killSync();
+  hifiMpris?.dispose();
+  hifiInstaller.cancel();
 });
 
 ipcMain.handle('thumbar-update-buttons', (event, state) => {
@@ -6926,12 +7772,9 @@ ipcMain.handle('thumbar-update-buttons', (event, state) => {
     throw new Error('Untrusted renderer attempted to update taskbar controls.');
   }
 
-  return updateWindowThumbarButtons({
-    hasActiveTrack: Boolean(state?.hasActiveTrack),
-    canGoPrevious: Boolean(state?.canGoPrevious),
-    canGoNext: Boolean(state?.canGoNext),
-    isPlaying: Boolean(state?.isPlaying),
-  });
+  // One report feeds both: the Windows taskbar buttons and the macOS Dock menu.
+  macDockMenu.setState(state);
+  return windowsThumbar.setState(state);
 });
 
 ipcMain.handle('remote-control-open', (event) => {
@@ -6958,7 +7801,8 @@ ipcMain.handle('remote-control-toggle', (event) => {
 });
 
 ipcMain.handle('remote-control-close', (event) => {
-  if (!isTrustedRemoteControlContents(event.sender)) {
+  // The remote window closes itself; the main window closes it from Settings → Remote Control.
+  if (!isTrustedRemoteControlContents(event.sender) && !isTrustedMainWindowContents(event.sender)) {
     throw new Error('Untrusted renderer attempted to close the remote control window.');
   }
 
@@ -7025,6 +7869,21 @@ ipcMain.handle('remote-control-get-pointer-inside', (event) => {
   return remoteControlPointerInside;
 });
 
+ipcMain.handle('remote-control-set-queue-expansion', (event, wantedHeight, options) => {
+  if (!isTrustedRemoteControlContents(event.sender)) {
+    throw new Error('Untrusted renderer attempted to resize the remote control window.');
+  }
+
+  return setRemoteControlQueueExpansion(
+    remoteControlWindow,
+    typeof wantedHeight === 'number' ? wantedHeight : null,
+    {
+      preview: options?.preview === true,
+      direction: options?.direction === 'up' || options?.direction === 'down' ? options.direction : null,
+    },
+  );
+});
+
 ipcMain.handle('remote-control-publish-snapshot', (event, snapshot) => {
   if (!isTrustedMainWindowContents(event.sender)) {
     throw new Error('Untrusted renderer attempted to publish remote control state.');
@@ -7035,13 +7894,20 @@ ipcMain.handle('remote-control-publish-snapshot', (event, snapshot) => {
       ...(latestRemoteControlSnapshot && !Object.prototype.hasOwnProperty.call(snapshot, 'lyrics')
         ? { lyrics: latestRemoteControlSnapshot.lyrics }
         : {}),
+      // The queue, like the lyrics, is only sent when it changed.
+      ...(latestRemoteControlSnapshot && !Object.prototype.hasOwnProperty.call(snapshot, 'queue')
+        ? { queue: latestRemoteControlSnapshot.queue }
+        : {}),
       ...snapshot,
       mainWindowClickThroughEnabled,
       mainWindowAlwaysOnTop,
     }
     : null;
   if (latestRemoteControlSnapshot) {
-    sendRemoteControlSnapshot(latestRemoteControlSnapshot);
+    // The remote keeps the queue it was last sent: forward it only when this publish carried it.
+    sendRemoteControlSnapshot(Object.prototype.hasOwnProperty.call(snapshot, 'queue')
+      ? latestRemoteControlSnapshot
+      : withoutRemoteControlQueue(latestRemoteControlSnapshot));
   }
   return true;
 });
@@ -7100,6 +7966,22 @@ ipcMain.handle('remote-control-send-command', (event, command) => {
 
   if (!mainWindow || mainWindow.isDestroyed()) {
     return false;
+  }
+
+  // The remote window's settings key: the settings open in the main window, so it comes up first,
+  // and must take clicks. As the wallpaper it sits under the desktop icons (or lets every click
+  // through on macOS), where a settings dialog could not be used: the key does nothing then.
+  if (command?.type === 'open-remote-settings') {
+    if (isX11WallpaperMode() || isWindowsWallpaperMode() || isMacWallpaperActive) {
+      console.info('[RemoteControl] Settings key ignored: the main window is the wallpaper');
+      return false;
+    }
+    if (mainWindowClickThroughEnabled) {
+      setMainWindowClickThroughEnabled(false);
+      console.info('[RemoteControl] Settings key turned main window click-through off');
+    }
+    focusMainWindow();
+    console.info('[RemoteControl] Settings key opened the remote settings page');
   }
 
   mainWindow.webContents.send('remote-control-command', command);
@@ -7162,6 +8044,7 @@ ipcMain.handle('video-export-prepare-window', (event, size) => {
       isMaximized: mainWindow.isMaximized(),
       isFullScreen: isMainWindowFullscreen(mainWindow),
     };
+    backgroundThrottling.refresh();
   }
 
   if (isMainWindowFullscreen(mainWindow)) {
@@ -7191,11 +8074,13 @@ ipcMain.handle('video-export-restore-window', (event) => {
 
   if (!mainWindow || mainWindow.isDestroyed() || !videoExportWindowRestoreState) {
     videoExportWindowRestoreState = null;
+    backgroundThrottling.refresh();
     return false;
   }
 
   const restoreState = videoExportWindowRestoreState;
   videoExportWindowRestoreState = null;
+  backgroundThrottling.refresh();
   mainWindow.setBounds(restoreState.bounds, true);
 
   if (restoreState.isFullScreen) {
@@ -7235,6 +8120,18 @@ ipcMain.handle('video-export-abort-file', (event, sessionId) => {
   return videoExportFileWriter.abort(sessionId);
 });
 
+registerAlphaExportIpc({
+  ipcMain,
+  dialog,
+  app,
+  resolver: exportFfmpegResolver,
+  getModSystem: () => modSystem,
+  getMainWindow: () => mainWindow,
+  getSenderWindow: (event) => BrowserWindow.fromWebContents(event.sender),
+  isFirstParty: isFirstPartyWindowContents,
+  isMainWindowSender: (event) => isTrustedMainWindowContents(event.sender),
+});
+
 ipcMain.handle('debug-get-rendered-fonts', async (event, selector) => {
   if (!isTrustedMainWindowContents(event.sender)) {
     throw new Error('Untrusted renderer attempted to read rendered font data.');
@@ -7256,7 +8153,7 @@ ipcMain.handle('lyric-proxy-fetch', async (event, url, init) => {
 });
 
 // Integrate AI logic locally into Electron
-ipcMain.handle('generate-theme', async (event, lyricsText, options = {}) => {
+ipcMain.handle('generate-theme', firstParty('generate-theme', async (event, lyricsText, options = {}) => {
   try {
     const { isPureMusic = false, songTitle } = options;
     const provider = store.get('AI_PROVIDER') || 'gemini';
@@ -7269,17 +8166,15 @@ ipcMain.handle('generate-theme', async (event, lyricsText, options = {}) => {
     if (provider === 'openai') {
       const systemPrompt = buildThemeSystemPrompt(true);
       const sourcePrompt = buildThemeSourcePrompt(snippet, isPureMusic, songTitle);
-      const apiUrl = normalizeOpenAIChatCompletionsUrl(store.get('OPENAI_API_URL'));
       const content = await runAiJsonCompletion({
         store: aiCredentials.settingsView,
+        task: 'theme',
         systemPrompt,
         sourcePrompt,
         schema: THEME_JSON_SCHEMA,
         schemaName: THEME_JSON_SCHEMA_NAME,
         customFetch,
-        maxTokens: detectOpenAICompatibleProvider(apiUrl) === 'openai'
-          ? THEME_MAX_OUTPUT_TOKENS
-          : 8192,
+        answerTokens: THEME_MAX_OUTPUT_TOKENS,
       });
 
       let jsonStr = content.trim();
@@ -7288,8 +8183,9 @@ ipcMain.handle('generate-theme', async (event, lyricsText, options = {}) => {
       }
       dualTheme = sanitizeGeneratedDualTheme(JSON.parse(jsonStr));
 
-      dualTheme.light.provider = 'OpenAI Compatible (Local)';
-      dualTheme.dark.provider = 'OpenAI Compatible (Local)';
+      const providerLabel = await aiProviderLabel(aiCredentials.settingsView);
+      dualTheme.light.provider = providerLabel;
+      dualTheme.dark.provider = providerLabel;
 
     } else {
       const systemPrompt = buildThemeSystemPrompt(true);
@@ -7301,6 +8197,7 @@ ipcMain.handle('generate-theme', async (event, lyricsText, options = {}) => {
         systemPrompt,
         sourcePrompt,
         responseSchema: getGeminiResponseSchema(),
+        answerTokens: THEME_MAX_OUTPUT_TOKENS,
         customFetch
       }));
 
@@ -7317,7 +8214,9 @@ ipcMain.handle('generate-theme', async (event, lyricsText, options = {}) => {
     console.error(e);
     throw new Error(e instanceof Error ? e.message : String(e));
   }
-});
+}));
+
+registerAiModelDiscovery({ ipcMain, aiCredentials, store, isTrustedMainWindowContents, fetchWithOptionalSystemProxy });
 
 // "Test connection" button in AI settings: sends "hello" using the values currently in the form
 // (not the saved ones, nothing is persisted) over the same fetch/proxy path as real AI requests.
@@ -7351,7 +8250,7 @@ ipcMain.handle('ai-test-connection', async (event, payload) => {
 // Word-segments the current song's lyric lines with whichever model the user configured. Shares
 // its prompt with the web handlers and with the client's copy-to-a-model-site path through
 // shared/lyricSegmentationPrompt.cjs, so all four routes ask for exactly the same thing.
-ipcMain.handle('segment-lyrics', async (event, lines) => {
+ipcMain.handle('segment-lyrics', firstParty('segment-lyrics', async (event, lines) => {
   // Held outside the try so the failure path can print what the model actually said. Without it a
   // rejected response gives the user a stack trace and nothing to act on.
   let rawResponse = null;
@@ -7368,19 +8267,20 @@ ipcMain.handle('segment-lyrics', async (event, lines) => {
 
     rawResponse = await runAiJsonCompletion({
       store: aiCredentials.settingsView,
+      // Splitting text at word boundaries has nothing to reason about, and a reasoning model left
+      // to its own devices spends the whole budget thinking and returns nothing. The segmentation
+      // task is what tells each provider's adapter to switch reasoning off (on Gemini, the zero
+      // thinking budget of SEGMENTATION_GEMINI_GENERATION_CONFIG).
+      task: 'segmentation',
       systemPrompt: buildSegmentationSystemPrompt(),
       sourcePrompt: buildSegmentationSourcePrompt(sourceLines),
       schema: SEGMENTATION_JSON_SCHEMA,
       schemaName: SEGMENTATION_SCHEMA_NAME,
-      // Gemini takes its own dialect plus a zero thinking budget; see the config's comment for
-      // the measurements. Sending neither is what made this take 40s.
-      geminiGenerationConfig: SEGMENTATION_GEMINI_GENERATION_CONFIG,
+      // Gemini takes its own dialect; see the generation config's comment for the measurements.
+      // Sending neither the schema nor the zero thinking budget is what made this take 40s.
+      geminiSchema: SEGMENTATION_GEMINI_SCHEMA,
       customFetch,
-      maxTokens: SEGMENTATION_MAX_OUTPUT_TOKENS,
-      // Splitting text at word boundaries has nothing to reason about, and a reasoning model left
-      // to its own devices spends the whole budget thinking and returns nothing. Same reason the
-      // Gemini config sets thinkingBudget to 0.
-      disableReasoning: true,
+      answerTokens: SEGMENTATION_MAX_OUTPUT_TOKENS,
     });
 
     const { boundaries, rejections } = parseSegmentationResponse(rawResponse, sourceLines);
@@ -7399,4 +8299,4 @@ ipcMain.handle('segment-lyrics', async (event, lines) => {
     }
     throw new Error(message);
   }
-});
+}));

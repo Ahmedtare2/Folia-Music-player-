@@ -58,7 +58,7 @@ const VisualizerFilmgate: React.FC<VisualizerProps> = (props) => {
         currentTime, currentLineIndex, lines, theme, subtitleTheme, audioPower, audioBands, showText = true, seed,
         staticMode = false, paused = false, lyricsFontScale = 1, subtitleFontScale = 1, filmgateTuning,
         subtitleOverlayOpacity, subtitleOverlayBackground, subtitleUpcomingLyricsBlur, isPlayerChromeHidden = false,
-        hideTranslationSubtitle = false, showSubtitleTranslation = true, subtitleContentMode, isPreviewMode = false,
+        hideTranslationSubtitle = false, subtitleOverlayLayout, isPreviewMode = false,
     } = props;
     const hostRef = useRef<HTMLDivElement | null>(null);
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -292,8 +292,7 @@ const VisualizerFilmgate: React.FC<VisualizerProps> = (props) => {
                 subtitleFontScale={subtitleFontScale}
                 isPlayerChromeHidden={isPlayerChromeHidden}
                 hideTranslationSubtitle={hideTranslationSubtitle}
-                showSubtitleTranslation={showSubtitleTranslation}
-                subtitleContentMode={subtitleContentMode}
+                subtitleOverlayLayout={subtitleOverlayLayout}
             />
         </VisualizerShell>
     );

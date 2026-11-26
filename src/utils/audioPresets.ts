@@ -3,17 +3,11 @@ import { DEFAULT_AUDIO_EFFECT_SETTINGS, type AudioEffectSettings } from './audio
 // src/utils/audioPresets.ts
 // Defines built-in sound presets: each one carries both an EQ curve and a full effect chain state.
 
-export type AudioSoundPresetId =
-    | 'flat'
-    | 'rock'
-    | 'pop'
-    | 'classical'
-    | 'jazz'
-    | 'bass'
-    | 'vocal'
-    | 'lofi'
-    | 'radio'
-    | 'hall';
+// These six ids are promised to mods through FoliumEqualizerPresetId: in all of Folium 1.x
+// `folium.equalizer.setMode` must keep taking them. To retire a preset, point its old id at the closest
+// one left in the map of src/mods/runtime/equalizer/hostEqualizer.ts; "the contract's ids stay usable in
+// 1.x" in test/unit/mod-system/foliumEqualizer.test.ts holds it there.
+export type AudioSoundPresetId = 'flat' | 'lofi' | 'radio' | 'hall' | 'vocal' | 'bass';
 
 export type AudioSoundPreset = {
     gains: readonly number[];
@@ -29,38 +23,6 @@ export const AUDIO_SOUND_PRESETS: Record<AudioSoundPresetId, AudioSoundPreset> =
     flat: {
         gains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         effects: withEffects({}),
-    },
-    rock: {
-        gains: [5, 4, 2, -1, -2, -1, 2, 4, 5, 5],
-        effects: withEffects({}),
-    },
-    pop: {
-        gains: [-1, 1, 3, 4, 3, 0, -1, 1, 2, 3],
-        effects: withEffects({}),
-    },
-    classical: {
-        gains: [4, 3, 2, 1, -1, -1, 0, 2, 3, 4],
-        effects: withEffects({}),
-    },
-    jazz: {
-        gains: [3, 2, 1, 2, -1, -1, 0, 1, 3, 4],
-        effects: withEffects({}),
-    },
-    bass: {
-        gains: [6, 5, 3, 1, 0, -1, -1, 0, 1, 2],
-        effects: withEffects({
-            drive: 0.1,
-            width: 1.15,
-        }),
-    },
-    vocal: {
-        gains: [-2, -1, 0, 2, 4, 4, 3, 1, 0, -1],
-        effects: withEffects({
-            highpass: 110,
-            width: 0.9,
-            space: 0.08,
-            punch: 0.35,
-        }),
     },
     lofi: {
         gains: [-4, -2, 0, 2, 3, 2, 0, -3, -7, -10],
@@ -96,6 +58,23 @@ export const AUDIO_SOUND_PRESETS: Record<AudioSoundPresetId, AudioSoundPreset> =
             width: 1.3,
             space: 0.55,
             punch: 0.15,
+        }),
+    },
+    vocal: {
+        gains: [-2, -1, 0, 2, 4, 4, 3, 1, 0, -1],
+        effects: withEffects({
+            highpass: 110,
+            width: 0.9,
+            space: 0.08,
+            punch: 0.35,
+        }),
+    },
+    bass: {
+        gains: [6, 5, 3, 1, 0, -1, -1, 0, 1, 2],
+        effects: withEffects({
+            drive: 0.1,
+            width: 1.15,
+            punch: 0.45,
         }),
     },
 };

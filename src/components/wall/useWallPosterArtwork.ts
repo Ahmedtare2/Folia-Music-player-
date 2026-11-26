@@ -4,7 +4,7 @@ import {
     getCachedLocalCoverObjectUrl,
     resolveLocalCoverObjectUrl,
 } from '../../services/localCoverRuntime';
-import { COVER_SIZE_STEPS, getOriginalCoverUrl, getSizedCoverUrl, resolveCoverSizeStep } from '../../utils/coverUrl';
+import { COVER_MAX_SIZE, COVER_SIZE_STEPS, getOriginalCoverUrl, getSizedCoverUrl, resolveCoverSizeStep } from '../../utils/coverUrl';
 
 // src/components/wall/useWallPosterArtwork.ts
 // Picks which variant of a cover one poster paints. The wall draws the same list (the play queue,
@@ -29,7 +29,7 @@ const decodingVariants = new Map<string, Promise<boolean>>();
  */
 const failedVariants = new Map<string, true>();
 
-/** Ladder step the URL was cut at; `Infinity` stands for the provider's own asset. */
+/** Ladder step the URL was cut at; `Infinity` stands for `COVER_MAX_SIZE`, or the provider's own asset where a poster keeps it. */
 type PosterArtwork = {
     /** Cover this variant came from. A queue shift can point one slot at a different song. */
     cover: string;
@@ -47,9 +47,13 @@ const remember = (registry: Map<string, true>, url: string): void => {
     }
 };
 
-const variantUrl = (cover: string, step: number): string => (
-    Number.isFinite(step) ? getSizedCoverUrl(cover, step) : getOriginalCoverUrl(cover)
-);
+// Past the top step a poster gets COVER_MAX_SIZE, not the provider's original: a wall of distinct
+// multi-megapixel covers outgrows Chromium's decode cache and each tile raster decodes one again.
+// A poster that is one picture spread over a whole block (`keepOriginal`) keeps the original.
+const variantUrl = (cover: string, step: number, keepOriginal = false): string => {
+    if (Number.isFinite(step)) return getSizedCoverUrl(cover, step);
+    return keepOriginal ? getOriginalCoverUrl(cover) : getSizedCoverUrl(cover, COVER_MAX_SIZE);
+};
 
 // Waits for a decoded frame rather than a load event: the swap that follows is then a repaint of
 // something already rasterized, instead of a decode landing in the middle of the expansion spring.
@@ -100,16 +104,16 @@ const decodeVariant = (url: string): Promise<boolean> => {
  * hand a thumbnail-sized card the full-size bitmap some other card pulled, which is the cost this
  * whole path exists to avoid. With nothing decoded the box's own step is returned and simply loads.
  */
-const pickDisplay = (cover: string, targetStep: number): PosterArtwork => {
+const pickDisplay = (cover: string, targetStep: number, keepOriginal: boolean): PosterArtwork => {
     if (extractAssetIdFromCoverUrl(cover)) {
         const cachedBlobUrl = getCachedLocalCoverObjectUrl(cover);
         if (cachedBlobUrl) {
             return { cover, step: Number.POSITIVE_INFINITY, url: cachedBlobUrl };
         }
-        return { cover, step: 0, url: variantUrl(cover, targetStep) };
+        return { cover, step: 0, url: variantUrl(cover, targetStep, keepOriginal) };
     }
 
-    const targetUrl = variantUrl(cover, targetStep);
+    const targetUrl = variantUrl(cover, targetStep, keepOriginal);
     if (decodedVariants.has(targetUrl)) return { cover, step: targetStep, url: targetUrl };
 
     for (let index = COVER_SIZE_STEPS.length - 1; index >= 0; index -= 1) {
@@ -141,15 +145,22 @@ export const prewarmWallPosterArtwork = (cover: string | undefined, sizePx: numb
  * so a card that changes gear keeps painting what it already had for the length of the reflow
  * instead of blanking. It never trades back down either: a collapsed card holding a sharper copy
  * costs nothing to keep, while dropping to a smaller variant would buy a refetch and a second swap.
+ *
+ * `keepOriginal` lets a box past the top step paint the provider's original instead of
+ * `COVER_MAX_SIZE` - for one picture spread over many tiles, where there is only one to decode.
  */
-export const useWallPosterArtwork = (cover: string | undefined, sizePx: number): string => {
+export const useWallPosterArtwork = (
+    cover: string | undefined,
+    sizePx: number,
+    { keepOriginal = false }: { keepOriginal?: boolean } = {},
+): string => {
     const source = cover ?? '';
     const targetStep = resolveCoverSizeStep(sizePx);
-    const [ready, setReady] = useState<PosterArtwork>(() => pickDisplay(source, targetStep));
+    const [ready, setReady] = useState<PosterArtwork>(() => pickDisplay(source, targetStep, keepOriginal));
     // Recomputed only when this slot changes song; the artwork of the previous one must not linger.
     const current = useMemo(
-        () => (ready.cover === source ? ready : pickDisplay(source, targetStep)),
-        [ready, source, targetStep],
+        () => (ready.cover === source ? ready : pickDisplay(source, targetStep, keepOriginal)),
+        [ready, source, targetStep, keepOriginal],
     );
 
     useEffect(() => {
@@ -172,7 +183,7 @@ export const useWallPosterArtwork = (cover: string | undefined, sizePx: number):
         }
 
         if (current.cover === source && current.step >= targetStep) return;
-        const url = variantUrl(source, targetStep);
+        const url = variantUrl(source, targetStep, keepOriginal);
         const upgrade = () => setReady({ cover: source, step: targetStep, url });
         if (decodedVariants.has(url)) {
             upgrade();
@@ -183,7 +194,7 @@ export const useWallPosterArtwork = (cover: string | undefined, sizePx: number):
             if (decoded && !cancelled) upgrade();
         });
         return () => { cancelled = true; };
-    }, [current, source, targetStep]);
+    }, [current, source, targetStep, keepOriginal]);
 
     return current.url;
 };

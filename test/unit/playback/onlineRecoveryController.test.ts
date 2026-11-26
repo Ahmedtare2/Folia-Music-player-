@@ -111,11 +111,18 @@ describe('online playback recovery bounds', () => {
         expect(getOnlineRecoveryKey(streamUrl('one'))).toBe(getOnlineRecoveryKey(streamUrl('two')));
         expect(getOnlineRecoveryKey(streamUrl('one')))
             .toBe('http://isure.stream.qqmusic.qq.com/M800004Th6td4LaoZs004Th6td4LaoZs.mp3');
-        // YouTube Music 的地址每次请求都换一把 key：同一首歌必须落在同一个重试 key 上。
-        expect(getOnlineRecoveryKey('folia-ytm://audio/m9SMT5ipbxk?k=one'))
-            .toBe(getOnlineRecoveryKey('folia-ytm://audio/m9SMT5ipbxk?k=two'));
-        expect(getOnlineRecoveryKey('folia-ytm://audio/m9SMT5ipbxk?k=one'))
-            .not.toBe(getOnlineRecoveryKey('folia-ytm://audio/ZRtdQ81jPUQ?k=one'));
+        // YouTube Music 的地址每次请求都换一把 key（音源模组的 _media 地址，key 在 once 里）：同一首歌必须落在同一个重试 key 上。
+        expect(getOnlineRecoveryKey('folia-mod://ytm/_media/audio/m9SMT5ipbxk/high?once=one'))
+            .toBe(getOnlineRecoveryKey('folia-mod://ytm/_media/audio/m9SMT5ipbxk/high?once=two'));
+        expect(getOnlineRecoveryKey('folia-mod://ytm/_media/audio/m9SMT5ipbxk/high?once=one'))
+            .not.toBe(getOnlineRecoveryKey('folia-mod://ytm/_media/audio/ZRtdQ81jPUQ/high?once=one'));
+        // 音源模组每次请求都新签的 _media 地址把一次性的 key 放在 once 里：同一个文件落在同一个重试 key 上，别的参数照旧算数。
+        expect(getOnlineRecoveryKey('folia-mod://x/_media/audio/a/high?once=one'))
+            .toBe(getOnlineRecoveryKey('folia-mod://x/_media/audio/a/high?once=two'));
+        expect(getOnlineRecoveryKey('folia-mod://x/_media/audio/a/high?once=one'))
+            .not.toBe(getOnlineRecoveryKey('folia-mod://x/_media/audio/b/high?once=one'));
+        expect(getOnlineRecoveryKey('folia-mod://x/_media/stream?guid=1'))
+            .not.toBe(getOnlineRecoveryKey('folia-mod://x/_media/stream?guid=2'));
         expect(getOnlineRecoveryKey('blob:folia/abc')).toBe('blob:folia/abc');
         expect(getOnlineRecoveryKey(null)).toBeNull();
     });
@@ -340,6 +347,21 @@ describe('online playback recovery results', () => {
         const expectedQueue = [otherSong, { ...song, replayGain }];
         expect(setPlayQueueMock).toHaveBeenCalledWith(expectedQueue);
         expect(persistLastPlaybackCache).toHaveBeenCalledWith({ ...song, replayGain }, expectedQueue);
+    });
+
+    // Only the entry is refreshed: a song the queue no longer holds (removed by the user, or a mod replaced
+    // the queue whole) is not put back in front of it.
+    it('writes no queue when the song is no longer in it, and saves the queue as it is now', async () => {
+        const { controller, persistLastPlaybackCache } = createController(streamUrl('one'));
+        const editedQueue = [otherSong];
+        playbackState.playQueue = editedQueue;
+        const replayGain = { trackGain: -6 };
+        loadAudioSourceMock.mockResolvedValue({ kind: 'ok', audioSrc: streamUrl('two'), replayGain });
+
+        await expect(controller.recoverOnlinePlaybackSource({ failedSrc: streamUrl('one'), autoplay: true, force: true }))
+            .resolves.toEqual({ recovered: true });
+        expect(setPlayQueueMock).not.toHaveBeenCalled();
+        expect(persistLastPlaybackCache).toHaveBeenCalledWith({ ...song, replayGain }, editedQueue);
     });
 
     it('does not attempt a recovery for a non-online song', async () => {

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef } from 'react';
 import type { MutableRefObject } from 'react';
+import type { MotionValue } from 'framer-motion';
 import { findLatestActiveLineIndex } from '../../../../utils/appPlaybackHelpers';
 import { PlayerState } from '../../../../types';
+import type { AudioBands, LyricData, StageLyricsSession } from '../../../../types';
 import { setCurrentLineIndex, setHandoffLineIndex, setPlayerState } from '../../../../stores/usePlaybackStore';
 import { selectDisplayLyrics, usePlaybackStore } from '../../../../stores/usePlaybackStore';
 import {
@@ -13,20 +15,22 @@ import {
     lyricCurrentTime,
 } from '../../../../stores/motionSignals';
 import { getTransitionHandoffProgress } from '../../../../services/automix/transitionCue';
+import { omni } from '../../../../services/onlineMusic/omni';
 import { tickBeatFx } from '../../../../services/beatFx/beatFxLive';
 import { useBeatFxTrack } from '../../../../hooks/useBeatFxTrack';
-import { NATIVE_VISIBILITY_EVENT } from '../../../../hooks/useDocumentVisibility';
-import { isAppForegroundVisible, subscribeAppForegroundVisibility } from '../../../../utils/visualizerVisibilityGate';
 import { readIncomingLyricClock } from './incomingLyricClock';
-import {
-    getCurrentDisplayRefreshRateHz,
-    getInterpolatedAndroidPlaybackPositionSec,
-    hasAndroidNativeVisualizerBridge,
-    isAndroidNativeExoPlayerActive,
-    setAndroidNativeVisualizerEnergy,
-} from '../../../../services/android/foliaAndroidBridge';
+import { isBackgroundLyricHeld, setHeldLyricTime, useBackgroundLyricHoldStore } from '../../backgroundThrottling/backgroundLyricHoldStore';
+import { getHifiPosition } from '../../../../services/hifi/hifiPlayback';
+import { getExternalPosition, isExternalPlaybackSounding } from '../../../../services/onlineMusic/externalPlayback';
 
 // src/components/app/playback/bridges/usePlaybackVisualizerBridge.ts
+
+/**
+ * How often the loop runs while 后台节流 holds the lyric animation. Only the clocks are kept then (the
+ * progress bar, stage end, mods' playback time), and a timer keeps them going in a hidden window,
+ * where frames stop.
+ */
+const HELD_TICK_MS = 250;
 
 type UsePlaybackVisualizerBridgeParams = {
 
@@ -37,7 +41,7 @@ type UsePlaybackVisualizerBridgeParams = {
     isNowPlayingStageActive: boolean;
     isPlayerCapStageActive: boolean;
     stageActiveEntryKind: string | null;
-    stageLyricsSession: unknown;
+    stageLyricsSession: StageLyricsSession | null;
     stageLyricsClockRef: MutableRefObject<{
         startTimeSec: number;
         endTimeSec: number;
@@ -94,30 +98,18 @@ export function usePlaybackVisualizerBridge({
     const activePlaybackContext = usePlaybackStore(state => state.activePlaybackContext);
     const playerState = usePlaybackStore(state => state.playerState);
     const duration = usePlaybackStore(state => state.duration);
+    // mpv sounds the song on the HiFi route: the decks are silent, and the clock is extrapolated from mpv's position.
+    const isHifiActive = usePlaybackStore(state => state.playbackRoute) === 'hifi';
+    // A provider's own player sounds it on the external route, with its own extrapolated clock.
+    // Only once the app has shown the song: before that the old song still owns the lyric clock.
+    const isExternalRouteActive = usePlaybackStore(state => state.playbackRoute) === 'external';
+    const isExternalActive = isExternalRouteActive && isExternalPlaybackSounding();
     // The lyrics on screen, matching the deck getDisplayElement points at.
     const lyrics = usePlaybackStore(selectDisplayLyrics);
     // The live lyrics, which during a blend are the incoming track's (null until they load).
     const incomingLyrics = usePlaybackStore(state => state.lyrics);
 
     const currentLineIndexRef = useRef(-1);
-    const lyricsRef = useRef(lyrics);
-    lyricsRef.current = lyrics;
-    // Reuse a single typed array for FFT frequency reads instead of allocating on every frame.
-    const fftBufferRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
-    const lastNativeEnergySyncMsRef = useRef<number>(0);
-    const lastNativePlayingStateRef = useRef<boolean>(false);
-    // High-resolution VSync clock anchor for frame-rate-independent audio time interpolation
-    // across 60Hz, 90Hz, and 120Hz displays.
-    const audioClockAnchorRef = useRef<{
-        element: HTMLAudioElement | null;
-        rawMediaTimeSec: number;
-        anchorPerfNowMs: number;
-    }>({
-        element: null,
-        rawMediaTimeSec: -1,
-        anchorPerfNowMs: 0,
-    });
-    const emptySpectrumRef = useRef<Uint8Array<ArrayBuffer>>(new Uint8Array(new ArrayBuffer(0)));
     // 智能动感模式: loads the track's beats while it is on; the clock is stepped below. A ref, so
     // switching it does not rebuild the frame loop.
     const beatFxWantedRef = useRef(false);
@@ -135,46 +127,34 @@ export function usePlaybackVisualizerBridge({
         incomingOffsetMsRef.current = incomingLyricTimelineOffsetMs;
     }, [incomingLyricTimelineOffsetMs]);
 
-    const applyLyricClockAtTime = useCallback((rawTimeSec: number) => {
-        const effectiveLyricTime = rawTimeSec - displayOffsetMsRef.current / 1000;
-        if (lyricCurrentTime.get() !== effectiveLyricTime) {
-            lyricCurrentTime.set(effectiveLyricTime);
+    // A preview clip may start somewhere inside its song: the read-head is the deck's own clock plus
+    // that start. Cached per URL until the registry changes, since the frame loop asks every frame.
+    const clipStartSecRef = useRef(new Map<string, number>());
+    const clipStartVersionRef = useRef(-1);
+    const lyricClipStartSec = useCallback((element: HTMLAudioElement | null | undefined): number => {
+        const src = element?.currentSrc;
+        if (!src) return 0;
+        const version = omni.audioSourceMetadataVersion();
+        if (clipStartVersionRef.current !== version) {
+            clipStartSecRef.current.clear();
+            clipStartVersionRef.current = version;
         }
-        const activeLyrics = lyricsRef.current;
-        const foundIndex = activeLyrics ? findLatestActiveLineIndex(activeLyrics.lines, effectiveLyricTime) : -1;
-        if (
-            foundIndex !== currentLineIndexRef.current
-            || foundIndex !== usePlaybackStore.getState().currentLineIndex
-        ) {
-            currentLineIndexRef.current = foundIndex;
-            setCurrentLineIndex(foundIndex);
+        const known = clipStartSecRef.current.get(src);
+        if (known !== undefined) return known;
+        const seconds = omni.previewClipStartMsOfAudioSource(src) / 1000;
+        const starts = clipStartSecRef.current;
+        starts.set(src, seconds);
+        if (starts.size > 8) {
+            const oldest = starts.keys().next().value;
+            if (oldest !== undefined) starts.delete(oldest);
         }
+        return seconds;
     }, []);
-
-    // Keep currentLineIndexRef and lyricCurrentTime immediately synchronized whenever:
-    // - lyrics change (new track loaded, lyric source switched, or async match finished)
-    // - lyricTimelineOffsetMs changes (even while paused)
-    useEffect(() => {
-        const audioElement = getDisplayElement?.() ?? audioRef.current;
-        const baseTime = audioElement && Number.isFinite(audioElement.currentTime) && audioElement.currentTime > 0
-            ? audioElement.currentTime
-            : currentTime.get();
-        applyLyricClockAtTime(baseTime);
-    }, [applyLyricClockAtTime, audioRef, getDisplayElement, lyricTimelineOffsetMs, lyrics]);
-
-    // Resynchronize lyricCurrentTime and currentLineIndex immediately whenever currentTime is set
-    // (including seeks while paused, track resets to 0, or metadata resume).
-    useEffect(() => currentTime.on('change', (latestTimeSec: number) => {
-        applyLyricClockAtTime(latestTimeSec);
-    }), [applyLyricClockAtTime]);
 
     // The ends of a blend, written as the store changes rather than on the next frame: the visualizer
     // renders from that same change, and a frame late it would draw the incoming track's lyrics from
     // the outgoing track's clock and line (or the last blend's finished hand-off at the next one's start).
     useEffect(() => usePlaybackStore.subscribe((state, previous) => {
-        if (state.currentLineIndex !== previous.currentLineIndex) {
-            currentLineIndexRef.current = state.currentLineIndex;
-        }
         if (state.transitionDisplay === previous.transitionDisplay) return;
         if (previous.transitionDisplay === null) {
             handoffProgress.set(0);
@@ -184,47 +164,99 @@ export function usePlaybackVisualizerBridge({
         }
         if (state.transitionDisplay !== null) return;
         // Handed over: the picture is now the incoming track, and its clock runs on from its own deck.
+        // Only the session knows which way the blend went. A cancel keeps the outgoing deck's clock, and
+        // a skip mid-blend loads some other track onto the deck that was incoming, so both are left to
+        // the ordinary song change. Read from the deck here rather than from the frame loop's last
+        // hand-off: that loop does not run while the window is hidden.
+        // The hand-off itself is left where it stood: what plays along it (the background change, the
+        // Monet cover) lets go of it at a settle or a cancel and plays the rest from there on the clock,
+        // and a set here would snap it to the end first.
         const incoming = audioRef.current;
         if (state.transitionEnd !== 'handedOver' || !incoming) return;
-        const clock = readIncomingLyricClock(incoming.currentTime, incomingOffsetMsRef.current, state.lyrics?.lines);
+        const clock = readIncomingLyricClock(
+            incoming.currentTime + lyricClipStartSec(incoming),
+            incomingOffsetMsRef.current,
+            state.lyrics?.lines,
+        );
         displayOffsetMsRef.current = incomingOffsetMsRef.current;
         currentTime.set(incoming.currentTime);
         lyricCurrentTime.set(clock.lyricTimeSec);
         currentLineIndexRef.current = clock.lineIndex;
         setCurrentLineIndex(clock.lineIndex);
-    }), [audioRef]);
+    }), [audioRef, lyricClipStartSec]);
 
-    const updateLoop = useCallback((rafTimestampMs?: number) => {
-        // Strict Screen-Off & Background Freeze: never run FFT or lyric rAF updates
-        // when the phone screen is turned off or the document is hidden.
-        if (!isAppForegroundVisible()) {
-            animationFrameRef.current = 0;
-            return;
-        }
-        const frameNowMs = typeof rafTimestampMs === 'number' && Number.isFinite(rafTimestampMs) && rafTimestampMs > 0
-            ? rafTimestampMs
-            : (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    // The frame loop moves the read-head only while the deck plays. A deck that loads or seeks while
+    // paused - a restored session, above all a restored preview clip, which starts somewhere inside
+    // its song - would leave it where the song change put it (useLyricReadHead: the top of the whole
+    // song), while the remote window and OBS, which read the deck's position, show the line it is
+    // really at; pressing play would then jump the main read-head forward on its first frame. So the
+    // read-head is also set from those two events, and a paused deck costs nothing per frame.
+    // Listened for on the document in the capture phase (media events do not bubble, but they are
+    // captured), so the listener follows whichever deck is active without re-binding at a deck swap.
+    // Only the main player's own clock: a stage or PlayerCap clock is written by its own branch below.
+    const pausedDeckSyncRef = useRef({ ownsClock: false, lyrics });
+    pausedDeckSyncRef.current = {
+        ownsClock: activePlaybackContext === 'main' && !isNowPlayingStageActive && !isPlayerCapStageActive,
+        lyrics,
+    };
+    useEffect(() => {
+        if (typeof document === 'undefined') return undefined;
+        const syncPausedDeck = (event: Event) => {
+            const element = audioRef.current;
+            if (!element || event.target !== element || !element.paused) return;
+            const { ownsClock, lyrics: displayedLyrics } = pausedDeckSyncRef.current;
+            // While a blend holds the picture this deck is the incoming track, not the one on screen.
+            if (!ownsClock || getDisplayElement?.()) return;
+            const clock = readIncomingLyricClock(
+                element.currentTime + lyricClipStartSec(element),
+                displayOffsetMsRef.current,
+                displayedLyrics?.lines,
+            );
+            lyricCurrentTime.set(clock.lyricTimeSec);
+            if (displayedLyrics && clock.lineIndex !== currentLineIndexRef.current) {
+                currentLineIndexRef.current = clock.lineIndex;
+                setCurrentLineIndex(clock.lineIndex);
+            }
+        };
+        document.addEventListener('loadedmetadata', syncPausedDeck, true);
+        document.addEventListener('seeked', syncPausedDeck, true);
+        return () => {
+            document.removeEventListener('loadedmetadata', syncPausedDeck, true);
+            document.removeEventListener('seeked', syncPausedDeck, true);
+        };
+    }, [audioRef, getDisplayElement, lyricClipStartSec]);
+
+    const updateLoop = useCallback(() => {
+        // 后台节流 holds the lyric animation while the window is minimised or hidden: the clocks below
+        // keep running, while the lyric read-head, the line and the audio bands stay where they are
+        // until the window is back on screen (the pass that lets go catches them up).
+        const backgroundHold = isBackgroundLyricHeld();
+        setHeldLyricTime(null);
+        const showLyricTime = (seconds: number) => {
+            if (backgroundHold) setHeldLyricTime(seconds);
+            else lyricCurrentTime.set(seconds);
+        };
+        const showLine = (index: number) => {
+            if (backgroundHold || index === currentLineIndexRef.current) return;
+            currentLineIndexRef.current = index;
+            setCurrentLineIndex(index);
+        };
 
         // Normally the active deck; the outgoing one for as long as a blend holds the picture on
         // the track it is finishing, so that clock and picture never describe different songs.
         const audioElement = getDisplayElement?.() ?? audioRef.current;
-        const nativeExoClock = isAndroidNativeExoPlayerActive()
-            ? getInterpolatedAndroidPlaybackPositionSec(frameNowMs)
-            : null;
-        const isActuallyPlaying = nativeExoClock
-            ? Boolean(nativeExoClock.isPlaying && !nativeExoClock.ended)
-            : Boolean(audioElement && !audioElement.paused && !audioElement.ended);
+        // Never on the HiFi route, so the spectrum keeps the idle breath there: there is no analyser on mpv's output.
+        const isActuallyPlaying = !isHifiActive && !isExternalActive && Boolean(audioElement && !audioElement.paused && !audioElement.ended);
         // Mid-handover a deck can be loading while the other one is still sounding. The analyser
         // is downstream of both, so it has real signal: dropping to the idle breath here would put
         // a visible stutter at exactly the moment meant to be seamless.
         const hasAudibleSignal = isActuallyPlaying || isTransitionAudible();
 
-        if (hasAudibleSignal && analyserRef.current) {
+        if (backgroundHold) {
+            // The bands keep their last values: nothing draws from them while held.
+        } else if (hasAudibleSignal && analyserRef.current) {
             const bufferLength = analyserRef.current.frequencyBinCount;
-            if (!fftBufferRef.current || fftBufferRef.current.length !== bufferLength) {
-                fftBufferRef.current = new Uint8Array(new ArrayBuffer(bufferLength));
-            }
-            const dataArray = fftBufferRef.current;
+            const dataArray = new Uint8Array(bufferLength);
             analyserRef.current.getByteFrequencyData(dataArray);
             audioBands.spectrum?.set(dataArray);
 
@@ -250,62 +282,12 @@ export function usePlaybackVisualizerBridge({
                 return Math.pow(normalized, boost) * 255;
             };
 
-            const procBass = process(bass, 1.8);
-            const procLowMid = process(lowMid, 2);
-            const procMid = process(mid, 2);
-            const procVocal = process(vocal, 1.5);
-            const procTreble = process(treble, 2);
-
             audioPower.set(process((bass + lowMid) / 2, 3));
-            audioBands.bass.set(procBass);
-            audioBands.lowMid.set(procLowMid);
-            audioBands.mid.set(procMid);
-            audioBands.vocal.set(procVocal);
-            audioBands.treble.set(procTreble);
-
-            if (hasAndroidNativeVisualizerBridge()) {
-                const nowMs = frameNowMs;
-                const minSyncIntervalMs = Math.max(30, Math.round(2000 / getCurrentDisplayRefreshRateHz()));
-                if (!lastNativePlayingStateRef.current || nowMs - lastNativeEnergySyncMsRef.current >= minSyncIntervalMs) {
-                    lastNativePlayingStateRef.current = true;
-                    lastNativeEnergySyncMsRef.current = nowMs;
-                    void setAndroidNativeVisualizerEnergy({
-                        bass: Math.min(1, procBass / 255),
-                        mid: Math.min(1, procMid / 255),
-                        high: Math.min(1, procTreble / 255),
-                        isPlaying: true,
-                    });
-                }
-            }
-        } else if (hasAudibleSignal) {
-            // Hardware offload path (WebAudio DSP bypassed when Equalizer is disabled):
-            // synthesize smooth rhythmic multi-band energy from playback clock for zero-CPU overhead.
-            const tSec = audioElement ? audioElement.currentTime : Date.now() / 1000;
-            const pulseBass = (Math.sin(tSec * 4.2) * 0.5 + 0.5) * 145 + 35;
-            const pulseMid = (Math.sin(tSec * 2.7 + 1.1) * 0.5 + 0.5) * 115 + 25;
-            const pulseHigh = (Math.cos(tSec * 5.3 + 2.4) * 0.5 + 0.5) * 95 + 20;
-            audioPower.set(pulseBass * 0.75);
-            audioBands.bass.set(pulseBass);
-            audioBands.lowMid.set((pulseBass + pulseMid) * 0.5);
-            audioBands.mid.set(pulseMid);
-            audioBands.vocal.set(pulseMid * 0.9);
-            audioBands.treble.set(pulseHigh);
-            audioBands.spectrum?.set(emptySpectrumRef.current);
-
-            if (hasAndroidNativeVisualizerBridge()) {
-                const nowMs = frameNowMs;
-                const minSyncIntervalMs = Math.max(30, Math.round(2000 / getCurrentDisplayRefreshRateHz()));
-                if (!lastNativePlayingStateRef.current || nowMs - lastNativeEnergySyncMsRef.current >= minSyncIntervalMs) {
-                    lastNativePlayingStateRef.current = true;
-                    lastNativeEnergySyncMsRef.current = nowMs;
-                    void setAndroidNativeVisualizerEnergy({
-                        bass: Math.min(1, pulseBass / 255),
-                        mid: Math.min(1, pulseMid / 255),
-                        high: Math.min(1, pulseHigh / 255),
-                        isPlaying: true,
-                    });
-                }
-            }
+            audioBands.bass.set(process(bass, 1.8));
+            audioBands.lowMid.set(process(lowMid, 2));
+            audioBands.mid.set(process(mid, 2));
+            audioBands.vocal.set(process(vocal, 1.5));
+            audioBands.treble.set(process(treble, 2));
         } else {
             const time = Date.now() / 2000;
             const breath = (Math.sin(time) + 1) * 20;
@@ -315,63 +297,63 @@ export function usePlaybackVisualizerBridge({
             audioBands.mid.set(breath);
             audioBands.vocal.set(breath);
             audioBands.treble.set(breath);
-            audioBands.spectrum?.set(emptySpectrumRef.current);
-
-            if (hasAndroidNativeVisualizerBridge() && lastNativePlayingStateRef.current) {
-                lastNativePlayingStateRef.current = false;
-                lastNativeEnergySyncMsRef.current = performance.now();
-                void setAndroidNativeVisualizerEnergy({
-                    bass: 0,
-                    mid: 0,
-                    high: 0,
-                    isPlaying: false,
-                });
-            }
+            audioBands.spectrum?.set(new Uint8Array(0));
         }
 
-        if (isActuallyPlaying && nativeExoClock) {
-            // High-precision sub-millisecond interpolation from native AndroidX Media3 (ExoPlayer)
-            // clock anchor (positionMs + (frameNowMs - clientPerfNowMs) * playbackSpeed) without polling the bridge.
-            const smoothTime = nativeExoClock.positionSec;
-            currentTime.set(smoothTime);
-            applyLyricClockAtTime(smoothTime);
-        } else if (isActuallyPlaying && audioElement) {
-            const rawTime = audioElement.currentTime;
-            const anchor = audioClockAnchorRef.current;
-            const playbackRate = Number.isFinite(audioElement.playbackRate) && audioElement.playbackRate > 0
-                ? audioElement.playbackRate
-                : 1;
-            let smoothTime = rawTime;
-            if (
-                anchor.element !== audioElement
-                || Math.abs(rawTime - anchor.rawMediaTimeSec) > 0.0005
-                || frameNowMs < anchor.anchorPerfNowMs
-            ) {
-                anchor.element = audioElement;
-                anchor.rawMediaTimeSec = rawTime;
-                anchor.anchorPerfNowMs = frameNowMs;
-            } else {
-                // Frame-rate-independent VSync interpolation between HTMLAudioElement timeupdate ticks:
-                // advances smoothly by the exact elapsed frame delta whether display is 60Hz, 90Hz, or 120Hz.
-                const elapsedSec = Math.max(0, (frameNowMs - anchor.anchorPerfNowMs) / 1000) * playbackRate;
-                const maxLeadSec = 0.065 * playbackRate;
-                const interpolated = anchor.rawMediaTimeSec + Math.min(elapsedSec, maxLeadSec);
-                smoothTime = duration > 0 ? Math.min(duration, interpolated) : interpolated;
+        if (isExternalRouteActive) {
+            // A frame can retain the outgoing render while the companion already owns a new clock.
+            // Freeze until announcement and the lyrics render agree, rather than rewinding the old song.
+            if (!isExternalPlaybackSounding() || lyrics !== selectDisplayLyrics(usePlaybackStore.getState())) return;
+            // As with mpv: every frame, paused or not (the player's clock stands still while it is
+            // paused, and a seek moves it). The end is the player's own report, not this clock.
+            const time = getExternalPosition();
+            currentTime.set(time);
+
+            const effectiveLyricTime = time - displayOffsetMsRef.current / 1000;
+            showLyricTime(effectiveLyricTime);
+
+            if (lyrics) {
+                showLine(findLatestActiveLineIndex(lyrics.lines, effectiveLyricTime));
             }
-            currentTime.set(smoothTime);
-            applyLyricClockAtTime(smoothTime);
+        } else if (isHifiActive) {
+            // Every frame, paused or not: the clock stands still while mpv is paused, and a seek while
+            // paused moves it. No end handling here - mpv reports the end itself.
+            const time = getHifiPosition();
+            currentTime.set(time);
+
+            const effectiveLyricTime = time - displayOffsetMsRef.current / 1000;
+            showLyricTime(effectiveLyricTime);
+
+            if (lyrics) {
+                showLine(findLatestActiveLineIndex(lyrics.lines, effectiveLyricTime));
+            }
+        } else if (isActuallyPlaying && audioElement) {
+            const time = audioElement.currentTime;
+            currentTime.set(time);
+
+            const effectiveLyricTime = time + lyricClipStartSec(audioElement) - displayOffsetMsRef.current / 1000;
+            showLyricTime(effectiveLyricTime);
+
+            if (lyrics) {
+                showLine(findLatestActiveLineIndex(lyrics.lines, effectiveLyricTime));
+            }
         } else if (isNowPlayingStageActive) {
             const nextTime = getNowPlayingDisplayTime();
             const hasReachedEnd = playerState === PlayerState.PLAYING && duration > 0 && nextTime >= duration;
 
             currentTime.set(nextTime);
-            applyLyricClockAtTime(nextTime);
+
+            const effectiveLyricTime = nextTime - displayOffsetMsRef.current / 1000;
+            showLyricTime(effectiveLyricTime);
+            showLine(lyrics ? findLatestActiveLineIndex(lyrics.lines, effectiveLyricTime) : -1);
 
             if (hasReachedEnd) {
                 if (effectiveLoopMode === 'one' || effectiveLoopMode === 'all') {
                     syncNowPlayingClock(0, duration, false);
                     currentTime.set(0);
-                    applyLyricClockAtTime(0);
+                    if (lyrics) {
+                        showLine(findLatestActiveLineIndex(lyrics.lines, 0));
+                    }
                 } else {
                     syncNowPlayingClock(duration, duration, true);
                     setPlayerState(PlayerState.PAUSED);
@@ -381,29 +363,30 @@ export function usePlaybackVisualizerBridge({
             // PlayerCap: clock extrapolated from progress×duration; a passive source, looping/ending is driven by the external player, so no end/loop handling here.
             const nextTime = getPlayerCapDisplayTime();
             currentTime.set(nextTime);
-            applyLyricClockAtTime(nextTime);
-        } else if (activePlaybackContext === 'stage' && stageActiveEntryKind === 'lyrics' && stageLyricsSession && lyrics) {
+
+            const effectiveLyricTime = nextTime - displayOffsetMsRef.current / 1000;
+            showLyricTime(effectiveLyricTime);
+            showLine(lyrics ? findLatestActiveLineIndex(lyrics.lines, effectiveLyricTime) : -1);
+        } else if (activePlaybackContext === 'stage' && stageActiveEntryKind === 'lyrics' && stageLyricsSession) {
+            // A session without lyrics (an external player's track whose lyrics are not found) still keeps time.
             const nextTime = getSyntheticStageLyricsTime();
             const clock = stageLyricsClockRef.current;
             const hasReachedEnd = playerState === PlayerState.PLAYING && nextTime >= clock.endTimeSec;
 
             currentTime.set(nextTime);
 
-            const foundIndex = findLatestActiveLineIndex(lyrics.lines, nextTime);
-            if (foundIndex !== currentLineIndexRef.current) {
-                currentLineIndexRef.current = foundIndex;
-                setCurrentLineIndex(foundIndex);
-            }
+            // The pushed session's lyrics are timed on its own clock: no song offset is taken off, as the line
+            // below takes none. Without this the visualizers' read-head stood at the start while the line moved (#1325).
+            showLyricTime(nextTime);
+            showLine(lyrics ? findLatestActiveLineIndex(lyrics.lines, nextTime) : -1);
 
             if (hasReachedEnd) {
-                if (effectiveLoopMode === 'one' || effectiveLoopMode === 'all') {
+                // An external player's clock is its own to restart: the loop mode does not replay it here.
+                if (!stageLyricsSession.clock && (effectiveLoopMode === 'one' || effectiveLoopMode === 'all')) {
                     syncStageLyricsClock(clock.startTimeSec, clock.endTimeSec, PlayerState.PLAYING, clock.startTimeSec);
                     currentTime.set(clock.startTimeSec);
-                    const restartedLineIndex = findLatestActiveLineIndex(lyrics.lines, clock.startTimeSec);
-                    if (restartedLineIndex !== currentLineIndexRef.current) {
-                        currentLineIndexRef.current = restartedLineIndex;
-                        setCurrentLineIndex(restartedLineIndex);
-                    }
+                    showLyricTime(clock.startTimeSec);
+                    showLine(lyrics ? findLatestActiveLineIndex(lyrics.lines, clock.startTimeSec) : -1);
                 } else {
                     syncStageLyricsClock(clock.endTimeSec, clock.endTimeSec, PlayerState.PAUSED, clock.startTimeSec);
                     setPlayerState(PlayerState.PAUSED);
@@ -411,7 +394,7 @@ export function usePlaybackVisualizerBridge({
             }
         }
 
-        if (beatFxWantedRef.current) {
+        if (beatFxWantedRef.current && !backgroundHold) {
             tickBeatFx(isActuallyPlaying ? audioElement : null, analyserRef.current?.context);
         }
 
@@ -419,23 +402,26 @@ export function usePlaybackVisualizerBridge({
         // and line for the visualizer, off this same frame rather than a second loop.
         const heldElement = getDisplayElement?.() ?? null;
         const incomingElement = heldElement ? audioRef.current : null;
-        if (incomingElement && incomingElement !== heldElement) {
+        if (!backgroundHold && incomingElement && incomingElement !== heldElement) {
             handoffProgress.set(getTransitionHandoffProgress());
-            const incomingClock = readIncomingLyricClock(incomingElement.currentTime, incomingOffsetMsRef.current, incomingLyrics?.lines);
+            const incomingClock = readIncomingLyricClock(
+                incomingElement.currentTime + lyricClipStartSec(incomingElement),
+                incomingOffsetMsRef.current,
+                incomingLyrics?.lines,
+            );
             handoffLyricCurrentTime.set(incomingClock.lyricTimeSec);
             if (incomingClock.lineIndex !== handoffLineIndexRef.current) {
                 handoffLineIndexRef.current = incomingClock.lineIndex;
                 setHandoffLineIndex(incomingClock.lineIndex);
             }
         }
-
-        animationFrameRef.current = requestAnimationFrame(updateLoop);
     }, [
         activePlaybackContext,
         analyserRef,
-        animationFrameRef,
-        applyLyricClockAtTime,
+        audioBands,
+        audioPower,
         audioRef,
+        currentTime,
         duration,
         effectiveLoopMode,
         getNowPlayingDisplayTime,
@@ -446,59 +432,58 @@ export function usePlaybackVisualizerBridge({
         lyrics,
         incomingLyrics,
         playerState,
+        setCurrentLineIndex,
+        setPlayerState,
         stageActiveEntryKind,
         stageLyricsClockRef,
         stageLyricsSession,
         syncNowPlayingClock,
         syncStageLyricsClock,
+        lyricCurrentTime,
+        lyricClipStartSec,
         isTransitionAudible,
         getDisplayElement,
+        isHifiActive,
+        isExternalActive,
+        isExternalRouteActive,
     ]);
 
-    // Resynchronize playback position & active lyric immediately when returning from background or unlocking screen,
-    // and strictly cancel the rAF loop the moment the screen turns off.
+    // Every frame normally; while 后台节流 holds the lyrics, a slow timer that keeps only the clocks. The
+    // moment the hold lets go, one pass runs at once, so the lyrics have caught up before anything reads them.
     useEffect(() => {
-        if (typeof document === 'undefined' || typeof window === 'undefined') return undefined;
-        const handleVisibilityChange = (visible: boolean) => {
-            if (!visible) {
-                if (animationFrameRef.current) {
-                    cancelAnimationFrame(animationFrameRef.current);
-                    animationFrameRef.current = 0;
-                }
-                return;
-            }
-            const audioElement = getDisplayElement?.() ?? audioRef.current;
-            if (audioElement && Number.isFinite(audioElement.currentTime)) {
-                currentTime.set(audioElement.currentTime);
-                applyLyricClockAtTime(audioElement.currentTime);
-            }
-            if (!animationFrameRef.current) {
-                animationFrameRef.current = requestAnimationFrame(updateLoop);
+        let heldTimer: number | undefined;
+        const tick = () => {
+            updateLoop();
+            schedule();
+        };
+        const schedule = () => {
+            if (isBackgroundLyricHeld()) {
+                heldTimer = window.setTimeout(tick, HELD_TICK_MS);
+            } else {
+                animationFrameRef.current = requestAnimationFrame(tick);
             }
         };
-        const unsubscribe = subscribeAppForegroundVisibility(handleVisibilityChange);
-        const handleRawNativeEvent = (event: Event) => {
-            const custom = event as CustomEvent<{ visible?: boolean }> | undefined;
-            if (typeof custom?.detail?.visible === 'boolean') {
-                handleVisibilityChange(custom.detail.visible && document.visibilityState !== 'hidden');
-            }
-        };
-        window.addEventListener(NATIVE_VISIBILITY_EVENT, handleRawNativeEvent);
-        return () => {
-            unsubscribe();
-            window.removeEventListener(NATIVE_VISIBILITY_EVENT, handleRawNativeEvent);
-        };
-    }, [animationFrameRef, applyLyricClockAtTime, audioRef, getDisplayElement, updateLoop]);
-
-    useEffect(() => {
-        if (isAppForegroundVisible()) {
-            animationFrameRef.current = requestAnimationFrame(updateLoop);
-        }
-        return () => {
+        const cancel = () => {
             if (animationFrameRef.current) {
                 cancelAnimationFrame(animationFrameRef.current);
                 animationFrameRef.current = 0;
             }
+            window.clearTimeout(heldTimer);
+        };
+
+        schedule();
+        const unsubscribeHold = useBackgroundLyricHoldStore.subscribe((state, previous) => {
+            if (state.held === previous.held) return;
+            // A song change while held set the line in the store (-1) behind this loop's back; compare
+            // against that, or a new song's first line that happens to match the held one is never written.
+            if (!state.held) currentLineIndexRef.current = usePlaybackStore.getState().currentLineIndex;
+            cancel();
+            tick();
+        });
+        return () => {
+            unsubscribeHold();
+            cancel();
+            setHeldLyricTime(null);
         };
     }, [animationFrameRef, updateLoop]);
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { buildPlaybackGraph } from '@/services/playbackGraph';
-import { resolveAudioEqualizerSettings, shouldBypassWebAudioDspGraph } from '@/utils/audioEqualizer';
+import { resolveAudioEqualizerSettings } from '@/utils/audioEqualizer';
 import { AUDIO_SOUND_PRESETS } from '@/utils/audioPresets';
 
 // test/unit/services/playbackGraph.test.ts
@@ -15,25 +15,15 @@ import { AUDIO_SOUND_PRESETS } from '@/utils/audioPresets';
 // This walks edges instead of re-stating the wiring, because a test that rebuilt the same order
 // would pass whatever the source did.
 
-type FakeNode = { kind: string; connect: (target: FakeNode) => void; disconnect: (target?: FakeNode) => void };
+type FakeNode = { kind: string; connect: (target: FakeNode) => void; disconnect: () => void };
 
 const createFakeContext = () => {
     const edges: Array<[FakeNode, FakeNode]> = [];
     const node = <T extends object>(kind: string, extra = {} as T) => {
         const self = {
             kind,
-            connect: (target: FakeNode) => {
-                if (target && !edges.some(([a, b]) => a === self && b === target)) {
-                    edges.push([self, target]);
-                }
-            },
-            disconnect: vi.fn((target?: FakeNode) => {
-                for (let i = edges.length - 1; i >= 0; i -= 1) {
-                    if (edges[i][0] === self && (!target || edges[i][1] === target)) {
-                        edges.splice(i, 1);
-                    }
-                }
-            }),
+            connect: (target: FakeNode) => { edges.push([self, target]); },
+            disconnect: vi.fn(),
             ...extra,
         } as FakeNode & T;
         return self;
@@ -129,21 +119,20 @@ describe('buildPlaybackGraph', () => {
         routes.forEach(route => expect(route).toContain(analyser as unknown as FakeNode));
     });
 
-    it('puts the transport fade node between the volume fader and the analyser, as its own node', () => {
+    it('puts the transport fade node between the effects and the volume fader, as its own node, wired straight in', () => {
         const { graph, edges, analyser } = buildWith('flat');
         const volume = graph.gainNode as unknown as FakeNode;
         const fade = graph.fadeNode as unknown as FakeNode;
 
         // Its own node: the volume node is rewritten on every volume change and track start.
         expect(fade).not.toBe(volume);
-        routesToDestination(edges, volume).forEach(route => {
-            expect(route.indexOf(fade)).toBe(route.indexOf(volume) + 1);
-            expect(route.indexOf(analyser as unknown as FakeNode)).toBe(route.indexOf(fade) + 1);
-        });
-        // Nothing reaches the speakers around it.
-        const effectOutputs = edges.filter(([, to]) => to === volume).map(([from]) => from);
+        // Fade feeds the volume and nothing else (a scene's room is the only thing ever put between them),
+        // and the volume feeds the analyser.
+        expect(edges.filter(([from]) => from === fade).map(([, to]) => to)).toEqual([volume]);
+        expect(edges.filter(([from]) => from === volume).map(([, to]) => to)).toEqual([analyser as unknown as FakeNode]);
+        // Everything the effects put out reaches the fade.
+        const effectOutputs = edges.filter(([, to]) => to === fade).map(([from]) => from);
         expect(effectOutputs.length).toBeGreaterThan(0);
-        edges.filter(([from]) => from === volume).forEach(([, to]) => expect(to).toBe(fade));
     });
 
     it('reports a deck that failed to connect instead of throwing', () => {
@@ -158,63 +147,5 @@ describe('buildPlaybackGraph', () => {
         });
         expect(graph.decksConnected).toBe(false);
         expect(graph.gainNode).toBeDefined();
-    });
-
-    it('bypasses WebAudio EQ and Chorus/Effect DSP nodes when Chorus, EQ, Automix, and Stem Separation are off', () => {
-        const disabledSettings = resolveAudioEqualizerSettings({ enabled: false });
-        expect(shouldBypassWebAudioDspGraph({
-            equalizerSettings: disabledSettings,
-            chorusEnabled: false,
-            automixEnabled: false,
-            stemSeparationEnabled: false,
-        })).toBe(true);
-
-        expect(shouldBypassWebAudioDspGraph({
-            equalizerSettings: resolveAudioEqualizerSettings({ enabled: true, preset: 'rock' }),
-            automixEnabled: false,
-            stemSeparationEnabled: false,
-        })).toBe(false);
-
-        expect(shouldBypassWebAudioDspGraph({
-            equalizerSettings: disabledSettings,
-            automixEnabled: true,
-            stemSeparationEnabled: false,
-        })).toBe(false);
-
-        expect(shouldBypassWebAudioDspGraph({
-            equalizerSettings: disabledSettings,
-            automixEnabled: false,
-            stemSeparationEnabled: true,
-        })).toBe(false);
-
-        const { context, edges } = createFakeContext();
-        const analyser = context.createAnalyser();
-        let capturedMixNode: FakeNode | null = null;
-        const graph = buildPlaybackGraph({
-            context: context as unknown as AudioContext,
-            analyser: analyser as unknown as AnalyserNode,
-            connectDecks: (_ctx, mixOutput) => {
-                capturedMixNode = mixOutput as unknown as FakeNode;
-                return true;
-            },
-            equalizerNodesRef: { current: [] },
-            settings: disabledSettings,
-            bypassDsp: true,
-        });
-
-        expect(graph.isDspBypassed()).toBe(true);
-        expect(capturedMixNode).not.toBeNull();
-        const bypassRoutes = routesToDestination(edges, capturedMixNode!);
-        expect(bypassRoutes.length).toBe(1);
-        // In bypass mode, mixNode routes directly to gainNode -> fadeNode -> analyser -> destination
-        // without passing through any biquad filter, waveshaper, compressor, or delay node.
-        expect(bypassRoutes[0].some(n => n.kind === 'biquad' || n.kind === 'waveshaper' || n.kind === 'compressor')).toBe(false);
-
-        // Re-enabling DSP reconnects the 10-band EQ and effect chain seamlessly.
-        graph.setDspBypass(false);
-        expect(graph.isDspBypassed()).toBe(false);
-        const activeRoutes = routesToDestination(edges, capturedMixNode!);
-        expect(activeRoutes.length).toBeGreaterThan(0);
-        expect(activeRoutes[0].some(n => n.kind === 'biquad')).toBe(true);
     });
 });

@@ -12,6 +12,7 @@ import { useLibraryHomeDirectory } from '../../core/home/useLibraryHomeDirectory
 import { useLibraryHomeTabsRegistration } from '../../core/home/useLibraryHomeSurfaceRegistration';
 import { useNavidromeHomeSectionStore } from '../../core/home/navidrome/useNavidromeHomeSectionStore';
 import { useThemeSettingsStore } from '../../../stores/useThemeSettingsStore';
+import { PRIMARY_MODIFIER_LABEL } from '../../../utils/platform';
 import { LibraryTuiLocalList, LibraryTuiNavidromeList, LibraryTuiOnlineList } from './LibraryTuiHomeLists';
 import type { LibraryTuiPromptRequest } from './LibraryTuiPrompt';
 import { useLibraryTuiHomePageKeys } from './useLibraryTuiHomeKeyboard';
@@ -169,7 +170,7 @@ const LibraryTuiHome: React.FC<LibraryHomeSurfaceProps> = (props) => {
         prompt,
         onPromptChange: setPrompt,
     };
-    const showBatchHints = activeSource === 'local' && localSectionKey !== 'playlists';
+    const showBatchHints = activeSource === 'local';
     // 开发版的 suite 切换浮层在首页上贴着左下角：给它留出底部的一行，别盖住按键提示。
     const devSwitchGutter = import.meta.env.DEV ? 'pb-8' : '';
     // 顶上让出桌面版自绘标题栏的拖拽区（h-8，盖在整个窗口最上面），否则来源页签点不到；网格的首页页头同样留了 p-8。
@@ -241,7 +242,6 @@ const LibraryTuiHome: React.FC<LibraryHomeSurfaceProps> = (props) => {
                 <LibraryTuiLocalList
                     {...common}
                     localSongs={props.localSongs}
-                    localPlaylists={props.localPlaylists}
                     catalog={props.localLibraryCatalog}
                     activeRow={localMusicState.activeRow}
                     setActiveRow={row => setLocalMusicState(previous => ({ ...previous, activeRow: row }))}
@@ -260,7 +260,7 @@ const LibraryTuiHome: React.FC<LibraryHomeSurfaceProps> = (props) => {
                 {t('libraryTui.homeHints')}
                 {` · ${t('libraryTui.homeAccountsHint')}`}
                 {activeSource === 'local' && localSectionKey === 'folders' ? ` · ${t('libraryTui.homeTreeHints')}` : ''}
-                {showBatchHints ? ` · ${t('libraryTui.homeBatchHints')}` : ''}
+                {showBatchHints ? ` · ${t('libraryTui.homeBatchHints', { mod: PRIMARY_MODIFIER_LABEL })}` : ''}
             </footer>
         </div>
     );

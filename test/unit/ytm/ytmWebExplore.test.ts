@@ -2,23 +2,26 @@ import { createRequire } from 'node:module';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 // test/unit/ytm/ytmWebExplore.test.ts — the explore page of an account signed in through the web:
-// the reader of the web client's pages (electron/ytm/webExplore.cjs), and the explore page paged
+// the reader of the web client's pages (sources/ytm/main/webExplore.cjs), and the explore page paged
 // over its answers. The fixtures (ytmWebExploreFixtures.json) are cut from the answers the web
 // client gave a guest on 2026-10-08: a few entries a shelf, without menus, play overlays and
 // tracking parameters; the home feed's token is made up. A guest is shown no artist's card, no
 // mix and no podcast episode's row: those are a guest's card led somewhere else, with made-up ids.
 
-const request = vi.hoisted(() => vi.fn());
-vi.mock('@/services/onlineMusic/ytm/ytmTransport', () => ({
-    requestYtm: request, getYtmTransportAvailability: () => ({ configured: true }),
-}));
-import { ytmExplore } from '@/services/onlineMusic/ytm/ytmExplore';
-import { resetYtmRecommendations, ytmRecommendations } from '@/services/onlineMusic/ytm/ytmRecommendations';
+import { resetYtmRecommendations } from '../../../sources/ytm/client/ytmRecommendations';
 import i18n from '@/i18n/config';
+import { answerYtmRequests, lazyYtmProvider } from '../helpers/ytmSource';
+// @builtin-sources
+
+// Through the registered source mod; its requests to the main entry are answered here.
+const { request } = answerYtmRequests();
+const ytmProvider = lazyYtmProvider();
+const ytmExplore = { getFeed: (cursor?: string) => ytmProvider.explore!.getFeed(cursor) };
+const ytmRecommendations = { getRecommendedCollections: (limit: number) => ytmProvider.recommendations!.getRecommendedCollections!(limit) };
 
 const require = createRequire(import.meta.url);
-const { createWebExplore, exploreItemFromEntry, readWebShelves } = require('../../../electron/ytm/webExplore.cjs');
-const { ytmError } = require('../../../electron/ytm/errors.cjs');
+const { createWebExplore, exploreItemFromEntry, readWebShelves } = require('../../../sources/ytm/main/webExplore.cjs');
+const { ytmError } = require('../../../sources/ytm/main/errors.cjs');
 const fixtures = require('./ytmWebExploreFixtures.json');
 
 const shelvesOf = (answer: any) => (
@@ -53,16 +56,17 @@ describe('YouTube Music web pages', () => {
     });
 
     it('reads a video as a song with its still for a wide picture, in a row and on a card', () => {
-        // A row: no album, and the views after the artist are no artist.
+        // A row: no album, and the views after the artist are no artist. Both are official music
+        // videos, which the bridge shows as their songs where it can (asShown).
         expect(exploreItemFromEntry(entry(fixtures.explore, 3, 1))).toEqual({
             kind: 'song',
-            song: { id: '1yBjFEpG3xQ', name: '要去什麼地方', artists: [{ id: 'UCGkj4uoWx_1BA2tF9Q-9Y6w', name: 'Hebe 田馥甄' }], album: { id: '', name: '', coverUrl: still('1yBjFEpG3xQ', 'hqdefault') }, durationMs: 0 },
+            song: { id: '1yBjFEpG3xQ', name: '要去什麼地方', artists: [{ id: 'UCGkj4uoWx_1BA2tF9Q-9Y6w', name: 'Hebe 田馥甄' }], album: { id: '', name: '', coverUrl: still('1yBjFEpG3xQ', 'hqdefault') }, durationMs: 0, video: true, officialVideo: true },
             wideCoverUrl: still('1yBjFEpG3xQ', 'hqdefault'),
         });
         // A card: the larger of its two stills. Its uploader's channel is no artist's page: a name alone.
         expect(exploreItemFromEntry(entry(fixtures.explore, 4, 0))).toEqual({
             kind: 'song',
-            song: { id: '0lXbg9H42jc', name: 'No Era Para Mí | FireVolk', artists: [{ id: '', name: 'FireVolk' }], album: { id: '', name: '', coverUrl: still('0lXbg9H42jc', 'hq720') }, durationMs: 0 },
+            song: { id: '0lXbg9H42jc', name: 'No Era Para Mí | FireVolk', artists: [{ id: '', name: 'FireVolk' }], album: { id: '', name: '', coverUrl: still('0lXbg9H42jc', 'hq720') }, durationMs: 0, video: true, officialVideo: true },
             wideCoverUrl: still('0lXbg9H42jc', 'hq720'),
         });
         // Of two artists the line names, the one without a link is not read.
@@ -235,7 +239,10 @@ describe('YouTube Music explore page over the web client\'s answers', () => {
         const [, seed] = asked('mix')[0] as [string, { id: string; videoId: string }];
         expect(['hlmE_MrxmE4', '35xRyC7JwqA']).toContain(seed.videoId);
         expect(seed.id).toBe(`RDAMVM${seed.videoId}`);
-        expect(titlesOf(second)).toEqual([i18n.t('home.exploreSimilar', { name: `song ${seed.videoId}` }), '新曲上线', '为你推荐的精选播放列表']);
+        expect(titlesOf(second)).toEqual([i18n.t('folium-mod/ytm:exploreSimilar', { name: `song ${seed.videoId}` }), '新曲上线', '为你推荐的精选播放列表']);
+        // (The heading is the mod's own text, "Similar to …" in the app's language, not its key.)
+        expect(titlesOf(second)[0]).not.toContain('exploreSimilar');
+        expect(titlesOf(second)[0]).toContain(`song ${seed.videoId}`);
         expect(second.sections[0].items).toHaveLength(12);
         expect(second.nextCursor).toMatch(/^\d+:FEmusic_explore$/);
 

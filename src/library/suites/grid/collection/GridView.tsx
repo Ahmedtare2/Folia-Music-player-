@@ -1,14 +1,16 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useWindowButtonsAtTopLeft } from '../../../../hooks/useWindowButtonsAtTopLeft';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { motion, useMotionValue, animate, AnimatePresence, useDragControls, useIsPresent } from 'framer-motion';
-import { ChevronLeft, Crosshair, Disc, Download, Play, Plus, Loader2, Heart, ListPlus, Pencil, RefreshCw, Trash2, Star, Tags } from 'lucide-react';
+import { ChevronLeft, Crosshair, Disc, Download, ImagePlus, Play, Plus, Shuffle, Loader2, Heart, ListOrdered, ListPlus, NotebookPen, Pencil, RefreshCw, Trash2, Star, Tags } from 'lucide-react';
 import GridPanelToggleIndicator from '../shared/GridPanelToggleIndicator';
 import { useTranslation } from 'react-i18next';
 import { SongResult, type LocalSong, type StatusMessage, Theme, type UnifiedSong } from '../../../../types';
-import { isSongUnavailable } from '../../../../services/onlineMusic/songAvailability';
+import { getTrackSourceKey, getTrackSourceLabel, getTrackSwappedFromLabel, getTrackUnplayableLabel, TRACK_SWAPPED_MARK, isTrackShownUnplayable, readTrackSourcesVersion, subscribeTrackSources, trackSourceHue } from '../../../../services/foliaPlaylist/trackSourceState';
 import { formatSongName } from '../../../../utils/songNameFormatter';
 import { getSizedCoverUrl } from '../../../../utils/coverUrl';
 import { getSongCoverUrl } from '../../../../services/onlineMusic/songMetadata';
-import { colorWithAlpha } from '../../../../components/visualizer/colorMix';
+import { resolveCollectionArtistCatalogId } from '../../../../services/onlineMusic/catalogRefs';
+import { colorWithAlpha } from '../../../../utils/colorMix';
 import { onlineFailureOf, type OnlineFailure } from '../../../../services/onlineMusic/failure/onlineFailureCase';
 import { onlineFailureMessage } from '../../../../services/onlineMusic/failure/onlineFailureTexts';
 import { getPlaybackSongKey } from '../../../../utils/appPlaybackGuards';
@@ -56,10 +58,10 @@ import {
 import PlaylistSelectionDialog from '../../../../components/shared/PlaylistSelectionDialog';
 import TextInputDialog from '../../../../components/shared/TextInputDialog';
 import ConfirmDialog from '../../../../components/shared/ConfirmDialog';
+import GridDailyRecommendationControls from './GridDailyRecommendationControls';
 import { SidePanelList, TrackListItem } from '../../../../components/shared/SidePanelList';
 import { GridListSearchButton } from '../../../../components/shared/GridListSearchButton';
 import { LocalTrackSortDirectionButton, LocalTrackSortMenu } from '../../../../components/shared/LocalTrackSortMenu';
-import { CustomSelect } from '../../../../components/shared/CustomSelect';
 import { deriveProgressiveLoadingState } from '../shared/progressiveGrid';
 import { useProgressiveItemEntrance } from '../shared/useProgressiveItemEntrance';
 import { useLocalCoverPreloader } from '../../../../hooks/useLocalCoverPreloader';
@@ -70,6 +72,7 @@ import { useGridSurfaceRegistration } from '../../../../hooks/useGridSurfaceRegi
 import type { CollectionResource } from '../../../core/shared/resource.contract';
 import type { CollectionMutationController, LibraryMutationResult } from '../../../core/collection/mutations/mutations.contract';
 import type { LibraryDeclaredActions } from '../../../core/suite/suite.contract';
+import type { LibraryCollectOrigin } from '../../../core/shared/ports.contract';
 import { useSidePanelBottomPx } from '../../../../hooks/usePlayerBottomBarBottomPx';
 import { hasBlockingWindow } from '../../../../utils/keyboardTargets';
 import { useGridViewSettingsStore } from '../../../../stores/useGridViewSettingsStore';
@@ -78,6 +81,7 @@ import { useCollectionResourceState } from '../../../core/collection/resource/us
 import { useCollectionMutationSnapshot } from '../../../core/collection/mutations/useCollectionMutations';
 import { useCollectionView } from '../../../core/collection/useCollectionView';
 import { useCommittedQuery } from '../../../core/shared/useCommittedQuery';
+import { resolveCollectionArtistLinks } from '../../../core/shared/collectionArtistLinks';
 import { useLibrarySessionQuery } from '../../../core/shared/useLibrarySessionQuery';
 import { useGridCommandFilter } from '../../../../hooks/useGridCommandFilter';
 import {
@@ -86,6 +90,7 @@ import {
     useLibraryBrowseSessionStore,
 } from '../../../core/shared/useLibraryBrowseSessionStore';
 import { useLocalTrackSortStore } from '../../../core/directory/useLocalTrackSortStore';
+import { formatAlbumDuration } from '../../../core/collection/albumDuration';
 
 interface GridViewProps {
     title: string;
@@ -107,7 +112,16 @@ interface GridViewProps {
     // Optional self-contained collection props
     collection?: any;
     onPlayAll?: (songs: SongResult[]) => void;
+    /** 随机播放当前范围（声明了 shuffle-scope 才给）：给了，信息面板的「播放全部」切成两半，右边一格是它。 */
+    onShufflePlayAll?: (songs: SongResult[]) => void;
     onAddAllToQueue?: (songs: SongResult[], options?: { suppressToast?: boolean }) => number | void;
+    /** 收进速记簿：聚焦卡片与曲目侧栏行上的一首（suite 声明了 collect 才给）。出处由这里按显示的集合名补上。 */
+    collectTrack?: (songs: SongResult[], origin?: LibraryCollectOrigin) => void;
+    /** 收进速记簿：信息面板与命令面板的当前范围（声明了 collect-scope 才给）。 */
+    collectScope?: (songs: SongResult[], origin?: LibraryCollectOrigin) => void;
+    /** 卡片上悬浮的「收藏到歌单」：应用的歌单选择器（声明了 save-to-playlist 才给），能不能给某首由 canSaveToPlaylist 说。 */
+    saveToPlaylist?: (songs: SongResult[]) => void;
+    canSaveToPlaylist?: (track: SongResult) => boolean;
     onSelectAlbum?: (albumId: number | string, album?: any, track?: SongResult) => void;
     onSelectArtist?: (artistId: number | string, artist?: any, track?: SongResult) => void;
     /**
@@ -233,18 +247,6 @@ const formatAlbumDate = (timestamp?: number) => {
     return date.toLocaleDateString();
 };
 
-const formatAlbumDuration = (duration?: number) => {
-    if (!duration || !Number.isFinite(duration)) return '';
-    const totalSeconds = duration > 10000 ? Math.round(duration / 1000) : Math.round(duration);
-    const hours = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    const seconds = totalSeconds % 60;
-    if (hours > 0) {
-        return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
-    }
-    return `${minutes}:${String(seconds).padStart(2, '0')}`;
-};
-
 export const GridView: React.FC<GridViewProps> = ({
     title,
     subtitle,
@@ -261,7 +263,12 @@ export const GridView: React.FC<GridViewProps> = ({
     isDaylight,
     collection,
     onPlayAll,
+    onShufflePlayAll,
     onAddAllToQueue,
+    collectTrack,
+    collectScope,
+    saveToPlaylist,
+    canSaveToPlaylist,
     onSelectAlbum,
     onSelectArtist,
     resource = null,
@@ -274,6 +281,7 @@ export const GridView: React.FC<GridViewProps> = ({
     declaredActions,
 }) => {
     const { t } = useTranslation();
+    const lowerBackButton = useWindowButtonsAtTopLeft();
     const bottomBarPanelBottomPx = useSidePanelBottomPx();
     const fullBleedCover = useGridViewSettingsStore(state => state.gridViewFullBleedCover);
     // Only the full-bleed layout can be square: the polaroid frame needs the extra height for the
@@ -463,6 +471,8 @@ export const GridView: React.FC<GridViewProps> = ({
     const [isPlaylistPickerOpen, setIsPlaylistPickerOpen] = useState(false);
     const [isCreatePlaylistOpen, setIsCreatePlaylistOpen] = useState(false);
     const [isDeleteFolderOpen, setIsDeleteFolderOpen] = useState(false);
+    // 删歌单（Folia 歌单、Navidrome 歌单）也先问一句：删了找不回来。
+    const [isDeletePlaylistOpen, setIsDeletePlaylistOpen] = useState(false);
     const [showCutInPanel, setShowCutInPanel] = useState(false);
     const [showSidePanel, setShowSidePanel] = useState(false);
     // 退场动画期间旧网格仍挂着：只有在场的那一个接键盘、筛选框和命令面板，
@@ -514,6 +524,10 @@ export const GridView: React.FC<GridViewProps> = ({
 
     const collectionSource = collection?.source as string | undefined;
     const isLocalCollection = collectionSource === 'local';
+    // Folia 聚合歌单（本地集合里带 playlistId 的那种）混着各个来源的歌：每行标出来源。
+    // 卡片记着上一次的属性不重画：来源的状态变了，靠这个版本号让它们跟上。
+    const sourcesVersion = useSyncExternalStore(subscribeTrackSources, readTrackSourcesVersion);
+    const showTrackSource = isLocalCollection && Boolean((collection as { playlistId?: string } | null)?.playlistId);
     const isNavidromeCollection = collectionSource === 'navidrome';
     const isAlbumCollection = collection?.type === 'album';
     const isDailyRecommendationsCollection = collectionSource === 'online' && collection?.type === 'daily_recommendations';
@@ -536,6 +550,17 @@ export const GridView: React.FC<GridViewProps> = ({
     } = mutationBranches;
     // 改名成功、宿主的描述还没跟上时，显示控制器记下的新名字（不改描述本身，它可能是导航栈里共用的对象）。
     const collectionName: string | undefined = mutationSnapshot.renamedTo ?? collection?.name;
+    // 收进速记簿时记下的出处：和标题一样用改名后的名字。身份稳定：onCollectTrack 在卡片渲染的依赖里。
+    const onCollectTrack = useMemo(() => {
+        if (!collectTrack) return undefined;
+        const origin = collectionName ? { label: collectionName } : undefined;
+        return (track: SongResult) => collectTrack([track], origin);
+    }, [collectTrack, collectionName]);
+    const onCollectAll = useMemo(() => {
+        if (!collectScope) return undefined;
+        const origin = collectionName ? { label: collectionName } : undefined;
+        return (songs: SongResult[]) => collectScope(songs, origin);
+    }, [collectScope, collectionName]);
     const localSongsById = useMemo(() => new Map(localSongs?.map(song => [song.id, song])), [localSongs]);
     // 只有能选专辑号排序的本地列表才挂轨道号；本地歌单等自定义顺序的列表不属于这个语境。
     const getAlbumTrackLabel = useCallback((track: SongResult): string | null => {
@@ -607,7 +632,7 @@ export const GridView: React.FC<GridViewProps> = ({
         title,
     ]);
 
-    // 删除成功才返回上一层（文件夹先经确认对话框）。
+    // 删除成功才返回上一层（文件夹、歌单都先经确认对话框）。
     const handleDeleteSourceCollection = useCallback(async () => {
         const result = await mutations?.deleteCollection();
         if (result?.ok) onBack();
@@ -618,6 +643,7 @@ export const GridView: React.FC<GridViewProps> = ({
     const handleExportLocalPlaylist = useCallback(() => void mutations?.exportPlaylist(), [mutations]);
     const handleOrganizeSongInfo = useCallback(() => void mutations?.organizeSongInfo(), [mutations]);
     const handleEditEntity = useCallback(() => void mutations?.editEntity(), [mutations]);
+    const handleSetCover = useCallback(() => void mutations?.setCover(), [mutations]);
 
     const handleAddNavidromeCollectionToPlaylist = useCallback(async (playlistId: string | number) => {
         await mutations?.addToPlaylist(playlistId, playableTracks);
@@ -659,13 +685,7 @@ export const GridView: React.FC<GridViewProps> = ({
         }
     };
 
-    // Switches the virtual playlist between today's recommendations and a supported history date.
-    const handleDailyRecommendationDateChange = useCallback(async (date: string, afresh = false) => {
-        if (!mutations || !mutationCapabilities.dailyDate.supported) return;
-        setIsEditMode(false);
-        // 整表替换经控制器交给资源（加载中状态、作废晚到结果都在那里）；失败时保持原样，日期也不切。
-        await mutations.setDailyDate(date, { afresh });
-    }, [mutationCapabilities.dailyDate.supported, mutations]);
+    const exitEditMode = useCallback(() => setIsEditMode(false), []);
 
     // 删一个条目（每日推荐是「不喜欢并换一首」）：先按住展示，控制器在上游确认后立即提交给资源；成功就给卡片
     // 打上 removing 播退出动画，动画结束再放开展示，失败立即放开。entryKey 就是卡片 id：重复序号在完整的
@@ -1191,6 +1211,10 @@ export const GridView: React.FC<GridViewProps> = ({
                                 cardWidth={layoutConfig.cardWidth}
                                 cardHeight={layoutConfig.cardHeight}
                                 fullBleedCover={fullBleedCover}
+                                sourceLabel={showTrackSource && item.rawTrack ? getTrackSourceLabel(item.rawTrack, t) : undefined}
+                                swappedFromLabel={showTrackSource && item.rawTrack ? getTrackSwappedFromLabel(item.rawTrack, t) || undefined : undefined}
+                                sourceHue={showTrackSource && item.rawTrack ? trackSourceHue(getTrackSourceKey(item.rawTrack)) : undefined}
+                                sourcesVersion={sourcesVersion}
                                 isEditMode={isEditMode}
                                 onRemoveTrack={isRemovingTrack ? undefined : () => {
                                     if (item.rawTrack) void handleRemoveTrack(item.rawTrack, trackKey);
@@ -1223,6 +1247,13 @@ export const GridView: React.FC<GridViewProps> = ({
                                         onAddTrackToQueue(item.rawTrack);
                                     }
                                 }}
+                                // 封面右上角悬浮才出现的两颗（每张歌曲卡片都有，平时看不见）。
+                                onCollect={mode === 'tracks' && onCollectTrack && item.rawTrack
+                                    ? () => onCollectTrack(item.rawTrack!)
+                                    : undefined}
+                                onSaveToPlaylist={mode === 'tracks' && saveToPlaylist && item.rawTrack && canSaveToPlaylist?.(item.rawTrack)
+                                    ? () => saveToPlaylist([item.rawTrack!])
+                                    : undefined}
                                 isFocused={idx === focusedIndex}
                                 playbackMark={mode === 'tracks' ? trackPlaybackMark?.(item.rawTrack) ?? null : null}
                             />
@@ -1263,6 +1294,9 @@ export const GridView: React.FC<GridViewProps> = ({
         onSelectArtist,
         onSelectAlbum,
         onAddTrackToQueue,
+        onCollectTrack,
+        saveToPlaylist,
+        canSaveToPlaylist,
         trackPlaybackMark,
         canMatchSong,
         mutations,
@@ -1364,6 +1398,7 @@ export const GridView: React.FC<GridViewProps> = ({
                     || isPlaylistPickerOpen
                     || isCreatePlaylistOpen
                     || isDeleteFolderOpen
+                    || isDeletePlaylistOpen
                 ) return;
 
                 const focusedItem = gridItems[focusedIndex];
@@ -1423,6 +1458,7 @@ export const GridView: React.FC<GridViewProps> = ({
         gridItems,
         isCreatePlaylistOpen,
         isDeleteFolderOpen,
+        isDeletePlaylistOpen,
         isEditMode,
         isActive,
         isPlaylistPickerOpen,
@@ -1491,7 +1527,8 @@ export const GridView: React.FC<GridViewProps> = ({
     // the background; a read that failed (the first page, a page of the background fill, or a
     // Navidrome read) brings nothing more and leaves the list short of what it did not reach. The
     // snapshot says both in one update with the tracks they speak of.
-    const hasReadFailed = Boolean(loadError || backgroundLoadError);
+    // 重读失败但手上还是上次整张读完的那份（resource 的 tracksWhole）：列表是全的，不算「没读全」。
+    const hasReadFailed = Boolean((loadError && !resourceSnapshot?.tracksWhole) || backgroundLoadError);
     const cardsStillArriving = isLoading || loading || backgroundLoading;
     const pageKey = navigationKey ?? collectionKey(collection);
     const isLocateAsked = locateRequest !== null && mode === 'tracks' && locateRequest.collectionKey === pageKey;
@@ -1564,7 +1601,9 @@ export const GridView: React.FC<GridViewProps> = ({
         setSortDirection: handleLocalTrackSortDirectionChange,
         canReloadOnlineCollection: canReloadOnlineCollection && !loading,
         playFiltered: () => onPlayAll?.(contextActionTracks),
+        shufflePlayFiltered: onShufflePlayAll ? () => onShufflePlayAll(contextActionTracks) : undefined,
         enqueueFiltered: () => onAddAllToQueue?.(contextActionTracks),
+        collectFiltered: onCollectAll ? () => onCollectAll(contextActionTracks) : undefined,
         reloadOnlineCollection,
         mutationSnapshot,
         mutations: mutations ?? null,
@@ -1585,7 +1624,10 @@ export const GridView: React.FC<GridViewProps> = ({
         run: (action) => runGridSurfaceAction(action, gridSurfaceParams),
     });
 
-    const albumArtists = Array.isArray(infoCollection?.artists) ? infoCollection.artists : [];
+    // 专辑歌手：能打开的才做成按钮（与 Bravais 专辑海报同一条规则，在线的问平台，占位 id 不当真）。
+    const albumArtists = infoCollection && Array.isArray(infoCollection.artists)
+        ? resolveCollectionArtistLinks(infoCollection, resolveCollectionArtistCatalogId)
+        : [];
     const albumAlias = infoCollection?.aliases?.[0];
     const albumPublishedAt = infoCollection?.publishedAt;
     const albumPublisher = infoCollection?.publisher;
@@ -1625,7 +1667,7 @@ export const GridView: React.FC<GridViewProps> = ({
                 // 返回按钮表示看完了（onDone）：宿主清掉浏览会话、让每套 suite 忘掉布局记录（网格的 sessionStorage
                 // 记录经 entry 的 layout.forget），再返回。Escape 与浏览器后退保留（onBack）。P4.5 起不在这里清。
                 onClick={onDone}
-                className="absolute left-6 top-5 w-10 h-10 rounded-full flex items-center justify-center transition-all shadow-lg hover:scale-105 active:scale-95 z-[70]"
+                className={`absolute left-6 ${lowerBackButton ? 'top-12' : 'top-5'} w-10 h-10 rounded-full flex items-center justify-center transition-all shadow-lg hover:scale-105 active:scale-95 z-[70]`}
                 style={{
                     backgroundColor: isDaylight ? 'rgba(0,0,0,0.05)' : 'rgba(255,255,255,0.08)',
                     backdropFilter: 'blur(8px)',
@@ -1908,37 +1950,15 @@ export const GridView: React.FC<GridViewProps> = ({
                                         {infoCollection?.playCount !== undefined && <span> • {infoCollection.playCount} {t('playlist.plays')}</span>}
                                     </div>
                                     {isDailyRecommendationsCollection && (
-                                        <div className="mt-3 space-y-2">
-                                            <div className="flex items-center gap-2">
-                                                {mutationSnapshot.dailyHistoryAvailable && (
-                                                    <div className="min-w-0 flex-1">
-                                                        <CustomSelect
-                                                            value={mutationSnapshot.dailyDate}
-                                                            onChange={date => void handleDailyRecommendationDateChange(date)}
-                                                            options={[
-                                                                { value: '', label: t('home.todayRecommendations') },
-                                                                ...mutationSnapshot.dailyHistoryDates.map(date => ({ value: date, label: date })),
-                                                            ]}
-                                                            placeholder={t('home.todayRecommendations')}
-                                                            ariaLabel={t('home.recommendationDate')}
-                                                            disabled={loading}
-                                                            isDaylight={isDaylight}
-                                                            theme={theme}
-                                                        />
-                                                    </div>
-                                                )}
-                                                <button
-                                                    type="button"
-                                                    onClick={() => void handleDailyRecommendationDateChange('', true)}
-                                                    disabled={loading || Boolean(mutationSnapshot.dailyDate)}
-                                                    title={t('home.refreshRecommendations')}
-                                                    aria-label={t('home.refreshRecommendations')}
-                                                    className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-white/10 bg-white/5 transition-colors hover:bg-white/10 disabled:opacity-30"
-                                                >
-                                                    <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
-                                                </button>
-                                            </div>
-                                        </div>
+                                        <GridDailyRecommendationControls
+                                            mutations={mutations}
+                                            snapshot={mutationSnapshot}
+                                            loading={loading}
+                                            isDaylight={isDaylight}
+                                            theme={theme}
+                                            onBeforeSwitch={exitEditMode}
+                                            onStatusMessage={onStatusMessage}
+                                        />
                                     )}
                                     {isAlbumCollection && (
                                         <div className="mt-3 space-y-1.5 text-xs opacity-60" style={{ color: 'var(--text-secondary)' }}>
@@ -1947,15 +1967,19 @@ export const GridView: React.FC<GridViewProps> = ({
                                             )}
                                             {albumArtists.length > 0 ? (
                                                 <div className="flex flex-wrap gap-x-2 gap-y-1">
-                                                    {albumArtists.map((artist: { id: string | number; name: string }, index: number) => (
-                                                        <button
-                                                            key={`${artist.id}-${index}`}
-                                                            type="button"
-                                                            onClick={() => onSelectArtist?.(artist.id, artist)}
-                                                            className="font-semibold hover:underline"
-                                                        >
-                                                            {artist.name}
-                                                        </button>
+                                                    {albumArtists.map(({ artist, targetId }, index) => (
+                                                        targetId !== undefined && onSelectArtist ? (
+                                                            <button
+                                                                key={`${artist.id}-${index}`}
+                                                                type="button"
+                                                                onClick={() => onSelectArtist(targetId, artist)}
+                                                                className="font-semibold hover:underline"
+                                                            >
+                                                                {artist.name}
+                                                            </button>
+                                                        ) : (
+                                                            <span key={`${artist.id}-${index}`} className="font-semibold">{artist.name}</span>
+                                                        )
                                                     ))}
                                                 </div>
                                             ) : null}
@@ -1996,21 +2020,44 @@ export const GridView: React.FC<GridViewProps> = ({
                                 className="space-y-2 mt-4 pt-4 border-t shrink-0"
                                 style={{ borderTopColor: 'color-mix(in srgb, var(--text-primary) 12%, transparent)' }}
                             >
-                                <button
-                                    onClick={() => {
-                                        if (onPlayAll && contextActionTracks.length > 0) {
-                                            onPlayAll(contextActionTracks);
-                                        }
-                                    }}
-                                    disabled={contextActionTracks.length === 0}
-                                    className="w-full py-3 rounded-full font-bold text-xs transition-transform hover:scale-102 active:scale-98 flex items-center justify-center gap-1.5 shadow-md disabled:opacity-40 disabled:hover:scale-100 cursor-pointer"
+                                {/* 「播放全部」：声明了随机播放时切成两半，右边一格随机播放（当前范围打乱后成为队列）。 */}
+                                <div
+                                    role={onShufflePlayAll ? 'group' : undefined}
+                                    aria-label={onShufflePlayAll ? t('playlist.playAll') : undefined}
+                                    className={`w-full flex rounded-full shadow-md transition-transform overflow-hidden${contextActionTracks.length > 0 ? ' hover:scale-102 active:scale-98' : ' opacity-40'}`}
                                     style={{ backgroundColor: 'var(--text-primary)', color: 'var(--bg-color)' }}
                                 >
-                                    <Play size={14} fill="currentColor" />
-                                    {hasSearchQuery
-                                        ? t('playlist.playFilteredTracks', { count: contextActionTracks.length })
-                                        : t('playlist.playAll')}
-                                </button>
+                                    <button
+                                        onClick={() => {
+                                            if (onPlayAll && contextActionTracks.length > 0) {
+                                                onPlayAll(contextActionTracks);
+                                            }
+                                        }}
+                                        disabled={contextActionTracks.length === 0}
+                                        data-grid-action="play-scope"
+                                        className="flex-1 min-w-0 py-3 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer disabled:cursor-default"
+                                    >
+                                        <Play size={14} fill="currentColor" />
+                                        {hasSearchQuery
+                                            ? t('playlist.playFilteredTracks', { count: contextActionTracks.length })
+                                            : t('playlist.playAll')}
+                                    </button>
+                                    {onShufflePlayAll && (
+                                        <button
+                                            onClick={() => {
+                                                if (contextActionTracks.length > 0) onShufflePlayAll(contextActionTracks);
+                                            }}
+                                            disabled={contextActionTracks.length === 0}
+                                            data-grid-action="shuffle-scope"
+                                            aria-label={t('playlist.shufflePlay')}
+                                            title={t('playlist.shufflePlay')}
+                                            className="shrink-0 px-4 flex items-center justify-center border-l cursor-pointer disabled:cursor-default"
+                                            style={{ borderLeftColor: 'color-mix(in srgb, var(--bg-color) 30%, transparent)' }}
+                                        >
+                                            <Shuffle size={14} />
+                                        </button>
+                                    )}
+                                </div>
                                 <button
                                     onClick={() => {
                                         if (onAddAllToQueue && contextActionTracks.length > 0) {
@@ -2025,6 +2072,41 @@ export const GridView: React.FC<GridViewProps> = ({
                                         ? t('playlist.addFilteredTracksToQueue', { count: contextActionTracks.length })
                                         : t('navidrome.addToQueue')}
                                 </button>
+                                {onCollectAll && (
+                                    <button
+                                        onClick={() => {
+                                            if (contextActionTracks.length > 0) onCollectAll(contextActionTracks);
+                                        }}
+                                        disabled={contextActionTracks.length === 0}
+                                        data-grid-action="collect-scope"
+                                        className="w-full py-2.5 rounded-full text-xs font-semibold bg-zinc-800/10 dark:bg-zinc-100/10 hover:bg-zinc-900 hover:text-zinc-100 dark:hover:bg-zinc-100 dark:hover:text-zinc-900 transition-all flex items-center justify-center gap-1.5 disabled:opacity-40 cursor-pointer"
+                                    >
+                                        <NotebookPen size={14} />
+                                        {hasSearchQuery
+                                            ? t('scratchpad.collectFiltered', { count: contextActionTracks.length })
+                                            : t('scratchpad.collectScope')}
+                                    </button>
+                                )}
+                                {mutationCapabilities.saveToFolia.supported && (
+                                    <button
+                                        onClick={() => void mutations?.saveToFolia()}
+                                        data-grid-action="save-to-folia"
+                                        className="w-full py-2.5 rounded-full text-xs font-semibold bg-zinc-800/10 dark:bg-zinc-100/10 hover:bg-zinc-900 hover:text-zinc-100 dark:hover:bg-zinc-100 dark:hover:text-zinc-900 transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                                    >
+                                        <ListPlus size={14} />
+                                        {t('foliaTransfer.saveAction')}
+                                    </button>
+                                )}
+                                {mutationCapabilities.refreshFromOrigin.supported && (
+                                    <button
+                                        onClick={() => void mutations?.refreshFromOrigin()}
+                                        data-grid-action="refresh-from-origin"
+                                        className="w-full py-2.5 rounded-full text-xs font-semibold bg-zinc-800/10 dark:bg-zinc-100/10 hover:bg-zinc-900 hover:text-zinc-100 dark:hover:bg-zinc-100 dark:hover:text-zinc-900 transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                                    >
+                                        <RefreshCw size={14} />
+                                        {t('foliaTransfer.refreshAction')}
+                                    </button>
+                                )}
                                 {canAddNavidromeToPlaylist && (
                                     <button
                                         onClick={() => setIsPlaylistPickerOpen(true)}
@@ -2088,6 +2170,15 @@ export const GridView: React.FC<GridViewProps> = ({
                                             : (isEditMode ? t('localMusic.finishEditing') : t('localMusic.editPlaylist'))}
                                     </button>
                                 )}
+                                {mutationCapabilities.reorderPlaylist.supported && (
+                                    <button
+                                        onClick={() => void mutations?.reorderPlaylist()}
+                                        className="w-full py-2.5 rounded-full text-xs font-semibold bg-zinc-800/10 dark:bg-zinc-100/10 hover:bg-zinc-900 hover:text-zinc-100 dark:hover:bg-zinc-100 dark:hover:text-zinc-900 transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                                    >
+                                        <ListOrdered size={14} />
+                                        {t('localPlaylistOrder.edit')}
+                                    </button>
+                                )}
                                 {mutationCapabilities.exportPlaylist.supported && (
                                     <button
                                         onClick={handleExportLocalPlaylist}
@@ -2111,9 +2202,18 @@ export const GridView: React.FC<GridViewProps> = ({
                                         })}
                                     </button>
                                 )}
+                                {mutationCapabilities.setCover.supported && (
+                                    <button
+                                        onClick={handleSetCover}
+                                        className="w-full py-2.5 rounded-full text-xs font-semibold bg-zinc-800/10 dark:bg-zinc-100/10 hover:bg-zinc-900 hover:text-zinc-100 dark:hover:bg-zinc-100 dark:hover:text-zinc-900 transition-all flex items-center justify-center gap-1.5 cursor-pointer"
+                                    >
+                                        <ImagePlus size={14} />
+                                        {t('localCollectionCover.menuLabel')}
+                                    </button>
+                                )}
                                 {mutationCapabilities.deleteCollection.supported && (
                                     <button
-                                        onClick={() => isLocalFolderCollection ? setIsDeleteFolderOpen(true) : void handleDeleteSourceCollection()}
+                                        onClick={() => (isLocalFolderCollection ? setIsDeleteFolderOpen(true) : setIsDeletePlaylistOpen(true))}
                                         disabled={isSourceActionPending}
                                         className="w-full py-2.5 rounded-full text-xs font-semibold transition-all flex items-center justify-center gap-1.5 cursor-pointer bg-red-500/10 text-red-500 border border-red-500/25 hover:bg-red-500/20 disabled:opacity-40"
                                     >
@@ -2164,6 +2264,19 @@ export const GridView: React.FC<GridViewProps> = ({
                     void handleDeleteSourceCollection();
                 }}
                 onClose={() => setIsDeleteFolderOpen(false)}
+                isDaylight={isDaylight}
+            />
+            <ConfirmDialog
+                isOpen={isDeletePlaylistOpen}
+                title={t('libraryTui.confirmDelete', { name: title })}
+                description={t('localMusic.deletePlaylistMessage')}
+                confirmText={t('localMusic.deletePlaylist')}
+                confirmVariant="danger"
+                onConfirm={() => {
+                    setIsDeletePlaylistOpen(false);
+                    void handleDeleteSourceCollection();
+                }}
+                onClose={() => setIsDeletePlaylistOpen(false)}
                 isDaylight={isDaylight}
             />
 
@@ -2235,7 +2348,10 @@ export const GridView: React.FC<GridViewProps> = ({
                             track={track}
                             index={index}
                             style={style}
-                            isUnavailable={isSongUnavailable(track)}
+                            isUnavailable={isTrackShownUnplayable(track)}
+                            // 列表里一行只有一串字：换过来源的在来源后面带同一个记号（悬停说明在卡片上）。
+                            sourceLabel={showTrackSource ? `${getTrackSourceLabel(track, t)}${getTrackSwappedFromLabel(track, t) ? ` ${TRACK_SWAPPED_MARK}` : ''}` : undefined}
+                            unavailableLabel={getTrackUnplayableLabel(track, t, t('status.songUnavailableTag'))}
                             isActive={index === listFocusedIndex}
                             albumTrackLabel={getAlbumTrackLabel(track)}
                             onPlay={() => {
@@ -2244,6 +2360,7 @@ export const GridView: React.FC<GridViewProps> = ({
                             onAddToQueue={onAddTrackToQueue ? () => {
                                 onAddTrackToQueue(track);
                             } : undefined}
+                            onCollect={onCollectTrack ? () => onCollectTrack(track) : undefined}
                         />
                     )}
                 />

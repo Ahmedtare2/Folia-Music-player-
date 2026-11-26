@@ -7,7 +7,7 @@ import {
     resolveLocalCoverObjectUrl,
 } from '../../../../services/localCoverRuntime';
 import { isAppForegroundVisible, subscribeAppForegroundVisibility } from '../../../../utils/visualizerVisibilityGate';
-import { colorWithAlpha } from '../../colorMix';
+import { colorWithAlpha } from '../../../../utils/colorMix';
 import { getMonetBackgroundCacheKey, wantMonetBackgroundUrl, checkCanvasFilterSupport } from '../../monet/monetBackgroundPipeline';
 import { buildMonetDriftTrack } from './monetBackgroundDrift';
 import { useReducedMotionFor } from '../../../../hooks/useReducedMotionFor';

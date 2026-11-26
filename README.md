@@ -9,7 +9,7 @@
 
 Lyrics Reimagined // 辞曲新境
 
-[简体中文](README.md) | [English](README.en.md)
+简体中文 | [English](README.en.md)
 
 [![GitHub release](https://img.shields.io/github/v/release/chthollyphile/folia-major?label=release)](https://github.com/chthollyphile/folia-major/releases)
 [![License](https://img.shields.io/github/license/chthollyphile/folia-major)](https://github.com/chthollyphile/folia-major/blob/main/LICENSE)
@@ -33,7 +33,7 @@ Lyrics Reimagined // 辞曲新境
 
 ## 项目简介
 
-Folia是一个以全屏沉浸式歌词播放为核心的在线音乐播放器，支持网易云、酷狗、QQ 音乐、Navidrome 和本地音乐库，桌面端还支持波点音乐、YouTube Music 和 Spotify，通过智能歌词匹配，AI生成配色主题，以及多种全屏歌词动画为用户提供独特的听歌体验。
+Folia是一个以全屏沉浸式歌词播放为核心的在线音乐播放器，支持网易云、酷狗、QQ 音乐、Navidrome 和本地音乐库，桌面端还支持波点音乐、YouTube Music、Spotify 和汽水音乐，通过智能歌词匹配，AI生成配色主题，以及多种全屏歌词动画为用户提供独特的听歌体验。
 
 提供基于Electron的 windows/ macOS/ Linux 桌面端版本与基于 Node.js 的 Web 版本，支持多平台部署。
 
@@ -50,6 +50,13 @@ Folia是一个以全屏沉浸式歌词播放为核心的在线音乐播放器，
 ## 展示
 
 ![visualizer](./img/visualizer.png)
+
+### 在线体验（社区版）
+
+在浏览器里直接试用：[folia-ce.cn](https://folia-ce.cn/)
+
+> [!NOTE]
+> 这是社区部署的演示站，仅供体验，部署来源为 [folia-ce/folia-web](https://github.com/folia-ce/folia-web)。它包含社区作者自己的改动，与官方 Web 版并不完全一致；使用中遇到问题请反馈到该社区仓库。长期使用建议下载桌面版或自行部署。
 
 ### 演示视频
 
@@ -125,7 +132,7 @@ https://github.com/user-attachments/assets/704f195a-2194-434b-86e8-8f36290e5cc4
 | Now Playing 接入 | 支持通过本机 [Now Playing](https://github.com/Widdit/now-playing-service/) 服务接入外部播放器的歌曲、时间轴与歌词信息，并驱动 Folia 的舞台视图与全屏歌词渲染。 |
 | AI 主题生成 | 基于歌曲情绪与歌词内容生成沉浸式背景与视觉参数。 |
 | 多端体验 | 提供 Web 部署方式，同时支持桌面端打包分发。 |
-| 模组系统（实验性） | 桌面版可通过 Folium 模组添加歌词动画、背景、播放页图层、命令等，并从 [模组市场](https://folium-compound.cielaniska.top) 安装官方认证的模组。详见 [模组系统](#模组系统folium-v1x)。 |
+| 模组系统 | 桌面版可通过 Folium 模组添加歌词动画、背景、播放页图层、命令、音源等；模组市场就在「设置 → 模组」里，安装、更新、卸载都在应用内完成。详见 [模组系统](#模组系统folium-2)。 |
 
 ## 获取方式
 
@@ -155,15 +162,22 @@ Vercel 与 Cloudflare 上的 QQ 音乐不再需要额外部署一个常驻 API �
 > [!IMPORTANT]
 > 如果国内网络从 GitHub Releases 下载较慢，可以使用 [夸克网盘](https://pan.quark.cn/s/6e4c6fa3bc6f) 或 [百度云](https://pan.baidu.com/s/1f0x3g-8PMcNCO-TJ5z1rPw?pwd=flia) 下载。网盘链接仅提供 Windows 与 Apple silicon 的正式版安装包.
 
+> [!WARNING]
+> **装了卡巴斯基，Folia 打开后是黑窗口并弹出崩溃提示？**
+>
+> 卡巴斯基不认识没有代码签名的 `Folia.exe`，会把它放进受限制的组，由「系统监控」拦下页面进程。
+>
+> 解决办法：在卡巴斯基的「受信任的应用程序」里添加 `Folia.exe`，并勾选「不监控应用程序活动」，然后退出 Folia 再重新打开。只把信任组改成「受信任」不管用。详见 [#1346](https://github.com/chthollyphile/folia-major/issues/1346)。
+
 Linux 包、Wayland / Hyprland 遥控窗和桌面端细节见 [技术与开发说明](docs/technical.md)。
 
 ### 移动端与原生 Android 应用
 
 | 方式 | 说明 |
 | --- | --- |
-| **原生 Android APK（内置支持）** | 仓库内置基于 Capacitor 8 + AndroidX Media3 的离线优先原生 Android 工程（`android/`），支持 SAF 本地音乐目录持久化授权、后台与锁屏播放、系统媒体通知中心、完整 Folia 歌词视觉模式与阿拉伯语（Arabic RTL）连字排版。 |
-| **PWA（Web 部署）** | 部署 Web 版本或自托管版本后，在 Chrome for Android / iOS Safari 中将网页添加到主屏幕，即可作为 PWA 应用使用。 |
-| **社区移植版（Android）** | [maimai993/folia-sonnet](https://github.com/maimai993/folia-sonnet) · [whycfawa/folia-android](https://github.com/whycfawa/folia-android) |
+| **PWA（推荐）** | 部署 Web 版本或自托管版本后，在 Chrome for Android / iOS Safari 中将网页添加到主屏幕，即可作为 PWA 应用使用。 |
+| **社区移植版（Android）** | [folia-ce/folia-sonnet](https://github.com/folia-ce/folia-sonnet) · [whycfawa/folia-android](https://github.com/whycfawa/folia-android) |
+| **自行打包（Android）** | 有一定技术基础的用户可以用 Capacitor 将 Web 版本打包为可安装的 APK，参考示范仓库 [chthollyphile/folia-sonnet](https://github.com/chthollyphile/folia-sonnet)。 |
 
 #### Android 原生构建、权限与安装说明
 
@@ -214,14 +228,17 @@ Linux 包、Wayland / Hyprland 遥控窗和桌面端细节见 [技术与开发�
 
 部署、环境变量、本地开发、Stage API、常用脚本和技术栈见 [技术与开发说明](docs/technical.md)。
 
-## 模组系统（Folium v1.x）
+## 模组系统（Folium 2）
 
 > [!NOTE]
-> 模组系统是实验性功能，仅桌面版可用，默认关闭，需要在「设置 → 模组 → 模组系统」中开启。
+> 模组系统仅桌面版可用，Folium 2 起默认开启，但只装、只跑官方签名的音源模组；其它模组要先在「设置 → 模组」里打开「社区模组」。
 
 Folium 是 Folia 的模组平台。模组可以添加新的歌词动画模式和背景类型、在播放页上叠加内容、给进度条加按钮和标记、注册命令与设置分区、在歌词显示前改写歌词，也可以通过 Node 入口调用 ffmpeg 等本地能力。模组以可信代码运行，每个模组在启用前都要在原生窗口中确认，文件变化后需要重新确认。
 
-- **模组市场**：[folium-compound.cielaniska.top](https://folium-compound.cielaniska.top) 提供官方模组和经过审查的社区模组，下载 zip 后拖进模组面板即可安装。
+- **模组市场**：「设置 → 模组」把已安装的模组和 [模组市场](https://folium-compound.cielaniska.top) 合在一个视图里，可以按分类和关键词查找，一键安装、更新和卸载（卸载的文件夹进回收站）。也可以在网站上下载 zip，拖进模组页安装。
+- **反馈问题**：模组由各自的作者维护。模组出了问题，请在模组详情里点「反馈问题」，到作者的仓库反馈，不要提交到 Folia 的仓库。
+- **第三方音源与外部作品**：第三方音源模组、系统插件和外部程序不收进模组市场的仓库，以外部链接登记在 Awesome-Folia，同样能在应用里的模组市场找到。
+- **版本声明过期的模组**：清单里写了 `<0.8.0` 之类上界的模组在更新的 Folia 上不会自动加载，但仍能安装，可以在模组详情里手动「仍然尝试加载」。
 - **官方认证**：市场里的模组都带有 Folium 签名，安装后显示「官方认证」；只通过安全审查的先行测试模组显示「先行测试」；没有签名的第三方模组显示「未验证」，同样可以使用。
 - **开发与贡献**：[模组开发与贡献指南](docs/folium/contributing.md)，从写第一个模组、本地调试，到提交到模组市场、审查与签名、发布更新。
 - **API 参考**：[Folium API 参考](docs/folium/api.md)，由契约文件生成的完整接口文档，按注册表、上下文、事件、服务等分类查询。
@@ -279,6 +296,7 @@ Folia 会读取音频文件元数据、同目录歌词和封面，并可通过�
 - [MakcRe/KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi)
 - [paper-design/shaders](https://github.com/paper-design/shaders)
 - [yakult-green-tea/qq-music-api](https://github.com/yakult-green-tea/qq-music-api)
+- [zzyoxml/md3Music](https://github.com/zzyoxml/md3Music)
 
 本项目接入了 [Apple Music-like Lyrics TTML 逐词歌词库](https://github.com/amll-dev/amll-ttml-db) 以提供高质量的歌词文件，感谢此歌词库的作者和贡献者们。
 

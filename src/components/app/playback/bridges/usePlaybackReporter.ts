@@ -1,12 +1,14 @@
 import { useEffect, useRef } from 'react';
 import type { RefObject } from 'react';
 import type { SongResult } from '../../../../types';
-import { useAudioSettingsStore } from '../../../../stores/useAudioSettingsStore';
+import { useAudioSettingsStore, isPlaybackReportEnabled } from '../../../../stores/useAudioSettingsStore';
 import { getPlaybackSongKey, getPlaybackSourceRef } from '../../../../utils/appPlaybackGuards';
 import { getProviderSongMetadata } from '../../../../services/onlineMusic/songMetadata';
 import { isPlaybackReportReady, sendPlaybackReport } from '../../../../services/onlineMusic/playbackReportGate';
 import { omni } from '../../../../services/onlineMusic/omni';
 import { PlaybackListenTracker } from '../../../../utils/playbackListenTracker';
+import { usePlaybackStore } from '../../../../stores/usePlaybackStore';
+import { getObservedMedia } from '../../../../services/hifi/hifiMediaShim';
 
 // src/components/app/playback/bridges/usePlaybackReporter.ts
 // Turns real playback of a track of a provider that takes them into one listening report (听歌打卡).
@@ -40,12 +42,22 @@ const resolveScrobbleCandidate = (song: SongResult | null): ScrobbleCandidate | 
     };
 };
 
+// The source whose listening report setting covers `song`: its own online platform; none for a local or
+// Navidrome song.
+const reportSourceIdOf = (song: SongResult | null): string | null => {
+    const source = song ? getPlaybackSourceRef(song) : null;
+    return source?.kind === 'online' ? source.providerId : null;
+};
+
 export const usePlaybackReporter = ({
     audioRef,
     currentSong,
     activeDeck,
 }: UsePlaybackReporterParams): void => {
-    const enabled = useAudioSettingsStore(state => state.neteaseScrobbleEnabled);
+    // The setting of the song's own source (stored per source).
+    const enabled = useAudioSettingsStore(state => isPlaybackReportEnabled(state, reportSourceIdOf(currentSong)));
+    // On the HiFi route the listeners go on the HiFi media shim rather than a deck.
+    const playbackRoute = usePlaybackStore(state => state.playbackRoute);
     const trackerRef = useRef<PlaybackListenTracker | null>(null);
     const sessionSongRef = useRef<SongResult | null>(null);
 
@@ -83,6 +95,21 @@ export const usePlaybackReporter = ({
             sessionSongRef.current = song;
         };
 
+        // The song changed under an open session, so the previous one is over. This is also the path
+        // an automix handover takes: the queue advances when the blend STARTS, and the outgoing
+        // deck's `ended` never reaches the listeners below. Whether it is reported is the setting of its
+        // own source, read now: the song the app moved to may be another source's, or none's.
+        const songChanged = tracker.getSongKey() !== (currentSong ? getPlaybackSongKey(currentSong) : null);
+        if (songChanged) {
+            const previous = sessionSongRef.current;
+            if (previous && isPlaybackReportEnabled(useAudioSettingsStore.getState(), reportSourceIdOf(previous))) {
+                settle();
+            } else {
+                tracker.clear();
+                sessionSongRef.current = null;
+            }
+        }
+
         // Switching the feature off must not bank the play that was in progress: the listener asked
         // for nothing to be reported, and a settle here would report one last time.
         if (!enabled) {
@@ -91,15 +118,9 @@ export const usePlaybackReporter = ({
             return;
         }
 
-        // The song changed under an open session, so the previous one is over. This is also the path
-        // an automix handover takes: the queue advances when the blend STARTS, and the outgoing
-        // deck's `ended` never reaches the listeners below.
-        if (tracker.getSongKey() !== (currentSong ? getPlaybackSongKey(currentSong) : null)) {
-            settle();
-            openSession(currentSong);
-        }
+        if (songChanged) openSession(currentSong);
 
-        const audioElement = audioRef.current;
+        const audioElement = getObservedMedia(audioRef.current);
         if (!audioElement) return;
 
         const handleTimeUpdate = () => {
@@ -130,5 +151,6 @@ export const usePlaybackReporter = ({
         // these listeners are bound to the element itself. That swap happens at ARM time, before the
         // outgoing track really ends, so its last few seconds go uncounted - an under-report of the
         // blend's length, which is the safe direction for a feature that writes to a real account.
-    }, [audioRef, activeDeck, currentSong, enabled]);
+        // `playbackRoute` moves them between a deck and the HiFi media shim.
+    }, [audioRef, activeDeck, currentSong, enabled, playbackRoute]);
 };

@@ -2,32 +2,47 @@ import React, { useState } from 'react';
 import { RotateCcw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
-import { useLyricMatchSources } from '../../../../hooks/useLyricMatchSources';
-import { resyncAllFolders } from '../../../../services/localMusicService';
+import { useCrossSourceParticipants } from '../../../../hooks/useCrossSourceParticipants';
+import type { CrossSourceSkipReason } from '../../../../services/onlineMusic/crossSource';
+import { LocalFolderUnavailableError, resyncAllFolders } from '../../../../services/localMusicService';
+import { getSourceStates } from '../../../../services/onlineMusic/sourceStates';
 import { useLyricSettingsStore } from '../../../../stores/useLyricSettingsStore';
+import { openSettings } from '../../../../stores/useSettingsModalStore';
 import { setStatusMessage } from '../../../../stores/useStatusMessageStore';
 import { DEFAULT_LOCAL_LYRIC_FORMAT_ORDER, isSameLocalLyricFormatOrder, type LocalLyricFileFormat } from '../../../../utils/lyrics/localLyricFormatOrder';
 import { getLyricProviderPreferenceLabel } from '../../../../utils/lyrics/lyricSourceLabels';
-import { DEFAULT_PREFERRED_LYRIC_SOURCE } from '../../../../utils/lyrics/sourcePriority';
+import { DEFAULT_PREFERRED_LYRIC_SOURCE, buildLyricSourceOrder } from '../../../../utils/lyrics/sourcePriority';
 import { Button, FoldedGroup, Group, OrderList, Reveal, Row, Segmented, Select, Toggle, Value, option, type SettingsGroupDef, type SettingsOptionDef } from '../kit';
 import { useSettingsPage } from './settingsPageContext';
 
 // src/components/modal/settings/pages/LyricsPage.tsx
 // The 歌词 page: where a song's lyrics come from, the two tools that shift and filter them (their
-// rows open the existing dialogs), and a folded group with the order in which lyric files beside a
-// local song are preferred.
+// rows open the existing dialogs), the switch that segments lyrics into words with AI by itself, and
+// a folded group with the order in which lyric files beside a local song are preferred.
 
 const SOURCE: SettingsGroupDef = { id: 'lyrics', titleKey: 'options.settingsHeadingLyricSource' };
 const ADJUST: SettingsGroupDef = { id: 'lyricAdjust', titleKey: 'options.settingsHeadingLyricTiming' };
+const WORDS: SettingsGroupDef = { id: 'lyricWordSegmentation', titleKey: 'options.settingsHeadingLyricSegmentation' };
 const FORMATS: SettingsGroupDef = { id: 'localLyricFormatOrder', titleKey: 'options.localLyricFormatOrder' };
 
 const O = {
     autoBest: option(SOURCE, 'autoUseBestLyric', 'options.autoUseBestLyric'),
     matchPriority: option(SOURCE, 'lyricMatchPriority', 'settings.lyricMatchPriority'),
+    keepProviderWordTiming: option(SOURCE, 'keepProviderWordTiming', 'options.keepProviderWordTiming'),
     localPriority: option(SOURCE, 'localLyricsPriority', 'options.localLyricsPriority'),
     globalOffset: option(ADJUST, 'globalLyricTimelineOffset', 'options.globalLyricTimelineOffset'),
     filter: option(ADJUST, 'lyricFilterRegex', 'options.lyricFilterRegex'),
+    autoAiSegmentation: option(WORDS, 'autoAiLyricSegmentation', 'options.autoAiLyricSegmentation'),
     formatOrder: option(FORMATS, 'localLyricFormatOrderList', 'options.localLyricFormatOrderList'),
+};
+
+// How the settings say why a source is left out (crossSource.ts).
+const CROSS_SOURCE_SKIP_REASON_KEYS: Readonly<Record<CrossSourceSkipReason, string>> = {
+    'not-enabled': 'options.crossSourceSkipNotEnabled',
+    'not-configured': 'options.crossSourceSkipNotConfigured',
+    'runtime-unavailable': 'options.crossSourceSkipRuntimeUnavailable',
+    'needs-account': 'options.crossSourceSkipNeedsAccount',
+    'matching-only': 'options.crossSourceSkipMatchingOnly',
 };
 
 export const OPTIONS: SettingsOptionDef[] = Object.values(O);
@@ -38,17 +53,54 @@ const LyricsPage: React.FC = () => {
     const lyric = useLyricSettingsStore(useShallow(state => ({
         autoBest: state.autoUseBestLyric,
         preferredSource: state.preferredAlternativeLyricSource,
+        keepProviderWordTiming: state.keepProviderWordTiming,
         localPriority: state.localLyricsPriority,
         formatOrder: state.localLyricFormatOrder,
         globalOffsetMs: state.globalLyricTimelineOffsetMs,
+        autoAiSegmentation: state.autoAiLyricSegmentation,
         setAutoBest: state.handleToggleAutoUseBestLyric,
         setPreferredSource: state.handleSetPreferredAlternativeLyricSource,
+        setKeepProviderWordTiming: state.handleToggleKeepProviderWordTiming,
         setLocalPriority: state.handleSetLocalLyricsPriority,
         setFormatOrder: state.handleSetLocalLyricFormatOrder,
+        setAutoAiSegmentation: state.handleToggleAutoAiLyricSegmentation,
     })));
-    const sources = useLyricMatchSources();
-    // A choice that is not on offer now is not in force either: the matcher falls back the same way.
-    const shownSource = sources.includes(lyric.preferredSource) ? lyric.preferredSource : DEFAULT_PREFERRED_LYRIC_SOURCE;
+    const { ready: sources, skipped } = useCrossSourceParticipants('lyrics');
+    // A choice that is not on offer now is not in force either: the matcher falls back the same way, to the
+    // first source on offer in the default order. The stored choice is kept, and is in force again once its
+    // source is back (Folium 2.0 plan §7.1).
+    const shownSource = sources.includes(lyric.preferredSource)
+        ? lyric.preferredSource
+        : buildLyricSourceOrder(DEFAULT_PREFERRED_LYRIC_SOURCE).find(source => sources.includes(source)) ?? DEFAULT_PREFERRED_LYRIC_SOURCE;
+    // Said once, under the choice, while the listener's own choice is left out: which source, and why.
+    const preferredSkip = skipped.find(skip => skip.sourceId === lyric.preferredSource);
+    // A source switched off or kept for matching is switched back in Settings → Sources (Folium 2.0 plan §7.1): the
+    // line ends on the way there. One that needs an account, or is not set up, is not settled there, and one not
+    // installed (or not started) has no row there: the states table lists only the sources it knows.
+    const preferredSkipNote = preferredSkip
+        ? (
+            <>
+                {t('options.lyricPreferredSourceSkipped', {
+                    source: getLyricProviderPreferenceLabel(preferredSkip.sourceId),
+                    reason: t(CROSS_SOURCE_SKIP_REASON_KEYS[preferredSkip.reason]),
+                    next: getLyricProviderPreferenceLabel(shownSource),
+                })}
+                {(preferredSkip.reason === 'not-enabled' || preferredSkip.reason === 'matching-only')
+                    && window.electron && Object.hasOwn(getSourceStates(), preferredSkip.sourceId) && (
+                    <>
+                        {' '}
+                        <button
+                            type="button"
+                            onClick={() => openSettings('options', 'sources', null, 'sourceList')}
+                            className="st-t-fast rounded-[3px] underline decoration-[var(--st-line2)] underline-offset-2 transition-colors hover:text-[color:var(--st-t1)] hover:decoration-current"
+                        >
+                            {t('sourcesSettings.openFromLyrics')}
+                        </button>
+                    </>
+                )}
+            </>
+        )
+        : undefined;
 
     // A new order only applies on the next scan of the local folders, so a change offers one.
     const [needsResync, setNeedsResync] = useState(false);
@@ -69,7 +121,10 @@ const LyricsPage: React.FC = () => {
             });
         } catch (error) {
             console.error('[LocalLyricFormatOrder] Failed to resync local folders:', error);
-            setStatusMessage({ type: 'error', text: t('options.localLyricFormatResyncFailed') });
+            // 文件夹读不到时扫描自己已经说过原因了，不拿笼统的「失败」把它盖掉。
+            if (!(error instanceof LocalFolderUnavailableError)) {
+                setStatusMessage({ type: 'error', text: t('options.localLyricFormatResyncFailed') });
+            }
         } finally {
             setIsResyncing(false);
         }
@@ -81,12 +136,15 @@ const LyricsPage: React.FC = () => {
                 <Row option={O.autoBest} note={t(sources.includes('spotify') ? 'options.autoUseBestLyricDescSpotify' : 'options.autoUseBestLyricDesc')}>
                     <Toggle checked={lyric.autoBest} onChange={lyric.setAutoBest} />
                 </Row>
-                <Row option={O.matchPriority} note={t('settings.lyricMatchPriorityDesc')}>
+                <Row option={O.matchPriority} note={t('settings.lyricMatchPriorityDesc')} hint={preferredSkipNote}>
                     <Select
                         value={shownSource}
                         options={sources.map(source => ({ value: source, label: getLyricProviderPreferenceLabel(source) }))}
                         onChange={lyric.setPreferredSource}
                     />
+                </Row>
+                <Row option={O.keepProviderWordTiming} note={t('options.keepProviderWordTimingDesc')}>
+                    <Toggle checked={lyric.keepProviderWordTiming} onChange={lyric.setKeepProviderWordTiming} />
                 </Row>
                 <Row
                     option={O.localPriority}
@@ -109,6 +167,12 @@ const LyricsPage: React.FC = () => {
                     <Value>{`${lyric.globalOffsetMs > 0 ? '+' : ''}${lyric.globalOffsetMs} ms`}</Value>
                 </Row>
                 <Row option={O.filter} hint={t('options.lyricFilterRegexDesc')} onClick={onOpenLyricFilterSettings} />
+            </Group>
+
+            <Group def={WORDS}>
+                <Row option={O.autoAiSegmentation} note={t('options.autoAiLyricSegmentationDesc')}>
+                    <Toggle checked={lyric.autoAiSegmentation} onChange={lyric.setAutoAiSegmentation} />
+                </Row>
             </Group>
 
             <FoldedGroup def={FORMATS} summary={t('options.localLyricFormatOrderFirst', { format: `.${lyric.formatOrder[0]}` })}>

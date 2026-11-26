@@ -128,7 +128,7 @@ export const runStyleCanvasExport = async (job: StyleExportJob, onBlank?: (frame
         for (let i = 0; i < 40; i++) { await tick(); virtualMs += 16; pump(); }
 
         session = await openVideoEncoderSession(
-            { width: size.width, height: size.height, fps: preset.fps, bitrate: bitrateFor(preset, size), family: preset.family },
+            { width: size.width, height: size.height, fps: preset.fps, bitrate: bitrateFor(preset, size), family: preset.family, avcFormat: job.avcFormat },
             job.sink,
         );
         const setupMs = realNow() - setupStart;

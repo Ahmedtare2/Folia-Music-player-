@@ -6,6 +6,7 @@ import {
     orderBidiItemsForVisualRow,
 } from '../../../utils/lyrics/arabicText';
 import { type GraphemeTiming, splitLyricGraphemes } from '../../../utils/lyrics/graphemeTiming';
+import { resolveLyricTextDirection } from '../../../utils/lyrics/textDirection';
 import { buildFormation, type DioramaMotionParams, getDioramaShot, getDioramaTextPlacement } from './cameraPath';
 import { resolveGlobal, type SequencerState } from './dioramaSequencer';
 import { DIORAMA_CLUSTER_COLLISION_LINE_SPAN, selectVisibleDioramaClusters, type DioramaParticleClusterAnchor } from './dioramaGeometry';
@@ -186,7 +187,10 @@ export const splitDioramaLyricUnits = (
     return units;
 };
 
-/** Rasterises the active line's units and places each at its kerned slot by measuring prefixes of the full line. */
+/**
+ * Rasterises the active line's units and places each at its kerned slot by measuring prefixes of the full line.
+ * An RTL line (Uyghur, Arabic, Hebrew...) runs its prefixes from the right edge, so its first word sits rightmost.
+ */
 export const layoutDioramaActiveUnits = (
     activeLine: Line | null,
     activeLineUnits: readonly LyricUnit[],
@@ -234,12 +238,14 @@ export const layoutDioramaActiveUnits = (
         return { units, lineWidth: totalPx * worldPerPx };
     }
 
+    const rtl = resolveLyricTextDirection(full) === 'rtl';
     const units: PlacedUnitRaster[] = activeLineUnits.map((unit) => {
         const prefixPx = measureDioramaText(full.slice(0, unit.charStart), fontSpec);
         const raster = rasterDioramaUnit(full.slice(unit.charStart, unit.charEnd), fontSpec);
+        const startPx = prefixPx + raster.advancePx / 2;
         return {
             raster,
-            centerX: (-totalPx / 2 + prefixPx + raster.advancePx / 2) * worldPerPx,
+            centerX: (rtl ? totalPx / 2 - startPx : -totalPx / 2 + startPx) * worldPerPx,
             width: raster.canvasWidthPx * worldPerPx,
             height: raster.canvasHeightPx * worldPerPx,
         };

@@ -1,9 +1,10 @@
-import { DEFAULT_ONLINE_PROVIDER_ID, OnlineProviderError } from '../../../types/onlineMusic';
+import { OnlineProviderError } from '../../../types/onlineMusic';
 import type { LoginLocalServiceStatus, OnlineProviderId, ProviderAccountSummary } from '../../../types/onlineMusic';
 import type { LoginFailure } from '../../../types/loginFailure';
 import type {
     LibraryLoginLocalServiceState,
     LibraryLoginPhase,
+    LibraryAccountSyncRejectReason,
     LibraryLoginSessionSnapshot,
     LibraryLogoutRejectReason,
     LibraryProviderUnavailableReason,
@@ -43,15 +44,21 @@ export const resolveProviderSelectLabel = (provider: ProviderAccountSummary): Li
 
 // ─── 当前平台 ───────────────────────────────────────────────────────────
 
-/** 存的当前平台不在 provider 列表里（例如 mod 源被关掉）时回落到默认平台；账户缓存不动。 */
+/**
+ * 存的当前平台不在 provider 列表里（音源还没注册、被停用，mod 源被关掉）时，只在内存里回落到列表里的第一个；
+ * 列表是空的（零音源）时仍是存的那个，界面按「没有这个平台」走空状态。没有默认平台；存的值和账户缓存都不动，
+ * 那个平台回来时它又是当前平台。
+ */
 export const resolveActiveProviderId = (
     providers: readonly ProviderAccountSummary[],
     storedProviderId: OnlineProviderId,
 ): OnlineProviderId => (
-    providers.some(provider => provider.providerId === storedProviderId) ? storedProviderId : DEFAULT_ONLINE_PROVIDER_ID
+    providers.some(provider => provider.providerId === storedProviderId)
+        ? storedProviderId
+        : providers[0]?.providerId ?? storedProviderId
 );
 
-/** 当前平台的摘要；回落后的 id 也找不到（列表里没有默认平台）时取第一个。 */
+/** 当前平台的摘要；列表为空时没有。 */
 export const resolveActiveProviderSummary = (
     providers: readonly ProviderAccountSummary[],
     activeProviderId: OnlineProviderId,
@@ -85,6 +92,22 @@ export const canLogoutProvider = (provider: ProviderAccountSummary | undefined):
     resolveLogoutEligibility(provider).allowed
 );
 
+// ─── 同步数据 ───────────────────────────────────────────────────────────
+
+export type LibraryAccountSyncEligibility =
+    | { allowed: true }
+    | { allowed: false; reason: LibraryAccountSyncRejectReason };
+
+/**
+ * 有账号的平台可以同步数据：平台确认了登录着，或者账号已经显示（启动时存着的账号先显示、平台还没回答的那一会儿，
+ * 同步就是再问一次）。不用登录的平台、没有人登录的平台没有账户数据可同步。
+ */
+export const resolveAccountSyncEligibility = (provider: ProviderAccountSummary | undefined): LibraryAccountSyncEligibility => {
+    if (!provider) return { allowed: false, reason: 'unknown-provider' };
+    if (provider.status !== 'authenticated' && !provider.user) return { allowed: false, reason: 'not-signed-in' };
+    return { allowed: true };
+};
+
 // ─── 登录会话的派生 ─────────────────────────────────────────────────────
 
 type LoginMethodState = Pick<LibraryLoginSessionSnapshot, 'methods' | 'selectedMethodId'>;
@@ -95,11 +118,12 @@ export const isAwaitingLoginMethod = ({ methods, selectedMethodId }: LoginMethod
 );
 
 /**
- * 登录正在进行：平台还在说有哪几种登录方式、正在要码、等着扫或等着确认、或者确认了正在读账号。这时再来一次
- * 会取消掉它、向平台再要一把新的 key（再选一次同一行什么都不做；本地服务重启之后不再开始一次）。
+ * 登录正在进行：平台还在说有哪几种登录方式、正在要码、等着扫或等着确认、确认了正在读账号，或者读到了正在做登录
+ * 之后的检查。这时再来一次会取消掉它、向平台再要一把新的 key（再选一次同一行什么都不做；本地服务重启之后不再开始一次）。
  */
 export const isLoginUnderWay = (phase: LibraryLoginPhase): boolean => (
     phase === 'resolving-methods' || phase === 'loading' || phase === 'waiting' || phase === 'scanned' || phase === 'confirmed'
+    || phase === 'checking'
 );
 
 /** 平台要求稍后再试、又没说等多久时等的时间。 */

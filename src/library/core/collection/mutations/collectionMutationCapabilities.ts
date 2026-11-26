@@ -4,6 +4,8 @@ import type { LibraryCollectionDescriptor } from '../collection.contract';
 import type { CollectionResourceKind } from '../../shared/resource.contract';
 import type { LibraryCapability } from '../../shared/capability.contract';
 import type { LibraryMutationPort } from '../../shared/ports.contract';
+import { supportsLocalCollectionCover } from '../cover/localCollectionCover';
+import { getPlaybackSongKey } from '../../../../utils/appPlaybackGuards';
 import type {
     CollectionMutationBranches,
     CollectionMutationCapabilities,
@@ -31,6 +33,8 @@ export type CollectionMutationBranchInput = {
     isCloudDrive: boolean;
     /** 每日推荐当前看的日期，'' 表示今天；看历史时不能编辑。 */
     dailyDate: string;
+    /** 每日推荐正在看风格推荐（#938）：那是另一份歌，「不喜欢并换一首」不作用于它，也不能编辑。 */
+    dailyStyleShown?: boolean;
     port: LibraryMutationPort;
 };
 
@@ -47,6 +51,8 @@ export const resolveCollectionMutationBranches = (input: CollectionMutationBranc
     const isLocalFolderCollection = Boolean(local && local.type === 'folder' && !local.isVirtual);
     const isLocalAllSongsCollection = Boolean(local && local.type === 'folder' && local.isVirtual);
     const isLocalPlaylistCollection = Boolean(local && local.type === 'playlist' && local.playlistId && !local.isVirtual);
+    // Folia 的「我喜欢的音乐」：不能改名、不能删，但里面的歌可以移除、可以重排（它混着各个来源，光靠红心移不干净）。
+    const isFoliaFavoritesCollection = Boolean(local && local.type === 'playlist' && local.playlistId && local.isVirtual);
     const isLocalEntityCollection = Boolean(local && local.entityId);
     const isNavidromePlaylistCollection = Boolean(navidrome && navidrome.type === 'playlist' && navidrome.editable);
     const canAddNavidromeToPlaylist = Boolean(
@@ -75,9 +81,10 @@ export const resolveCollectionMutationBranches = (input: CollectionMutationBranc
     const canEditPlaylist = Boolean(
         canEditOwnedPlaylist
         || canEditProviderPlaylist
-        // 管理每日推荐就是逐首「不喜欢」：provider 没有 dislikeSong（QQ）时不给编辑，免得按钮点了必定失败。
-        || (isDailyRecommendationsCollection && !input.dailyDate && input.canDislikeCollectionSongs)
+        // 管理每日推荐就是逐首「不喜欢」：provider 有 dislikeSong 才给编辑（有的平台是拉进黑名单、没有替换曲）。
+        || (isDailyRecommendationsCollection && !input.dailyDate && !input.dailyStyleShown && input.canDislikeCollectionSongs)
         || isLocalPlaylistCollection
+        || isFoliaFavoritesCollection
         || isNavidromePlaylistCollection,
     );
 
@@ -97,6 +104,7 @@ export const resolveCollectionMutationBranches = (input: CollectionMutationBranc
         isLocalFolderCollection,
         isLocalAllSongsCollection,
         isLocalPlaylistCollection,
+        isFoliaFavoritesCollection,
         isLocalEntityCollection,
         isNavidromePlaylistCollection,
         isCloudDrive,
@@ -126,7 +134,7 @@ export const resolveEntryRemovalKind = (
         // 看历史日期时没有编辑开关（canEditPlaylist 为假），也就删不了。
         return branches.canEditPlaylist ? 'daily-dislike' : null;
     }
-    if (branches.isLocalPlaylistCollection) return port.local?.removePlaylistSongs ? 'local-playlist' : null;
+    if (branches.isLocalPlaylistCollection || branches.isFoliaFavoritesCollection) return port.local?.removePlaylistSongs ? 'local-playlist' : null;
     if (branches.isNavidromePlaylistCollection) return port.navidrome?.removePlaylistSongs ? 'navidrome-playlist' : null;
     if (branches.canEditOwnedPlaylist || branches.canEditProviderPlaylist) return 'online-playlist';
     return null;
@@ -140,10 +148,14 @@ export const isSerializedRemoval = (kind: CollectionEntryRemovalKind | null): bo
     kind === 'daily-dislike' || kind === 'navidrome-playlist'
 );
 
-/** 本地歌曲在歌单里的 id：与 localPlaylistService 按 songId 删除的语义一致。 */
-export const localPlaylistSongIdOf = (track: SongResult): string => (
-    (track as UnifiedSong).localRef?.songId || String(track.id)
-);
+/**
+ * 一首歌在 Folia 聚合歌单里的条目 key（歌单按它去重、按它删）：本地歌是 `local:<曲库里的 id>`，别的来源是播放用的 key
+ * （和 utils/foliaPlaylistEntries 存的一样）。
+ */
+export const foliaPlaylistEntryKeyOf = (track: SongResult): string => {
+    const localSongId = (track as UnifiedSong).localRef?.songId;
+    return localSongId ? `local:${localSongId}` : getPlaybackSongKey(track);
+};
 
 /** 「匹配在线信息」只对带本地引用的歌有意义。 */
 export const localSongIdOf = (track: SongResult): string | null => (track as UnifiedSong).localRef?.songId ?? null;
@@ -197,7 +209,17 @@ export const resolveCollectionMutationCapabilities = ({
     state: CollectionMutationCapabilityState;
 }): CollectionMutationCapabilities => {
     const local = descriptor?.source === 'local' ? descriptor : null;
+    const navidrome = descriptor?.source === 'navidrome' ? descriptor : null;
     const pending = state.sourceActionPending;
+    // 能存成 Folia 歌单的：在线音源的歌单与专辑（云盘、每日推荐、电台、听歌排行这些不是「一张歌单」，不给），
+    // Navidrome 的歌单与专辑。
+    const canSaveToFolia = branches.isOnlinePlaylist
+        || branches.isOnlineAlbum
+        || Boolean(navidrome && (navidrome.type === 'playlist' || navidrome.type === 'album'));
+    // 转存来的 Folia 歌单（「我喜欢的音乐」不会是转存来的）。
+    const canRefreshFromOrigin = Boolean(
+        branches.isLocalPlaylistCollection && local?.playlistId && port.folia?.hasOrigin?.(local.playlistId),
+    );
     return {
         removeEntry: resolveRemoveEntryCapability(resolveEntryRemovalKind(branches, port), state),
         // 收藏一按就变、请求期间也能再按（core/collection/mutations/collectionSaves.service 让请求跟着最后一次按下走），不因进行中禁用。
@@ -210,14 +232,20 @@ export const resolveCollectionMutationCapabilities = ({
         ),
         resyncFolder: gated(branches.isLocalFolderCollection && Boolean(port.local?.resyncFolder), pending),
         resyncAllFolders: gated(branches.isLocalAllSongsCollection && Boolean(port.local?.resyncAllFolders), pending),
+        reorderPlaylist: gated((branches.isLocalPlaylistCollection || branches.isFoliaFavoritesCollection) && Boolean(port.local?.reorderPlaylist), false),
         // 与网格的导出按钮同一条件：收藏这类虚拟歌单也能导出。
         exportPlaylist: gated(
             Boolean(local && local.type === 'playlist' && local.playlistId && port.local?.exportPlaylist),
             pending,
         ),
+        // 两个都只是打开对话框，不随来源动作禁用。
+        saveToFolia: gated(canSaveToFolia && Boolean(port.folia?.saveCollection), false),
+        refreshFromOrigin: gated(canRefreshFromOrigin && Boolean(port.folia?.refreshFromOrigin), false),
         addToPlaylist: gated(branches.canAddNavidromeToPlaylist && Boolean(port.navidrome?.addToPlaylist), pending),
         createPlaylist: gated(branches.canAddNavidromeToPlaylist && Boolean(port.navidrome?.createPlaylist), pending),
         editEntity: gated(branches.isLocalEntityCollection && Boolean(port.local?.editEntity), false),
+        // 本地文件夹（含「全部歌曲」）、专辑、歌单；歌手不在内。只打开对话框，与编辑实体一样不随来源动作禁用。
+        setCover: gated(supportsLocalCollectionCover(local) && Boolean(port.local?.editCover), false),
         organizeSongInfo: gated(branches.isLocalFolderCollection && Boolean(port.local?.organizeFolder), false),
         matchSong: gated(Boolean(port.local?.matchSong), false),
         dailyDate: gated(branches.isDailyRecommendationsCollection && state.hasResource, state.dailyDatePending),
@@ -254,6 +282,11 @@ export const EMPTY_COLLECTION_MUTATION_SNAPSHOT: CollectionMutationSnapshot = {
     dailyDate: '',
     dailyHistoryDates: [],
     dailyHistoryAvailable: false,
+    dailyStyleAvailable: false,
+    dailyStyleShown: false,
+    dailyStyleGroups: [],
+    dailyStyleGroupsFailed: false,
+    dailyStyleSelection: null,
     renamedTo: null,
     availablePlaylists: [],
     branches: NO_BRANCHES,

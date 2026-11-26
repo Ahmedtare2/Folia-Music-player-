@@ -9,7 +9,7 @@ type UsePlaybackUiEffectsOptions = {
 
     statusMsg: StatusMessage | null;
     loadLocalSongs: () => void | Promise<void>;
-    loadLocalPlaylists: () => Promise<void>;
+    loadFoliaPlaylists: () => Promise<void>;
     localMusicUpdatedEvent: string;
     blobUrlRef: React.RefObject<string | null>;
     volumePreviewFrameRef: React.RefObject<number | null>;
@@ -19,7 +19,7 @@ type UsePlaybackUiEffectsOptions = {
 export const usePlaybackUiEffects = ({
     statusMsg,
     loadLocalSongs,
-    loadLocalPlaylists,
+    loadFoliaPlaylists,
     localMusicUpdatedEvent,
     blobUrlRef,
     volumePreviewFrameRef,
@@ -28,12 +28,12 @@ export const usePlaybackUiEffects = ({
     useEffect(() => {
         const handleLocalMusicUpdated = () => {
             void loadLocalSongs();
-            void loadLocalPlaylists();
+            void loadFoliaPlaylists();
         };
 
         window.addEventListener(localMusicUpdatedEvent, handleLocalMusicUpdated);
         return () => window.removeEventListener(localMusicUpdatedEvent, handleLocalMusicUpdated);
-    }, [loadLocalPlaylists, loadLocalSongs, localMusicUpdatedEvent]);
+    }, [loadFoliaPlaylists, loadLocalSongs, localMusicUpdatedEvent]);
 
     useEffect(() => {
         return () => {

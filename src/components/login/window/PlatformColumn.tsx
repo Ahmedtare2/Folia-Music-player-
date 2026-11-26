@@ -1,7 +1,8 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Search } from 'lucide-react';
+import { PackagePlus, Search } from 'lucide-react';
 import type { OnlineProviderId, ProviderAccountSummary } from '../../../types/onlineMusic';
+import { providerDisplayName } from '../../../i18n/providerName';
 import { Tooltip } from '../../modal/settings/kit';
 import { AccountPicture, PlatformMark, platformMarkOf } from '../PlatformMark';
 import { rowStatus, type RowStatus } from '../platformRows';
@@ -12,6 +13,7 @@ import { filterRows } from './loginView';
 // 选中的行左边有一道平台的颜色。一块高亮跟着指针和方向键在行
 // 之间滑。点一行或者在高亮的行上按回车才是选中；方向键只移动高亮，不开始登录。够不着的平台是灰的，
 // 不能选，悬停时说原因。从 12 个平台起上面有搜索框。窗口窄的时候它横在窗口上面，成一排。
+// 桌面版在列的最下面有「安装音源模组」（Folium 2.0 方案 §5.1），一个音源都没有时空状态也指向它。
 
 /** 从这么多个平台起有搜索框。 */
 const SEARCH_FROM = 12;
@@ -21,6 +23,32 @@ const SEARCH_FROM = 12;
  * 多到挤不下 46 就滚。
  */
 const ROW_SIZE = 'min-h-[46px] max-h-[68px] flex-[1_1_0]';
+
+type Box = { x: number; y: number; w: number; h: number };
+
+/**
+ * 一行在列表内容里的位置和大小，带小数。不用 offset*：它们取整，各行平分列高时最后一行取整后的底边
+ * 可能比列表多 1px，高亮块就把列表撑出滚动条；滚动条让行变窄、溢出消失，再量又变回去，
+ * 来回不停到 React 报更新层数超限（#913）。getBoundingClientRect 带着祖先的缩放（窗口打开时的动画），
+ * 所以用行的布局高度把缩放除掉。行没排版（display: none、jsdom）时布局高度是 auto，就不除。
+ */
+const measureRow = (list: HTMLElement, row: HTMLElement): Box => {
+    const listRect = list.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    const height = parseFloat(getComputedStyle(row).height);
+    const scale = height > 0 && rowRect.height > 0 ? rowRect.height / height : 1;
+    return {
+        x: (rowRect.left - listRect.left) / scale - list.clientLeft + list.scrollLeft,
+        y: (rowRect.top - listRect.top) / scale - list.clientTop + list.scrollTop,
+        w: rowRect.width / scale,
+        h: rowRect.height / scale,
+    };
+};
+
+/** 量出来的数差不到 0.01px 算没变：除掉缩放的那一下有浮点误差。 */
+const sameBox = (a: Box | null, b: Box | null): boolean => (
+    a === b || (a !== null && b !== null && [a.x - b.x, a.y - b.y, a.w - b.w, a.h - b.h].every(d => Math.abs(d) < 0.01))
+);
 
 /** 竖着的一行名字下面那一句：登录着的是谁，或者这个平台此刻的状态。 */
 const RowNote: React.FC<{ row: ProviderAccountSummary; status: RowStatus }> = ({ row, status }) => {
@@ -33,9 +61,9 @@ const RowNote: React.FC<{ row: ProviderAccountSummary; status: RowStatus }> = ({
             </span>
         );
     }
-    const text = status === 'ran-out' ? t('login.rowRanOut')
+    const text = status === 'checking' ? t('login.rowChecking') : status === 'ran-out' ? t('login.rowRanOut')
         : status === 'accountless' ? t('home.providerNoAccount')
-            : status === 'off' ? t('home.providerNotConfigured') : t('login.rowSignedOut');
+            : status === 'off' ? t(row.availability.messageKey ?? 'home.providerNotConfigured') : t('login.rowSignedOut');
     return (
         <span className={`truncate text-[11.5px] leading-4 ${status === 'ran-out' ? 'text-[color:var(--st-warn)]' : 'text-[color:var(--st-t3)]'}`}>{text}</span>
     );
@@ -48,17 +76,19 @@ type PlatformColumnProps = {
     onChoose: (provider: ProviderAccountSummary) => void;
     /** 'row'：横着一排，左右滚。 */
     lie: 'column' | 'row';
+    /** 「安装音源模组」；没有（网页版）就不画。 */
+    onInstallSourceMod?: () => void;
 };
 
-export const PlatformColumn: React.FC<PlatformColumnProps> = ({ rows, chosenId, onChoose, lie }) => {
+export const PlatformColumn: React.FC<PlatformColumnProps> = ({ rows, chosenId, onChoose, lie, onInstallSourceMod }) => {
     const { t } = useTranslation();
     const [query, setQuery] = useState('');
-    const shown = rows.length >= SEARCH_FROM ? filterRows(rows, query) : rows;
+    const shown = rows.length >= SEARCH_FROM ? filterRows(rows, query, row => providerDisplayName(t, row)) : rows;
     // 高亮在哪一行：指针或方向键指着的；都没有指着就是选中的那一行。
     const [pointed, setPointed] = useState<OnlineProviderId | null>(null);
     const lit = shown.find(row => row.providerId === pointed) ?? shown.find(row => row.providerId === chosenId) ?? null;
     const listRef = useRef<HTMLDivElement>(null);
-    const [box, setBox] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+    const [box, setBox] = useState<Box | null>(null);
     // 列表的哪一头后面还有行：那一头淡出。
     const [more, setMore] = useState({ before: false, after: false });
     const rowOf = (providerId: OnlineProviderId | null | undefined) => (
@@ -67,9 +97,10 @@ export const PlatformColumn: React.FC<PlatformColumnProps> = ({ rows, chosenId, 
 
     // 高亮那一块的位置和大小，每次画完从它所在的行量一遍（行的宽度跟着名字、头像和语言变）；数没变就不动。
     useLayoutEffect(() => {
+        const list = listRef.current;
         const row = rowOf(lit?.providerId);
-        const next = row ? { x: row.offsetLeft, y: row.offsetTop, w: row.offsetWidth, h: row.offsetHeight } : null;
-        setBox(current => (current?.x === next?.x && current?.y === next?.y && current?.w === next?.w && current?.h === next?.h ? current : next));
+        const next = list && row ? measureRow(list, row) : null;
+        setBox(current => (sameBox(current, next) ? current : next));
     });
 
     // 选中的行换了，把它滚进来。指针指着的行不滚：列表不在指针底下自己动，指针移开也不跳回去。
@@ -134,8 +165,8 @@ export const PlatformColumn: React.FC<PlatformColumnProps> = ({ rows, chosenId, 
     };
 
     const fade = (more.before || more.after) ? `linear-gradient(${lie === 'column' ? 'to bottom' : 'to right'}, ${more.before ? 'transparent, #000 30px' : '#000'}, ${more.after ? '#000 calc(100% - 30px), transparent' : '#000'})` : undefined;
-    const stateText = (status: ReturnType<typeof rowStatus>): string | null => (
-        status === 'signed-in' ? t('login.rowSignedIn') : status === 'ran-out' ? t('login.rowRanOut') : status === 'off' ? t('home.providerNotConfigured') : null
+    const stateText = (status: ReturnType<typeof rowStatus>, messageKey?: string): string | null => (
+        status === 'checking' ? t('login.rowChecking') : status === 'signed-in' ? t('login.rowSignedIn') : status === 'ran-out' ? t('login.rowRanOut') : status === 'off' ? t(messageKey ?? 'home.providerNotConfigured') : null
     );
 
     return (
@@ -172,8 +203,8 @@ export const PlatformColumn: React.FC<PlatformColumnProps> = ({ rows, chosenId, 
                 />
                 {shown.map(row => {
                     const status = rowStatus(row);
-                    const state = stateText(status);
-                    const name = row.shortName || row.displayName;
+                    const state = stateText(status, row.availability.messageKey);
+                    const name = providerDisplayName(t, row);
                     const chosen = row.providerId === chosenId;
                     const bright = chosen || row.providerId === lit?.providerId;
                     const tall = lie === 'column';
@@ -186,8 +217,9 @@ export const PlatformColumn: React.FC<PlatformColumnProps> = ({ rows, chosenId, 
                             aria-label={state ? `${name} · ${state}` : undefined}
                             aria-selected={chosen}
                             aria-disabled={status === 'off' || undefined}
+                            aria-busy={status === 'checking' || undefined}
                             onMouseEnter={() => { if (status !== 'off') setPointed(row.providerId); }}
-                            onClick={() => { if (status !== 'off') onChoose(row); }}
+                            onClick={() => { if (canChoose(row)) onChoose(row); }}
                             className={`st-t-fast relative flex items-center rounded-lg transition-colors ${tall ? `${ROW_SIZE} w-full gap-3 px-2.5` : 'h-9 max-w-[168px] shrink-0 gap-2.5 px-2'} ${status === 'off' ? 'cursor-default opacity-[0.42]' : 'cursor-pointer'} ${bright ? 'text-[color:var(--st-t1)]' : 'text-[color:var(--st-t2)]'}`}
                         >
                             {/* 选中的那一行左边一道平台的颜色：高亮跟着指针走，这一道留在选中的行上。 */}
@@ -195,10 +227,10 @@ export const PlatformColumn: React.FC<PlatformColumnProps> = ({ rows, chosenId, 
                                 <i
                                     aria-hidden
                                     className={`st-t-fast absolute left-0 top-1/2 h-[38%] w-[3px] -translate-y-1/2 rounded-full transition-opacity ${chosen ? 'opacity-100' : 'opacity-0'}`}
-                                    style={{ background: platformMarkOf(row.providerId, row.shortName).color }}
+                                    style={{ background: platformMarkOf(row.providerId, name).color }}
                                 />
                             )}
-                            <PlatformMark providerId={row.providerId} label={row.shortName} size={tall ? 30 : 22} ranOut={status === 'ran-out'} />
+                            <PlatformMark providerId={row.providerId} label={name} size={tall ? 30 : 22} ranOut={status === 'ran-out'} />
                             {tall ? (
                                 <span className="flex min-w-0 flex-1 flex-col gap-0.5">
                                     <span className="truncate text-[13px] font-medium leading-[18px]">{name}</span>
@@ -215,9 +247,23 @@ export const PlatformColumn: React.FC<PlatformColumnProps> = ({ rows, chosenId, 
                         : <React.Fragment key={row.providerId}>{item}</React.Fragment>;
                 })}
                 {shown.length === 0 && (
-                    <p className="py-6 text-center text-[13px] text-[color:var(--st-t3)]">{t('login.noPlatformMatch')}</p>
+                    // 一个平台都没有（没带音源、全停用了）时说装一个或者去哪儿启用；有平台只是搜不到时说没有匹配的。
+                    <p className="px-3 py-6 text-center text-[13px] text-[color:var(--st-t3)]">
+                        {t(rows.length > 0 ? 'login.noPlatformMatch' : onInstallSourceMod ? 'login.noSourceInstall' : 'login.noSourceEnabled')}
+                    </p>
                 )}
             </div>
+            {onInstallSourceMod && (
+                <button
+                    type="button"
+                    data-login-install-source=""
+                    onClick={onInstallSourceMod}
+                    className={`st-t-fast flex shrink-0 items-center gap-2 rounded-lg text-[12.5px] transition-colors hover:bg-[var(--st-fill)] hover:text-[color:var(--st-t1)] ${rows.length === 0 ? 'text-[color:var(--st-t1)]' : 'text-[color:var(--st-t2)]'} ${lie === 'column' ? 'mt-1.5 h-9 w-full px-2.5' : 'mt-1 h-8 self-start px-2'}`}
+                >
+                    <PackagePlus size={15} className="shrink-0" />
+                    <span className="truncate">{t('login.installSourceMod')}</span>
+                </button>
+            )}
         </div>
     );
 };

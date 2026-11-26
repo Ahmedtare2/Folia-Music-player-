@@ -1,5 +1,6 @@
 import { LyricData } from '../../types';
-import { applyLyricDisplayFilter, resolveLyricProcessingOptions } from './filtering';
+import { resolveLyricProcessingOptions } from './filtering';
+import { ensureLyricDataRenderHints } from './renderHints';
 import { RawLyricSource } from './types';
 import { EmbeddedLyricAdapter } from './adapters/EmbeddedLyricAdapter';
 import { NeteaseLyricAdapter } from './adapters/NeteaseLyricAdapter';
@@ -8,7 +9,6 @@ import { LocalFileLyricAdapter } from './adapters/LocalFileLyricAdapter';
 import { QrcLyricAdapter } from './adapters/QrcLyricAdapter';
 import type { LyricProcessingOptions } from './types';
 import { applyAutoWordSegmentation } from './icuFolia';
-import { ensureLyricDataRenderHints } from './renderHints';
 import {
     associateLyricDataWithCacheKey,
     computeLyricSourceCacheKey,
@@ -23,11 +23,9 @@ export class LyricParserFactory {
 
         const cached = await readPreParsedLyricsFromDisk(cacheKey);
         if (cached) {
-            const filteredCached = applyLyricDisplayFilter(cached, resolvedOptions.filterPattern);
-            if (filteredCached) {
-                associateLyricDataWithCacheKey(filteredCached, cacheKey);
-            }
-            return filteredCached;
+            // Cached lyrics are stored unfiltered: the listener's line rules run where lyrics are shown.
+            associateLyricDataWithCacheKey(cached, cacheKey);
+            return cached;
         }
 
         let parsed: LyricData | null = null;
@@ -53,17 +51,14 @@ export class LyricParserFactory {
                 return null;
         }
 
+        // The listener's line rules are not applied here: parsed lyrics are cached, and the rules
+        // run where lyrics are shown (createLyricsSetter), so a change of the rules needs no new fetch.
         if (parsed) {
             const preSegmented = ensureLyricDataRenderHints(applyAutoWordSegmentation(parsed)) ?? parsed;
             associateLyricDataWithCacheKey(preSegmented, cacheKey);
             await writePreParsedLyricsToDisk(cacheKey, preSegmented);
             parsed = preSegmented;
         }
-
-        const filtered = applyLyricDisplayFilter(parsed, resolvedOptions.filterPattern);
-        if (filtered) {
-            associateLyricDataWithCacheKey(filtered, cacheKey);
-        }
-        return filtered;
+        return ensureLyricDataRenderHints(parsed);
     }
 }

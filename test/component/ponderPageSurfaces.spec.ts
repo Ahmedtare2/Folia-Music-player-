@@ -132,7 +132,7 @@ test('Bravais 墙：锚点和合成界面里的真实元素严丝合缝', async 
     await settled(stage);
     await expectAligned(stage, 'toolsPanel', '[data-ponder-bravais-tools-panel="solid"]');
     await expectAligned(stage, 'toolsLook', '[data-ponder-bravais-look-row="solid"]');
-    await expectAligned(stage, 'toolsLattice', '[data-ponder-bravais-tools-panel="solid"] [data-ponder-bravais-quick="4"]');
+    await expectAligned(stage, 'toolsLattice', '[data-ponder-bravais-tools-panel="solid"] [data-ponder-bravais-quick="3"]');
     await expectAligned(stage, 'window', '[data-ponder-bravais-window="left:0:0:1"]');
 });
 
@@ -625,6 +625,8 @@ test('歌词样式：莫奈三件部件先在、再一起关掉', async ({ page 
     await expect(stage).toBeVisible();
     const monet = stage.locator('[data-ponder-surface-state="preview-monet"]');
     await expect(monet).toHaveCSS('opacity', '1', { timeout: 6000 });
+    // 骨架的入场动画（ponder-skeleton-in）还在放时锚点带着缩放，量出来差几个像素：等它放完再量。
+    await settled(stage);
     await expectAligned(stage, 'monetDescription', '[data-ponder-lyric-style-monet-description]');
     await expectAligned(stage, 'monetHanger', '[data-ponder-lyric-style-monet-hanger]');
     await expectAligned(stage, 'monetAudio', '[data-ponder-lyric-style-monet-audio]');

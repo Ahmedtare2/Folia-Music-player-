@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // dev/folium/api-docs.mjs
 // Generates docs/folium/api.md, the Folium API reference, from the public
-// contract: src/mods/folium/contract.ts (the client entry) and
-// src/mods/folium/mainContract.ts (the main entry), the single sources of the
-// API. They are written in a regular style (JSDoc, `// ----` section markers,
+// contract: src/mods/folium/contract.ts (the client entry),
+// src/mods/folium/sources/contract.ts (Folium 2.0: `folium.sources` and its
+// capabilities) and src/mods/folium/mainContract.ts (the main entry), the
+// single sources of the API. They are written in a regular style (JSDoc, `// ----` section markers,
 // one member per `;`), so a small scanner is enough; TypeScript's JS compiler
 // API is not available with the native TypeScript 7 package.
 //
@@ -35,6 +36,10 @@ const { OLD_MAIN_NAMES, OLD_PERMISSIONS } = require('../../electron/modSystem/de
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 export const CONTRACT_PATH = path.join(ROOT, 'src', 'mods', 'folium', 'contract.ts');
 export const MAIN_CONTRACT_PATH = path.join(ROOT, 'src', 'mods', 'folium', 'mainContract.ts');
+export const SOURCES_CONTRACT_PATH = path.join(ROOT, 'src', 'mods', 'folium', 'sources', 'contract.ts');
+
+/** The sources contract as it is on disk: what the generators read when they are not handed it. */
+export const readSourcesContract = () => fs.readFileSync(SOURCES_CONTRACT_PATH, 'utf8');
 export const OUTPUT_PATH = path.join(ROOT, 'docs', 'folium', 'api.md');
 export const SHARED_PATH = path.join(ROOT, 'electron', 'modSystem', 'foliumShared.json');
 
@@ -87,9 +92,37 @@ const cleanComment = (raw) => raw
 
 const squash = (value) => value.replace(/\s+/g, ' ').replace(/\(\s+/g, '(').replace(/,\s*\)/g, ')').replace(/\s+\)/g, ')').trim();
 
+/* `text` without its comments (strings kept as they are). */
+const stripComments = (text) => {
+    let out = '';
+    for (let i = 0; i < text.length;) {
+        const skipped = skipCommentOrString(text, i);
+        if (skipped === -1) {
+            out += text[i];
+            i += 1;
+            continue;
+        }
+        if (text.startsWith('//', i) || text.startsWith('/*', i)) out += ' ';
+        else out += text.slice(i, skipped);
+        i = skipped;
+    }
+    return out;
+};
+
+/* The body of an inline object type (`{ … }` and nothing around it), or null for any other type. */
+const inlineObjectBody = (type) => {
+    const trimmed = type.trim();
+    if (!trimmed.startsWith('{')) return null;
+    const close = findAtDepthZero(trimmed, 1, ['}']);
+    return close === trimmed.length - 1 ? trimmed.slice(1, close) : null;
+};
+
 /*
  * Splits an interface body into members. Comments directly above a member
- * (no blank line between) become its description.
+ * (no blank line between) become its description. A member whose type is an
+ * inline object type with described members of its own (FoliumOmniProviderInfo's
+ * `supports`) carries them as `children`, and its type is shown without their
+ * comments.
  */
 const parseMembers = (body) => {
     const members = [];
@@ -115,13 +148,17 @@ const parseMembers = (body) => {
         if (!match) continue;
         const [, readonly, name, optional, rest] = match;
         const isMethod = rest.startsWith('(') || rest.startsWith('<');
+        const type = isMethod ? rest : rest.replace(/^:\s*/, '');
+        const objectBody = isMethod ? null : inlineObjectBody(type);
+        const children = objectBody !== null && /\/\*|\/\//.test(objectBody) ? parseMembers(objectBody) : [];
         members.push({
             name: name.replace(/^['"]|['"]$/g, ''),
             readonly: Boolean(readonly),
             optional: Boolean(optional),
             method: isMethod,
-            type: squash(isMethod ? rest : rest.replace(/^:\s*/, '')),
+            type: squash(stripComments(type)),
             doc: doc.join('\n\n'),
+            ...(children.length > 0 ? { children } : {}),
         });
         doc = [];
     }
@@ -189,7 +226,7 @@ const SECTION_INFO = {
     'Client API': {
         order: 1,
         title: '客户端入口',
-        intro: '模组的 `client` 入口默认导出 `activate(folium)`，参数就是 [FoliumClientApi](#foliumclientapi)，所有能力都从这里取。',
+        intro: '模组的 `client` 入口默认导出 `activate(folium)`，参数就是 [FoliumClientApi](#foliumclientapi)，所有能力都从这里取。数据文件 `folium.storage`、密钥字段的值 `folium.secrets`（Folium 1.7）和通往 main 入口的 `folium.rpc` 也在这一节。',
     },
     'Registry definitions': {
         order: 2,
@@ -209,7 +246,7 @@ const SECTION_INFO = {
     Services: {
         order: 5,
         title: '服务',
-        intro: '`folium.playback` / `folium.ui` / `folium.net`。需要权限的方法见[权限一览](#权限一览)；导出窗口里调用会抛 `*-unavailable-in-export-context`（`ui.icon` 除外）。',
+        intro: '`folium.playback` / `folium.ui` / `folium.net`，以及 Folium 1.7 的登录状态 `folium.account` 和经 Omni 只读在线音源的 `folium.omni`（两者都不需要权限；`folium.omni` 以用户在 Folia 登录的平台账号发请求），以及宿主均衡器 `folium.equalizer`（读不需要权限，写需 `equalizer.control`）；Folium 1.8 加了歌词显示设置 `folium.visualizer`：歌词画布渲染质量、歌词动画模式、内置模式的样式参数与智能动感效果（读不需要权限，写分别需 `visualizer.renderQuality`、`visualizer.mode`、`visualizer.tuning`、`visualizer.beatEffects`）；Folium 1.9 加了返回一层的 `folium.ui.back()`，以及 `folium.visualizer` 的背景类型与动画强度（写分别需 `visualizer.background`、`visualizer.animationIntensity`）；Folium 1.10 给 `folium.theme` 加了屏幕上的主题：读当前主题、按颜色做主题、把模组自己的主题盖在歌曲主题上（`apply`、`release` 需 `theme.write`）。需要权限的方法见[权限一览](#权限一览)；导出窗口里调用会抛 `*-unavailable-in-export-context`（`ui.icon` 除外）。',
     },
     'Shared helpers': {
         order: 6,
@@ -226,18 +263,28 @@ const SECTION_INFO = {
         title: '数据结构',
         intro: '歌词行与主题与内置 visualizer 收到的 `Line` / `Theme` 同名同义，是宿主投影出的冻结副本。',
     },
-    Experimental: {
+    Sources: {
         order: 9,
+        title: '音源（Folium 2）',
+        intro: '`folium: 2` 的音源类模组（`mod.json` 里声明了 `sources`）在 client 入口里用 `folium.sources.register` 注册音源：注册字段加上一组带版本的能力（`search@1`、`songs@1`、`playback.audio@1` …），宿主按实现了哪些能力、其中哪些成员在推导界面上的开关。`folium.sources.supports(id, version)` 说这个宿主实现了哪些能力；`folium.omni.capability` 取别的音源的自定义能力。这一节来自 [`src/mods/folium/sources/contract.ts`](../../src/mods/folium/sources/contract.ts)。`folium: 1` 的模组没有这些成员。',
+    },
+    Experimental: {
+        order: 10,
         title: '实验接口',
         intro: '需要在 `mod.json` 的 `experimental` 里选用，经 `folium.experimental[name]` 访问；任何 minor 版本都可能变化。',
     },
     'Main API': {
-        order: 10,
+        order: 11,
         title: 'main 入口（Node）',
         intro: '`mod.json` 的 `main` 指向一个 `.cjs` / `.js` 文件，它导出的 `activate(api)`（[FoliumMainModule](#foliummainmodule)）在 Folia 的主进程里运行，参数是 [FoliumMainApi](#foliummainapi)。这一节来自 [`src/mods/folium/mainContract.ts`](../../src/mods/folium/mainContract.ts)。',
     },
+    'Source main API': {
+        order: 12,
+        title: '音源类模组的 main 入口',
+        intro: '音源类模组的 main 入口拿到的 `api` 比普通模组多下面这些成员（[FoliumSourceMainApi](#foliumsourcemainapi)，方案 §5.5），也不受普通模组的网络、存储限额约束；普通模组的 `api` 没有它们。怎么用这些成员、要守的约定见 [写一个音源模组](sources.md)。',
+    },
     Basics: {
-        order: 11,
+        order: 13,
         title: '基础类型',
         intro: '',
     },
@@ -313,7 +360,11 @@ const renderItem = (item, known, interfaces) => {
         const inherited = inheritedMembers(item, interfaces);
         if (item.members.length > 0 || inherited.length > 0) {
             lines.push('| 成员 | 类型 | 说明 |', '| --- | --- | --- |');
-            for (const member of item.members) lines.push(renderMemberRow(member));
+            for (const member of item.members) {
+                lines.push(renderMemberRow(member));
+                // The members of an inline object type, each on a row of its own under the member's name.
+                for (const child of member.children ?? []) lines.push(renderMemberRow({ ...child, name: `${member.name}.${child.name}` }));
+            }
             for (const { member, from } of inherited) {
                 lines.push(renderMemberRow(member, `继承自 [${from}](#${anchorOf(from)})。`));
             }
@@ -372,7 +423,9 @@ const renderPermissions = () => {
     const lines = [
         `### ${PERMISSIONS_HEADING}`,
         '',
-        '本表由 `electron/modSystem/foliumShared.json` 里每个权限的 `guards` 生成，`npm run folium:check` 用同一张表查模组用到的成员。',
+        '本表由 `electron/modSystem/foliumShared.json` 里每个权限的 `guards` 生成，`npm run folium:check` 用同一张表查模组用到的成员。'
+            + "`platform.*` 两行例外：模组只能写成 `folium.experimental['platform.raw']`，表里的成员名只是说明；"
+            + "`folium:check` 改为按代码里 `request('<平台>', …)` 写出的平台 id 查 `platform.<平台>.read`，`.write` 要看调的是哪个接口，查不到。",
         '',
         '| 权限 | 解锁的成员 |',
         '| --- | --- |',
@@ -384,6 +437,7 @@ const renderPermissions = () => {
         '',
         '`folium.*` 是 client 入口的成员，`api.*` 是 main 入口的成员；写到哪一级就管到哪一级，`folium.storage` 管它下面的全部方法。',
         '模组没有在 `mod.json` 的 `permissions` 里声明这个权限就调用时，同步的成员抛 `permission-denied:<权限>`，异步的成员返回的 promise 以同一个错误拒绝。',
+        '`platform.<平台>.read` / `.write` 管的是实验接口 `platform.raw` 的 `request` 能调这个平台的哪一类接口：读接口要 read，改动账号的接口还要 write（表里的 `request.write` 指这一类接口，不是一个成员）；两者都要在 `experimental` 里选用 `platform.raw`，声明 write 也要同时声明 read。',
     );
     return lines.join('\n');
 };
@@ -441,9 +495,9 @@ const TABLES = {
     Events: { heading: EVENTS_HEADING, render: renderEvents },
 };
 
-/* The whole reference as markdown, from the texts of the contract and the main contract. */
-export const renderApiDocs = (contractText, mainContractText) => {
-    const sections = [...parseContract(contractText), ...parseContract(mainContractText)]
+/* The whole reference as markdown, from the texts of the contract, the main contract and the sources contract. */
+export const renderApiDocs = (contractText, mainContractText, sourcesContractText = readSourcesContract()) => {
+    const sections = [...parseContract(contractText), ...parseContract(sourcesContractText), ...parseContract(mainContractText)]
         .map((section) => ({ ...section, info: SECTION_INFO[section.title] ?? { order: 99, title: section.title, intro: '' } }))
         .sort((left, right) => left.info.order - right.info.order);
     const items = sections.flatMap((section) => section.items);
@@ -453,16 +507,17 @@ export const renderApiDocs = (contractText, mainContractText) => {
     if (!version) throw new Error('contract.ts has no FOLIUM_VERSION = Object.freeze({ major, minor })');
 
     const out = [
-        '<!-- 本文件由 `npm run folium:api` 从 src/mods/folium/contract.ts 和 mainContract.ts 生成，请勿手动修改。 -->',
+        '<!-- 本文件由 `npm run folium:api` 从 src/mods/folium/contract.ts、sources/contract.ts 和 mainContract.ts 生成，请勿手动修改。 -->',
         '',
         '# Folium API 参考',
         '',
         `当前契约版本：**Folium ${version[1]}.${version[2]}**。`,
         '',
         '本文列出模组能用到的全部公开类型，内容直接来自契约文件 [`src/mods/folium/contract.ts`](../../src/mods/folium/contract.ts)',
-        '（client 入口）与 [`src/mods/folium/mainContract.ts`](../../src/mods/folium/mainContract.ts)（main 入口），',
+        '（client 入口）、[`src/mods/folium/sources/contract.ts`](../../src/mods/folium/sources/contract.ts)（音源）与 [`src/mods/folium/mainContract.ts`](../../src/mods/folium/mainContract.ts)（main 入口），',
+        '`mod.json` 写 `"folium": 1` 的模组看到的接口冻结在 Folium 1.10（`folium.host.folium` 读到 1.10，没有标着 Folium 2 的成员）。',
         '成员说明保留契约里的原文注释。平台规则（清单、权限、生命周期、安全模型）见 [Folium 规范](../../mods/README.md)，',
-        '从零开始写模组、调试与发布到模组市场见 [模组开发与贡献指南](contributing.md)。',
+        '从零开始写模组、调试与发布到模组市场见 [模组开发与贡献指南](contributing.md)，写一个音源模组见 [写一个音源模组](sources.md)。',
         '',
         '## 目录',
         '',

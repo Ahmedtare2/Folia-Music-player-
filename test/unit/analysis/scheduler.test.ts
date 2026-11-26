@@ -354,9 +354,16 @@ describe('where and how hard a task runs', () => {
     });
 
     it('hurries only when the quiet level would be late', () => {
-        expect(chooseCpuThreads({ quietFinish: 1e9 })).toBe('quiet');
-        expect(chooseCpuThreads({ deadline: 60_000, quietFinish: 60_000 - DEADLINE_MARGIN_MS - 1 })).toBe('quiet');
-        expect(chooseCpuThreads({ deadline: 60_000, quietFinish: 60_000 })).toBe('hurry');
+        expect(chooseCpuThreads({ quietFinish: 1e9, hurryFinish: 0 })).toBe('quiet');
+        expect(chooseCpuThreads({ deadline: 60_000, quietFinish: 60_000 - DEADLINE_MARGIN_MS - 1, hurryFinish: 0 })).toBe('quiet');
+        expect(chooseCpuThreads({ deadline: 60_000, quietFinish: 60_000, hurryFinish: 59_999 })).toBe('hurry');
+    });
+
+    // Measured after PR #750, 2026-10-19: more threads are not always sooner - a rebuild for the other
+    // count, a worker whose one MNN thread pool was made for fewer - so late alone does not hurry.
+    it('stays quiet when the hurry level would not finish sooner', () => {
+        expect(chooseCpuThreads({ deadline: 60_000, quietFinish: 60_000, hurryFinish: 60_000 })).toBe('quiet');
+        expect(chooseCpuThreads({ deadline: 60_000, quietFinish: 60_000, hurryFinish: 61_000 })).toBe('quiet');
     });
 });
 
@@ -377,5 +384,36 @@ describe('tasks that submit their next unit once the last one answers', () => {
         };
         await Promise.all([task('A', 'background', 3), task('D', 'onScreen', 3)]);
         expect(ran.join('')).toBe('ADDDAA');
+    });
+});
+
+describe('telling who listens when a unit starts and ends', () => {
+    // gpuActivity.ts counts the running units from these: a unit that fails or throws must still end,
+    // or 町景's adaptive degrade would skip its frames for good.
+    const watch = () => {
+        const heard: string[] = [];
+        const scheduler = createScheduler({ log: () => undefined, onUnit: active => heard.push(active ? 'start' : 'end') });
+        return { heard, scheduler };
+    };
+
+    it('tells a start, then an end once the unit answers', async () => {
+        const { heard, scheduler } = watch();
+        const answer = await scheduler.submit({ kind: 'htdemucs', urgency: 'background', run: async () => { heard.push('run'); return 'done'; } });
+        expect(answer).toBe('done');
+        expect(heard).toEqual(['start', 'run', 'end']);
+    });
+
+    it('tells the end of a unit that rejects', async () => {
+        const { heard, scheduler } = watch();
+        const failed = scheduler.submit({ kind: 'htdemucs', urgency: 'background', run: async () => { heard.push('run'); throw new Error('lost device'); } });
+        await expect(failed).rejects.toThrow('lost device');
+        expect(heard).toEqual(['start', 'run', 'end']);
+    });
+
+    it('tells the end of a unit that throws before its first await', async () => {
+        const { heard, scheduler } = watch();
+        const failed = scheduler.submit({ kind: 'htdemucs', urgency: 'background', run: () => { heard.push('run'); throw new Error('no model'); } });
+        await expect(failed).rejects.toThrow('no model');
+        expect(heard).toEqual(['start', 'run', 'end']);
     });
 });

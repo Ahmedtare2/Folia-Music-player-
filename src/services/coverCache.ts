@@ -11,6 +11,7 @@ import {
 import { readLocalCoverBinaryBlob } from './localCoverBinaryStore';
 import { extractAssetIdFromCoverUrl } from './localCoverRuntime';
 import { lyricProxyWebUrl } from './lyricProxy';
+import { isCoverFetchedThroughProxy } from '../utils/coverUrl';
 
 interface StoredCoverDescriptor extends BinaryAssetWriteResult { }
 
@@ -32,20 +33,11 @@ const isValidCoverImageBlob = (blob: Blob | null | undefined): blob is Blob => {
 
 const buildCoverRequestUrl = (coverUrl: string): string => {
     if (typeof window !== 'undefined' && window.electron) return coverUrl;
-    try {
-        const hostname = new URL(coverUrl).hostname;
-        if (hostname === 'y.gtimg.cn'
-            || hostname === 'kugou.com' || hostname.endsWith('.kugou.com')
-            || hostname === 'kgimg.com' || hostname.endsWith('.kgimg.com')) {
-            return lyricProxyWebUrl(coverUrl);
-        }
-    } catch {
-        return coverUrl;
-    }
-    return coverUrl;
+    // Which hosts send no CORS headers is their picture rules' to say (utils/coverUrl.ts).
+    return isCoverFetchedThroughProxy(coverUrl) ? lyricProxyWebUrl(coverUrl) : coverUrl;
 };
 
-const fetchCoverBlob = async (coverUrl: string): Promise<Blob> => {
+export const fetchCoverBlob = async (coverUrl: string): Promise<Blob> => {
     const localAssetId = extractAssetIdFromCoverUrl(coverUrl);
     if (localAssetId) {
         const opfsBlob = await readLocalCoverBinaryBlob(localAssetId);

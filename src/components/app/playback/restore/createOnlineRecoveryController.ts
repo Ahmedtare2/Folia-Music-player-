@@ -9,7 +9,7 @@ import {
     isNavidromePlaybackSong,
     isSamePlaybackSong,
     isStagePlaybackSong,
-    replacePlaybackSongInQueue,
+    replacePlaybackSongWhereQueued,
 } from '../../../../utils/appPlaybackGuards';
 import { setAudioSrc, setCurrentSong, setPlayQueue, usePlaybackStore } from '../../../../stores/usePlaybackStore';
 import { askedSongKeyRef, startOfAskedSong } from '../currentSong';
@@ -64,11 +64,11 @@ export const getOnlineRecoveryKey = (src: string | null | undefined): string | n
 
     try {
         const parsedUrl = new URL(src);
-        // The desktop app's own YouTube Music and Spotify stream URLs are new on every request too:
-        // without this a track that keeps failing would be refreshed forever, each time under a
-        // different string.
-        if (parsedUrl.protocol === 'folia-ytm:' || parsedUrl.protocol === 'folia-spotify:') {
-            return `${parsedUrl.protocol}//${parsedUrl.host}${parsedUrl.pathname}`;
+        // A source mod's `_media` address that is made anew for every request carries its one-time key in `once`
+        // (api.media.serve): the rest of the address names the file.
+        if (parsedUrl.protocol === 'folia-mod:' && parsedUrl.searchParams.has('once')) {
+            parsedUrl.searchParams.delete('once');
+            return parsedUrl.href;
         }
         // Only remote streams carry a token in the query; blob: and friends have no meaningful origin.
         if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
@@ -179,11 +179,14 @@ export const createOnlineRecoveryController = ({
                     });
                     // The queue as it is now: a retry can be pressed long after the error, and the
                     // queue's edits made meanwhile stay.
-                    const resolvedQueue = replacePlaybackSongInQueue(usePlaybackStore.getState().playQueue, resolvedSong);
-                    setPlayQueue(resolvedQueue);
+                    // Only the entry is refreshed with its gain: a song the queue no longer holds (the user
+                    // removed it, or a mod replaced the queue) is not put back in front of it.
+                    const liveQueue = usePlaybackStore.getState().playQueue;
+                    const resolvedQueue = replacePlaybackSongWhereQueued(liveQueue, resolvedSong);
+                    if (resolvedQueue) setPlayQueue(resolvedQueue);
                     void persistLastPlaybackCache(
                         resolvedSong,
-                        resolvedQueue,
+                        resolvedQueue ?? liveQueue,
                     );
                 }
 

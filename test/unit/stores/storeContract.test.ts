@@ -171,6 +171,14 @@ describe('store contract', () => {
             // so the settings store drives the position store. Same shape as the edge above, and
             // the reverse edge is likewise absent: the position store imports no store at all.
             useHomeLayoutSettingsStore: ['useHomeCardPositionStore'],
+            // The explore feed's own memory across sessions (section order, collections taken
+            // out): a module of the store's, not another store, kept beside it in src/stores/.
+            // Nothing else imports it, and it imports no store besides storagePrimitives.
+            useExploreFeedStore: ['exploreFeedMemory'],
+            // The command palette's three pinned slots (normalizing and persisting them): the
+            // settings modal store's own persistence module, not another store, kept beside it
+            // in src/stores/. It imports no store besides storagePrimitives.
+            useSettingsModalStore: ['pinnedCommandPreferences'],
         };
         const INFRASTRUCTURE = new Set([
             'storagePrimitives', 'useStatusMessageStore', 'visualizerSettingsPersistence', 'motionSignals',
@@ -192,6 +200,8 @@ describe('store contract', () => {
         expect(storesBehindTunings()).toContain('useVisualizerAssetStore');
     });
 
+    // It reads every .ts file under src/, test/ and dev/: next to the suite's real source builds (buildSources.test.ts)
+    // that takes past the default 5 s on a Windows machine, so it gets a limit of its own.
     it('leaves no reference to a store module that no longer exists', () => {
         // Two ways to name a store that tsc cannot check, both of which fail silently:
         //   a Playwright spec importing a store by runtime path string inside page.evaluate
@@ -232,5 +242,5 @@ describe('store contract', () => {
         }
 
         expect(dangling).toEqual([]);
-    });
+    }, 30_000);
 });

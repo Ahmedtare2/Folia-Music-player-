@@ -117,6 +117,23 @@ describe('fromFoliumLines', () => {
         expect(second.renderHints).toEqual(buildLineRenderHints(second));
     });
 
+    it('keeps where the chorus of a rebuilt chorus line came from, which mods do not see', () => {
+        const fromSource = line({ startTime: 3, endTime: 4, isChorus: true, chorusOrigin: 'source' });
+        const guessed = line({ startTime: 5, endTime: 6, isChorus: true, chorusOrigin: 'text' });
+        const dtos = toFoliumLines([fromSource, guessed]);
+        expect(dtos[0]).not.toHaveProperty('chorusOrigin');
+        const [first, second, added] = fromFoliumLines([fromSource, guessed], dtos, [
+            { ...dtos[0], translation: 'a' },
+            { ...dtos[1], translation: 'b' },
+            { ...dtos[0], startTime: 7, endTime: 8 },
+        ]);
+        expect(first).toMatchObject({ isChorus: true, chorusOrigin: 'source', translation: 'a' });
+        expect(second).toMatchObject({ isChorus: true, chorusOrigin: 'text' });
+        // A chorus line no original line started with: not known to be the source's, so recorded as guessed
+        // (a chorus line without an origin only ever comes from lyrics cached before origins were kept).
+        expect(added).toMatchObject({ isChorus: true, chorusOrigin: 'text' });
+    });
+
     it('drops a word split that no longer joins back to the text', () => {
         const source = line();
         const dtos = toFoliumLines([source]);
@@ -167,6 +184,13 @@ describe('folium.lyrics helpers', () => {
         expect(FOLIUM_LYRICS_HELPERS.getRecentCompletedLine(lines, -1, 3.9)).toBe(lines[1]);
     });
 
+    // Folium 2: a source marks its lyrics instrumental by the host's own rule (Bodian's lyrics@1).
+    it('tells the instrumental notice by the host’s rule', () => {
+        expect(FOLIUM_LYRICS_HELPERS.isPureMusicText('[00:00.000]纯音乐，请欣赏')).toBe(true);
+        expect(FOLIUM_LYRICS_HELPERS.isPureMusicText('[00:01.00]歌里唱到纯音乐，请欣赏也没关系\n[00:02.00]第二句')).toBe(false);
+        expect(FOLIUM_LYRICS_HELPERS.isPureMusicText(null)).toBe(false);
+    });
+
     it('segments words with the saved split first', () => {
         expect(FOLIUM_LYRICS_HELPERS.segmentWords({ fullText: '你好世界', wordSegments: ['你好', '世界'] }).map((part) => part.segment))
             .toEqual(['你好', '世界']);
@@ -204,6 +228,7 @@ describe('toFoliumPlaybackFailureReason', () => {
     // without a row here fails the type check, and the length check below catches a dropped row.
     const CLASSES: Record<OnlineFailureCaseId, string> = {
         'sign-in-needed': 'auth',
+        'account-refused': 'restricted',
         'subscription-required': 'restricted',
         'purchase-required': 'restricted',
         'entitlement-required': 'restricted',
@@ -221,8 +246,8 @@ describe('toFoliumPlaybackFailureReason', () => {
         unknown: 'unknown',
     };
 
-    it('classes all sixteen host reasons', () => {
-        expect(Object.keys(CLASSES)).toHaveLength(16);
+    it('classes all seventeen host reasons', () => {
+        expect(Object.keys(CLASSES)).toHaveLength(17);
         for (const [reason, expected] of Object.entries(CLASSES)) {
             expect(toFoliumPlaybackFailureReason(reason as OnlineFailureCaseId), reason).toBe(expected);
         }

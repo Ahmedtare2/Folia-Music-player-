@@ -1,3 +1,4 @@
+import { isCapacitorNativePlatform } from '../utils/platform';
 // src/stores/useHomeLayoutSettingsStore.ts
 // Home surface layout: which grid style the home page uses and which tabs it offers.
 //
@@ -5,7 +6,6 @@
 
 import { create } from 'zustand';
 import i18n from '../i18n/config';
-import { isCapacitorNativePlatform } from '../utils/platform';
 import { getStoredBoolean, setStoredBoolean } from './storagePrimitives';
 import { useHomeCardPositionStore } from './useHomeCardPositionStore';
 import { setStatusMessage } from './useStatusMessageStore';
@@ -37,6 +37,8 @@ export type HomeLayoutSettingsState = {
     grid3dCardStyle: 'image' | 'card';
     handleSetGrid3dCardStyle: (style: 'image' | 'card') => void;
     homeLayoutStyle: 'carousel' | 'grid';
+    /** The Folia group (aggregate playlists) in the home screen's first row of tabs. */
+    showHomeTabFolia: boolean;
     showHomeTabPlaylist: boolean;
     showHomeTabRadio: boolean;
     showHomeTabAlbums: boolean;
@@ -44,6 +46,7 @@ export type HomeLayoutSettingsState = {
     /** Shown only where the active platform has an explore page; this hides it there too. */
     showHomeTabExplore: boolean;
     handleSetHomeLayoutStyle: (style: 'carousel' | 'grid') => void;
+    handleToggleHomeTabFolia: (show: boolean) => void;
     handleToggleHomeTabPlaylist: (show: boolean) => void;
     handleToggleHomeTabRadio: (show: boolean) => void;
     handleToggleHomeTabAlbums: (show: boolean) => void;
@@ -51,7 +54,7 @@ export type HomeLayoutSettingsState = {
     handleToggleHomeTabExplore: (show: boolean) => void;
 };
 
-export const useHomeLayoutSettingsStore = create<HomeLayoutSettingsState>((set) => ({
+export const useHomeLayoutSettingsStore = create<HomeLayoutSettingsState>((set, get) => ({
     rememberHomeCardPosition: getStoredBoolean('remember_home_card_position', true),
     handleToggleRememberHomeCardPosition: (remember) => {
         set({ rememberHomeCardPosition: remember });
@@ -68,13 +71,12 @@ export const useHomeLayoutSettingsStore = create<HomeLayoutSettingsState>((set) 
         });
     },
     homeLayoutStyle: readStoredHomeLayoutStyle(),
-    // On Android native builds, default the home experience to offline-first Local Music while
-    // keeping online tabs optional in Settings and preserving all desktop/web defaults.
+    showHomeTabFolia: getStoredBoolean('show_home_tab_folia', true),
     showHomeTabPlaylist: getStoredBoolean('show_home_tab_playlist', !isCapacitorNativePlatform()),
     showHomeTabRadio: getStoredBoolean('show_home_tab_radio', !isCapacitorNativePlatform()),
     showHomeTabAlbums: getStoredBoolean('show_home_tab_albums', !isCapacitorNativePlatform()),
     showHomeTabLocal: getStoredBoolean('show_home_tab_local', true),
-    showHomeTabExplore: getStoredBoolean('show_home_tab_explore', !isCapacitorNativePlatform()),
+    showHomeTabExplore: getStoredBoolean('show_home_tab_explore', true),
     handleSetHomeLayoutStyle: () => {
         if (typeof window !== 'undefined') {
             localStorage.setItem('home_layout_style', 'grid');
@@ -84,6 +86,10 @@ export const useHomeLayoutSettingsStore = create<HomeLayoutSettingsState>((set) 
             type: 'info',
             text: i18n.t('notifications.homeLayoutGrid'),
         });
+    },
+    handleToggleHomeTabFolia: (show) => {
+        set({ showHomeTabFolia: show });
+        setStoredBoolean('show_home_tab_folia', show);
     },
     handleToggleHomeTabPlaylist: (show) => {
         set({ showHomeTabPlaylist: show });
@@ -103,7 +109,7 @@ export const useHomeLayoutSettingsStore = create<HomeLayoutSettingsState>((set) 
     },
     handleToggleHomeTabExplore: (show) => {
         set({ showHomeTabExplore: show });
-        setStoredBoolean('show_home_tab_explore', show);
+        if (typeof window !== 'undefined') localStorage.setItem('show_home_tab_explore', show.toString());
     },
 }));
 
@@ -117,12 +123,14 @@ export const selectHomeLayoutSettingsSnapshot = (state: HomeLayoutSettingsState)
     grid3dCardStyle: state.grid3dCardStyle,
     handleSetGrid3dCardStyle: state.handleSetGrid3dCardStyle,
     homeLayoutStyle: state.homeLayoutStyle,
+    showHomeTabFolia: state.showHomeTabFolia,
     showHomeTabPlaylist: state.showHomeTabPlaylist,
     showHomeTabRadio: state.showHomeTabRadio,
     showHomeTabAlbums: state.showHomeTabAlbums,
     showHomeTabLocal: state.showHomeTabLocal,
     showHomeTabExplore: state.showHomeTabExplore,
     handleSetHomeLayoutStyle: state.handleSetHomeLayoutStyle,
+    handleToggleHomeTabFolia: state.handleToggleHomeTabFolia,
     handleToggleHomeTabPlaylist: state.handleToggleHomeTabPlaylist,
     handleToggleHomeTabRadio: state.handleToggleHomeTabRadio,
     handleToggleHomeTabAlbums: state.handleToggleHomeTabAlbums,

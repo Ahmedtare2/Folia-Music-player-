@@ -821,11 +821,12 @@ describe('Phase 4: Mobile-first Android player architecture & usability', () => 
             }),
         ];
 
-        const playlists: LocalPlaylist[] = [
+        const playlists = [
             {
                 id: 'fav',
                 name: 'Favorites',
-                songIds: ['s1', 's2'],
+                entryCount: 2,
+                coverLocalSongIds: ['s1', 's2'],
                 createdAt: 1000,
                 updatedAt: 2000,
                 isFavorite: true,

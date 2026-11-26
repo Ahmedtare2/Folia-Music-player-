@@ -34,8 +34,9 @@
 // The frames waited are watched too, with no unit running (found by review): a picture that drops
 // frames then as well drops them on its own (a heavy picture, a 60 fps picture on a 120 Hz display,
 // a hitch), and waiting does nothing for it - back to back again. So is a wait no frame ended (a
-// minimised or covered window, which Electron's backgroundThrottling: false keeps "visible"), and a
-// unit no frame was drawn under: there is no picture to yield to. The frames waited count in a
+// minimised or covered window, which Electron's backgroundThrottling: false keeps "visible"; with
+// 后台节流 switched on, a hidden one that draws nothing), and a unit no frame was drawn under: there is
+// no picture to yield to. The frames waited count in a
 // task's estimated finish.
 
 export type Urgency = 'transition' | 'onScreen' | 'background';
@@ -72,12 +73,14 @@ export interface SchedulerOptions {
     /** Frame gaps (ms) while a unit runs, from `watchFrames`; absent in tests and off the renderer. */
     frames?: FrameWatch | null;
     log?: (line: string) => void;
+    /** Told when a unit starts (true) and ends (false): gpuActivity.ts, for visualizers that adapt to frame time. */
+    onUnit?: (active: boolean) => void;
 }
 
 /** A unit's or a load's time, before any has been measured: rough M4 figures, replaced by the first measurement. */
 const FIRST_GUESS_MS: Record<string, number> = { htdemucs: 190, beat_this: 500, percussive: 50, load: 1500 };
-/** Weight of the newest measurement in the moving average. */
-const EWMA = 0.2;
+/** Weight of the newest measurement in the moving average. Automix's CPU estimate weighs its runs the same (automix/stems.ts). */
+export const EWMA = 0.2;
 const URGENCY_RANK: Record<Urgency, number> = { transition: 0, onScreen: 1, background: 2 };
 /**
  * A background unit that has waited this long ranks with what is on screen (first come first served
@@ -109,7 +112,7 @@ export interface Scheduler {
 
 const hasDeadline = (request: UnitRequest<unknown>) => request.deadline !== undefined && Number.isFinite(request.deadline);
 
-export const createScheduler = ({ now = () => performance.now(), isLoaded = () => true, frames = null, log = line => console.info(line) }: SchedulerOptions = {}): Scheduler => {
+export const createScheduler = ({ now = () => performance.now(), isLoaded = () => true, frames = null, log = line => console.info(line), onUnit }: SchedulerOptions = {}): Scheduler => {
     const queue: Entry[] = [];
     const averages = new Map<string, number>();
     const loads = new Map<string, number>();
@@ -216,6 +219,7 @@ export const createScheduler = ({ now = () => performance.now(), isLoaded = () =
         running = { kind: request.kind, started };
         loadedDuringUnit = 0;
         frames?.begin();
+        onUnit?.(true);
         // Measured before the caller hears back, so whatever it asks next is estimated with this unit in.
         const finish = (answered: boolean) => {
             const took = now() - started - loadedDuringUnit;
@@ -238,6 +242,7 @@ export const createScheduler = ({ now = () => performance.now(), isLoaded = () =
             }
             running = null;
             busy = false;
+            onUnit?.(false);
         };
         let pending: Promise<unknown>;
         try {
@@ -253,7 +258,8 @@ export const createScheduler = ({ now = () => performance.now(), isLoaded = () =
         // review): a task that goes on submits its next unit only after a few awaits of its own, so
         // picked at once, the queue held only the other task's units and two tasks took strict turns,
         // whatever their deadlines and urgencies. The main window is not throttled
-        // (backgroundThrottling: false).
+        // (backgroundThrottling: false) unless 后台节流 is on; then, hidden and silent, it pumps at
+        // Chromium's background timer rate, which is what that switch asks for.
         ).finally(() => { setTimeout(pump, 0); });
     };
 
@@ -321,7 +327,7 @@ export type CpuThreadLevel = 'quiet' | 'hurry';
 /**
  * The CPU threads per level: quiet - a quarter of the logical cores, at least one, htdemucs at most
  * four (the user, 2026-10-17: four fill a four-core machine) - and hurry, about half of them, no
- * more: more was measured slower (electron/analysis/worker.cjs).
+ * more: more was measured slower (electron/analysis/threads.cjs).
  */
 export const cpuThreads = (cores: number, level: CpuThreadLevel, model: 'beat_this' | 'htdemucs'): number => {
     const quiet = Math.max(1, Math.floor(cores / 4));
@@ -329,9 +335,22 @@ export const cpuThreads = (cores: number, level: CpuThreadLevel, model: 'beat_th
     return model === 'htdemucs' ? Math.min(4, quiet) : quiet;
 };
 
-/** Quiet when it is estimated on time at the quiet level, else hurry. */
-export const chooseCpuThreads = ({ deadline, quietFinish }: { deadline?: number; quietFinish: number }): CpuThreadLevel => (
-    deadline === undefined || quietFinish + DEADLINE_MARGIN_MS < deadline ? 'quiet' : 'hurry'
+/**
+ * Quiet when it is estimated on time at the quiet level, else hurry.
+ * (Measured after PR #750, 2026-10-19: else hurry only when that is estimated to finish sooner, the
+ * rebuild for the other count included - more threads are not always sooner. A worker that built for
+ * the quiet level first runs a hurried build on the quiet level's threads (MNN makes one thread pool
+ * per process, at the first count it is asked for: electron/analysis/worker.cjs poolThreads): on a
+ * Ryzen 7 9700X such a worker took 8.8 s for a 30 s window at eight threads, four's time, where eight
+ * of its own took 6.4. Sooner rather than on time, because a window late for its deadline is still
+ * read late and may yet be used (automix/stems.ts getStemsByKey).)
+ * (Measured later the same evening: the hurried build gets its own threads now - the host sends a
+ * build for another count to a worker of its own (electron/analysis/host.cjs) - 6.6 s for that window
+ * after one at four, against 8.6 s on the shared pool. Sooner stays the rule: the new worker builds the
+ * model first, CPU_REBUILD_MS in automix/stems.ts.)
+ */
+export const chooseCpuThreads = ({ deadline, quietFinish, hurryFinish }: { deadline?: number; quietFinish: number; hurryFinish: number }): CpuThreadLevel => (
+    deadline === undefined || quietFinish + DEADLINE_MARGIN_MS < deadline || hurryFinish >= quietFinish ? 'quiet' : 'hurry'
 );
 
 export interface FrameWatch {

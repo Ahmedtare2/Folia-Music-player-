@@ -7,7 +7,7 @@ import { splitLyricGraphemes } from '../../../utils/lyrics/graphemeTiming';
 import { segmentTextWords } from '../../../utils/lyrics/wordSegmentation';
 import type { CreditsFrame, SongMetadata } from './lumiereKernel';
 import { hexOf, type Rgb } from './color';
-import { createBloomFilter } from './light/bloomFilter';
+import { createBloomFilter } from '../pixi/bloomFilter';
 import { createLightField } from './light/lightFieldShader';
 import { createMotes } from './light/motes';
 import { resolveBeams, type LightRig } from './light/rig';
@@ -188,6 +188,10 @@ export const createLumiereCredits = (pixi: PixiModule, options: {
     view.addChild(graphics, text);
     const graphicsBloom = createBloomFilter(pixi, { ...LUMIERE_BLOOM.graphics, strength: LUMIERE_BLOOM.graphics.strength * tuning.bloom, padding: 0, tint: [1, 1, 1] });
     const textBloom = createBloomFilter(pixi, { ...LUMIERE_BLOOM.text, strength: LUMIERE_BLOOM.text.strength * tuning.textBloom, padding: 0, tint: [1, 1, 1] });
+    // 抗锯齿跟随画布，和场景的两组一样。
+    graphicsBloom.antialias = 'inherit';
+    textBloom.antialias = 'inherit';
+    // 与场景的文字组相同：固定的 bloom 区域（被视口裁剪成整个画面），光晕才不会随字的运动抖动。
     text.filterArea = new pixi.Rectangle(-width, -height, width * 3, height * 3);
     graphics.filters = tuning.bloom > 0 ? [graphicsBloom] : [];
     text.filters = tuning.textBloom > 0 ? [textBloom] : [];

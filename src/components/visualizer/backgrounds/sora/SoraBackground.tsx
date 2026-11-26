@@ -4,7 +4,7 @@ import * as twgl from 'twgl.js';
 import { Theme } from '../../../../types';
 import { AMBIENT_BACKGROUND_DPR_SCALE, AMBIENT_BACKGROUND_MAX_DIMENSION_PX } from '../../../../utils/mobileVisualizerBudget';
 import { isAppForegroundVisible, subscribeAppForegroundVisibility } from '../../../../utils/visualizerVisibilityGate';
-import { parseColorChannels } from '../../colorMix';
+import { parseColorChannels } from '../../../../utils/colorMix';
 import { useBlendedColors } from '../useBlendedColors';
 
 // src/components/visualizer/backgrounds/sora/SoraBackground.tsx

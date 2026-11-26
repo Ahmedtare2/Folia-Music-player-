@@ -1,12 +1,10 @@
 // src/services/audioEffects/effectSources.ts
 // Generates the waveshaper curves and audio buffers used by the effect chain.
 
-const SATURATION_SAMPLES = 2048;
+const SATURATION_SAMPLES = 1024;
 const CRUSH_SAMPLES = 8192;
 
-const SATURATION_REFERENCE_AMPLITUDE = 0.45;
-// Soft-knee ceiling (-0.45 dBFS ~= 0.95 linear) so waveshaper never outputs > 0 dBFS.
-const SOFT_CLIP_CEILING = 0.95;
+const SATURATION_REFERENCE_AMPLITUDE = 0.5;
 
 // Measures how much a transfer shape lifts a reference sine so the curve can cancel that lift again.
 // Without it, soft-clipping a typical -6 dBFS signal would come back several dB louder than it went in.
@@ -20,33 +18,24 @@ const measureSaturationCompensation = (shape: number, scale: number) => {
     }
     const shapedRms = Math.sqrt(energy / cycleSamples);
     const referenceRms = SATURATION_REFERENCE_AMPLITUDE / Math.SQRT2;
-    return shapedRms > 0 ? Math.min(1.0, referenceRms / shapedRms) : 1;
+    return shapedRms > 0 ? referenceRms / shapedRms : 1;
 };
 
-/**
- * Builds a clean, soft-knee tanh warmth & peak-taming transfer curve:
- * - When `amount <= 0`, returns `null` so WebAudio's WaveShaperNode acts as a true 32-bit floating-point
- *   linear passthrough without clamping peaks to [-1, +1].
- * - When `amount > 0`, applies gentle linear passthrough up to -3 dBFS (~0.707) and smooth `tanh`
- *   soft-knee compression above that ceiling, capped strictly at SOFT_CLIP_CEILING (0.95) so heavy
- *   bass hits stay warm and round instead of square-wave clipped.
- */
+// Builds a loudness-matched tanh transfer curve: more drive means more harmonics, not more level.
 export const createSaturationCurve = (amount: number) => {
     if (amount <= 0) {
         return null;
     }
 
-    // Gentle warmth factor (1.0 .. 2.4) so presets like 'bass' (drive: 0.1) add subtle analog
-    // saturation rather than harsh overdrive distortion on sub-bass waves.
-    const shape = 1 + amount * 1.4;
+    // Kept gentle on purpose: this is a warmth stage, not a distortion pedal. At the top of the
+    // range a peak-level signal lands around 20% THD, and typical preset amounts stay near 5%.
+    const shape = 1 + amount * 4;
     const scale = Math.tanh(shape);
     const compensation = measureSaturationCompensation(shape, scale);
     const curve = new Float32Array(SATURATION_SAMPLES);
     for (let index = 0; index < SATURATION_SAMPLES; index += 1) {
         const input = (index / (SATURATION_SAMPLES - 1)) * 2 - 1;
-        const raw = (Math.tanh(shape * input) / scale) * compensation;
-        // Enforce soft-knee ceiling so the waveshaper stage never exceeds -0.45 dBFS
-        curve[index] = Math.max(-SOFT_CLIP_CEILING, Math.min(SOFT_CLIP_CEILING, raw));
+        curve[index] = (Math.tanh(shape * input) / scale) * compensation;
     }
     return curve;
 };

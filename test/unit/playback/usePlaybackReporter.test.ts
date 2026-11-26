@@ -46,15 +46,31 @@ vi.mock('@/services/onlineMusic/songMetadata', () => ({
     getProviderSongMetadata: (song: SongResult) => ({ durationMs: song.durationMs ?? 0, artists: [] }),
 }));
 
-const audioSettings = vi.hoisted(() => ({ neteaseScrobbleEnabled: true, audioQuality: 'high' }));
+const audioSettings = vi.hoisted(() => ({ playbackReportEnabled: { netease: true } as Record<string, boolean>, audioQuality: 'high' }));
 const useAudioSettingsStore = vi.hoisted(() => {
-    const hook = (selector: (state: { neteaseScrobbleEnabled: boolean; audioQuality: string }) => unknown) => selector(audioSettings);
+    const hook = (selector: (state: { playbackReportEnabled: Record<string, boolean>; audioQuality: string }) => unknown) => selector(audioSettings);
     hook.getState = () => audioSettings;
     return hook;
 });
-vi.mock('@/stores/useAudioSettingsStore', () => ({ useAudioSettingsStore }));
+vi.mock('@/stores/useAudioSettingsStore', () => ({
+    useAudioSettingsStore,
+    // Per source (Folium 2.0 S1): the setting of the song's own source.
+    isPlaybackReportEnabled: (state: { playbackReportEnabled: Record<string, boolean> }, providerId: string | null | undefined) => (
+        Boolean(providerId && state.playbackReportEnabled[providerId])
+    ),
+}));
+
+// Only the playback route is read: on the HiFi route the listeners go on the HiFi media shim instead of the deck.
+const playback = vi.hoisted(() => ({ state: { playbackRoute: 'web' as 'web' | 'hifi' } }));
+vi.mock('@/stores/usePlaybackStore', () => ({
+    usePlaybackStore: Object.assign(
+        (selector: (state: typeof playback.state) => unknown) => selector(playback.state),
+        { getState: () => playback.state },
+    ),
+}));
 
 const { usePlaybackReporter } = await import('@/components/app/playback/bridges/usePlaybackReporter');
+const { hifiMediaShim } = await import('@/services/hifi/hifiMediaShim');
 
 /**
  * A clock that moves with playback.
@@ -133,11 +149,13 @@ describe('usePlaybackReporter', () => {
         cleanups = [];
         gate.isPlaybackReportReady.mockReset().mockReturnValue(true);
         gate.sendPlaybackReport.mockReset().mockResolvedValue(true);
-        audioSettings.neteaseScrobbleEnabled = true;
+        audioSettings.playbackReportEnabled = { netease: true };
         clock.now = 1_700_000_000_000;
         vi.spyOn(Date, 'now').mockImplementation(() => clock.now);
         deck = createDeck();
         audioRef.current = deck;
+        playback.state.playbackRoute = 'web';
+        hifiMediaShim.reset();
     });
 
     it('reports the finished track when the queue moves on', () => {
@@ -194,11 +212,27 @@ describe('usePlaybackReporter', () => {
         expect(gate.sendPlaybackReport).not.toHaveBeenCalled();
     });
 
+    // 审查第 2 条：上报设置按音源存之后，切到别的来源的歌（或本地歌）时，上一首照旧按它自己来源的设置结算。
+    it('reports the outgoing track when the queue moves on to a song of another source, or a local one', () => {
+        render(song('1'));
+        deck.playFor(45);
+        render(song('q1', { sourceRef: { kind: 'online', providerId: 'qq', mediaId: 'q1' } }));
+        expect(gate.sendPlaybackReport).toHaveBeenCalledTimes(1);
+        expect(reportedSong(0)).toMatchObject({ id: '1' });
+
+        render(song('3'));
+        deck.playFor(50);
+        audioRef.current = createDeck();
+        render(song('local-1', { sourceRef: { kind: 'local', mediaId: 'local-1' } } as Partial<SongResult>), 'B');
+        expect(gate.sendPlaybackReport).toHaveBeenCalledTimes(2);
+        expect(reportedSong(1)).toMatchObject({ id: '3' });
+    });
+
     it('drops the listen in progress when the setting is switched off', () => {
         render(song('1'));
         deck.playFor(45);
 
-        audioSettings.neteaseScrobbleEnabled = false;
+        audioSettings.playbackReportEnabled = { netease: false };
         render(song('1'));
         render(song('2'));
 
@@ -244,6 +278,42 @@ describe('usePlaybackReporter', () => {
 
         expect(gate.isPlaybackReportReady).toHaveBeenCalledWith(first);
         expect(gate.isPlaybackReportReady).not.toHaveBeenCalledWith();
+    });
+
+    it('follows the song onto the HiFi media shim when the route changes, and back', () => {
+        let position = 0;
+        hifiMediaShim.setClockReader(() => position);
+        const tick = (seconds: number) => {
+            for (let step = 0; step < Math.round(seconds / 0.25); step += 1) {
+                position += 0.25;
+                clock.now += 250;
+                hifiMediaShim.dispatchEvent(new Event('timeupdate'));
+            }
+        };
+
+        render(song('1'));
+        deck.playFor(10);
+        // The next song plays through mpv: same hook, same ref, only the route moved.
+        playback.state.playbackRoute = 'hifi';
+        hifiMediaShim.beginTrack('online:netease:2#a');
+        hifiMediaShim.setDuration(240);
+        hifiMediaShim.markPlaying();
+        render(song('2'));
+        // The silent deck reports nothing any more; the shim's clock is what counts.
+        deck.playFor(60);
+        tick(45);
+        playback.state.playbackRoute = 'web';
+        hifiMediaShim.reset();
+        render(song('3'));
+
+        expect(gate.sendPlaybackReport).toHaveBeenCalledTimes(1);
+        expect(reportedSong(0)).toMatchObject({ id: '2' });
+        expect(reportedPayload(0)).toMatchObject({ playedSeconds: 45 });
+        // Back on the web route the deck is listened to again.
+        deck.playFor(45);
+        render(song('4'));
+        expect(gate.sendPlaybackReport).toHaveBeenCalledTimes(2);
+        expect(reportedSong(1)).toMatchObject({ id: '3' });
     });
 
     it('counts nothing while the deck is paused', () => {

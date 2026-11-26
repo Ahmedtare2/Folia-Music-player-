@@ -1,17 +1,15 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { initializeLocalCoverRuntime } from '../../../src/services/localCoverRuntime';
-import { isLocalCoverWebRuntimeSupported, readLocalCoverBinaryBlob } from '../../../src/services/localCoverBinaryStore';
+import { isLocalCoverWebRuntimeSupported } from '../../../src/services/localCoverBinaryStore';
 import { migrateLegacyLocalCoverAssetsInBackground } from '../../../src/services/localCoverAssetService';
 
 // test/unit/services/localCoverRuntime.test.ts
-// Verifies local-cover startup never waits on a service worker and re-requests covers once one takes control,
-// and resolves covers directly from OPFS in Capacitor Android where the web PWA worker is disabled.
+// Verifies local-cover startup never waits on a service worker and re-requests covers once one takes control.
 
 vi.mock('../../../src/services/localCoverBinaryStore', async importOriginal => ({
   ...await importOriginal<typeof import('../../../src/services/localCoverBinaryStore')>(),
   isLocalCoverWebRuntimeSupported: vi.fn(() => true),
-  readLocalCoverBinaryBlob: vi.fn(async () => null),
 }));
 
 vi.mock('../../../src/services/localCoverAssetService', () => ({
@@ -32,24 +30,15 @@ const addImage = (src: string, naturalWidth = 0): HTMLImageElement => {
 const flushMicrotasks = () => new Promise<void>(resolve => setTimeout(resolve, 0));
 
 describe('local cover runtime', () => {
-  let serviceWorker: EventTarget & {
-    register: ReturnType<typeof vi.fn>;
-    getRegistrations: ReturnType<typeof vi.fn>;
-  };
+  let serviceWorker: EventTarget & { register: ReturnType<typeof vi.fn> };
 
   beforeEach(() => {
-    delete (globalThis as { Capacitor?: unknown }).Capacitor;
-    serviceWorker = Object.assign(new EventTarget(), {
-      register: vi.fn(),
-      getRegistrations: vi.fn(async () => []),
-    });
+    serviceWorker = Object.assign(new EventTarget(), { register: vi.fn() });
     Object.defineProperty(navigator, 'serviceWorker', { configurable: true, value: serviceWorker });
     vi.mocked(isLocalCoverWebRuntimeSupported).mockReturnValue(true);
-    vi.mocked(readLocalCoverBinaryBlob).mockResolvedValue(null);
   });
 
   afterEach(() => {
-    delete (globalThis as { Capacitor?: unknown }).Capacitor;
     document.body.innerHTML = '';
     Reflect.deleteProperty(navigator, 'serviceWorker');
   });
@@ -96,27 +85,5 @@ describe('local cover runtime', () => {
     // Removed, then set back: the browser only re-requests an image whose src actually changes.
     expect(previousSources).toEqual([COVER_URL, null]);
     expect(broken.getAttribute('src')).toBe(COVER_URL);
-  });
-
-  it('unregisters stale service workers and hydrates cover images from OPFS in Capacitor Android', async () => {
-    const unregister = vi.fn(async () => true);
-    serviceWorker.getRegistrations.mockResolvedValueOnce([{ unregister }]);
-    (globalThis as { Capacitor?: unknown }).Capacitor = {
-      getPlatform: () => 'android',
-      isNativePlatform: () => true,
-    };
-    const fakeBlob = new Blob(['cover-bytes'], { type: 'image/webp' });
-    vi.mocked(readLocalCoverBinaryBlob).mockResolvedValueOnce(fakeBlob);
-    const createObjectUrlSpy = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:https://localhost/folia-cover-1');
-
-    const broken = addImage(COVER_URL);
-    initializeLocalCoverRuntime();
-    await flushMicrotasks();
-
-    expect(unregister).toHaveBeenCalledTimes(1);
-    expect(readLocalCoverBinaryBlob).toHaveBeenCalledWith(`sha256:${'a'.repeat(64)}`);
-    expect(broken.getAttribute('src')).toBe('blob:https://localhost/folia-cover-1');
-
-    createObjectUrlSpy.mockRestore();
   });
 });

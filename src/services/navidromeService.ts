@@ -641,7 +641,9 @@ export const navidromeApi = {
         query: string,
         artistCount: number = 5,
         albumCount: number = 10,
-        songCount: number = 20
+        songCount: number = 20,
+        songOffset: number = 0,
+        albumOffset: number = 0
     ): Promise<Search3Response['searchResult3']> => {
         try {
             const res = await fetchSubsonic<Search3Response>(config, 'search3', {
@@ -649,6 +651,8 @@ export const navidromeApi = {
                 artistCount: artistCount.toString(),
                 albumCount: albumCount.toString(),
                 songCount: songCount.toString(),
+                songOffset: songOffset.toString(),
+                albumOffset: albumOffset.toString(),
             });
             if (res['subsonic-response'].status === 'ok') {
                 return res['subsonic-response'].searchResult3 || {};
@@ -695,6 +699,10 @@ export const navidromeApi = {
                 path: song.path,
                 bitRate: song.bitRate,
                 suffix: song.suffix,
+                contentType: song.contentType,
+                bitDepth: song.bitDepth,
+                samplingRate: song.samplingRate,
+                channelCount: song.channelCount,
                 starred: song.starred,
                 replayGain: song.replayGain,
             },

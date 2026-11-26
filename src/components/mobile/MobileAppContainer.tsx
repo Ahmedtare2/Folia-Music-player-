@@ -1,9 +1,9 @@
+import type { FoliaPlaylistSummary } from '../../types/foliaPlaylist';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import type { MotionValue } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
 import {
-    type LocalPlaylist,
     type LocalSong,
     type LyricData,
     PlayerState,
@@ -20,7 +20,7 @@ import {
     importFolder,
     resyncAllFolders,
 } from '../../services/localMusicService';
-import { importLocalPlaylistFile } from '../../services/localPlaylistFileService';
+import { importLocalPlaylistFile } from '../../services/foliaPlaylist/foliaPlaylistM3u';
 import { getSongAlbumLabel, getSongArtistLabel } from '../../services/onlineMusic/songMetadata';
 import { usePlaybackStore } from '../../stores/usePlaybackStore';
 import { closeSettings, openSettings, useSettingsModalStore } from '../../stores/useSettingsModalStore';
@@ -38,7 +38,7 @@ import MobilePlayerShell from './MobilePlayerShell';
 
 interface MobileAppContainerProps {
     localSongs: LocalSong[];
-    localPlaylists: LocalPlaylist[];
+    localPlaylists: FoliaPlaylistSummary[];
     localLibraryCatalog: LocalLibraryDisplayCatalog;
     currentSong: SongResult | null;
     coverUrl: string | null;

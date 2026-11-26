@@ -1,7 +1,9 @@
-import type { LocalLibraryGroup, LocalPlaylist, LocalSong, SongResult } from '../../types';
+import type { FoliaPlaylistSummary } from '../../types/foliaPlaylist';
+import type { LocalLibraryGroup, LocalSong, SongResult } from '../../types';
 import type { LocalLibraryDisplayCatalog } from '../../services/playbackAdapters';
 import { getLocalCoverAssetUrl } from '../../services/localCoverAssetUrl';
 import { buildLocalHomeGroups } from '../../library/core/home/localHomeModel';
+import { buildFoliaHomeGroups } from '../../library/core/home/foliaHomeModel';
 
 // src/components/mobile/mobileNavigationModel.ts
 // Pure state, collection grouping, filtering/sorting, visualizer visibility, and hardware-Back
@@ -301,17 +303,18 @@ export const filterAndSortLocalSongs = (
 
 export const buildMobileLibraryCollections = (
     localSongs: LocalSong[],
-    localPlaylists: LocalPlaylist[],
+    localPlaylists: FoliaPlaylistSummary[],
     catalog: LocalLibraryDisplayCatalog | undefined,
     t: (key: string, fallback?: string) => string,
 ) => {
+    const coverResolver = (assetId: string | undefined, size = 512) => getLocalCoverAssetUrl(assetId, size);
     const groups = buildLocalHomeGroups(
         localSongs,
-        localPlaylists,
         ((key: string) => t(key, key)) as any,
         catalog,
-        (assetId, size = 512) => getLocalCoverAssetUrl(assetId, size),
+        coverResolver,
     );
+    const playlistGroups = buildFoliaHomeGroups(localPlaylists, localSongs, ((key: string) => t(key, key)) as any, coverResolver);
 
     const toDetail = (
         kind: MobileCollectionDetail['kind'],
@@ -340,7 +343,7 @@ export const buildMobileLibraryCollections = (
         albums: groups.albums.map(g => toDetail('album', g)),
         artists: groups.artists.map(g => toDetail('artist', g)),
         folders: groups.folders.map(g => toDetail('folder', g)),
-        playlists: groups.playlists.map(g => toDetail('playlist', g)),
+        playlists: playlistGroups.map(g => toDetail('playlist', g)),
     };
 };
 

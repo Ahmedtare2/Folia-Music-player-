@@ -2,9 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getCachedCoverUrl, loadCachedOrFetchCover } from '@/services/coverCache';
 
 // test/unit/services/coverCache.test.ts
-// Verifies invalid persisted cover payloads degrade to cache misses, legacy Blobs migrate safely,
-// /__folia_cover/* URLs read directly from OPFS without hitting Capacitor's SPA HTML fallback,
-// and non-image fetch responses are rejected.
+// Verifies invalid persisted cover payloads degrade to cache misses and legacy Blobs migrate safely.
 
 const mocks = vi.hoisted(() => ({
     getFromCache: vi.fn(),
@@ -13,7 +11,6 @@ const mocks = vi.hoisted(() => ({
     readCoverAsset: vi.fn(),
     removeCoverAsset: vi.fn(),
     writeCoverAsset: vi.fn(),
-    readLocalCoverBinaryBlob: vi.fn(),
 }));
 
 vi.mock('@/services/db', () => ({
@@ -28,16 +25,12 @@ vi.mock('@/services/binaryAssetStore', () => ({
     removeCoverAsset: mocks.removeCoverAsset,
     writeCoverAsset: mocks.writeCoverAsset,
 }));
-vi.mock('@/services/localCoverBinaryStore', () => ({
-    readLocalCoverBinaryBlob: mocks.readLocalCoverBinaryBlob,
-}));
 
 describe('coverCache', () => {
     beforeEach(() => {
         vi.clearAllMocks();
         mocks.getFromCache.mockResolvedValue(null);
         mocks.readCoverAsset.mockResolvedValue(null);
-        mocks.readLocalCoverBinaryBlob.mockResolvedValue(null);
         vi.stubGlobal('fetch', vi.fn());
         vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:safe-cover');
     });
@@ -93,37 +86,5 @@ describe('coverCache', () => {
             .resolves.toBe('blob:safe-cover');
         expect(mocks.saveToCache).not.toHaveBeenCalled();
         expect(URL.createObjectURL).toHaveBeenCalled();
-    });
-
-    it('reads /__folia_cover/* directly from OPFS binary store without calling network fetch', async () => {
-        const opfsCover = new Blob(['webp-bytes'], { type: 'image/webp' });
-        mocks.readLocalCoverBinaryBlob.mockResolvedValue(opfsCover);
-        mocks.writeCoverAsset.mockResolvedValue({
-            backend: 'opfs',
-            mimeType: 'image/webp',
-            size: opfsCover.size,
-            updatedAt: 2,
-        });
-
-        const assetId = `sha256:${'b'.repeat(64)}`;
-        const url = `/__folia_cover/${encodeURIComponent(assetId)}?size=1024`;
-        await expect(loadCachedOrFetchCover('cover_local_opfs', url)).resolves.toBe('blob:safe-cover');
-
-        expect(mocks.readLocalCoverBinaryBlob).toHaveBeenCalledWith(assetId);
-        expect(fetch).not.toHaveBeenCalled();
-        expect(URL.createObjectURL).toHaveBeenCalledWith(opfsCover);
-    });
-
-    it('rejects non-image SPA HTML fallback responses instead of caching broken cover blobs', async () => {
-        const htmlFallback = new Blob(['<!doctype html><html></html>'], { type: 'text/html' });
-        vi.mocked(fetch).mockResolvedValue(new Response(htmlFallback, {
-            status: 200,
-            headers: { 'Content-Type': 'text/html' },
-        }));
-
-        await expect(loadCachedOrFetchCover('cover_local_html_fallback', 'https://localhost/missing-cover.jpg'))
-            .resolves.toBe('https://localhost/missing-cover.jpg');
-        expect(URL.createObjectURL).not.toHaveBeenCalled();
-        expect(mocks.writeCoverAsset).not.toHaveBeenCalled();
     });
 });

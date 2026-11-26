@@ -1,8 +1,6 @@
-import { resolveMobileCanvasDpr } from '../../../utils/mobileVisualizerBudget';
 import { Theme } from '../../../types';
 import { resolveThemeFontStack } from '../../../utils/fontStacks';
-import { detectTextDirection } from '../../../utils/lyrics/arabicText';
-import { colorWithAlpha, mixColors } from '../colorMix';
+import { colorWithAlpha, mixColors } from '../../../utils/colorMix';
 import { clearCanvasTextGlow, fillGlowText, setCanvasTextGlow } from '../../../utils/glowBlurQuantize';
 import type { FumeBlock, RenderLineSlice, RenderSegmentSlice } from './fumeTypes';
 import type { FumeBlockTiming } from './fumeBlockFrame';
@@ -79,12 +77,13 @@ export const createStaticBlockSnapshot = (
     fillStyle: string,
     shadowBlur = 0,
     shadowColor = 'transparent',
+    // 快照的光栅密度（每个世界单位几个像素）：舞台传进来的已经乘上了分辨率倍数（#929）；没传就是原来的默认。
+    rasterScale = clamp(window.devicePixelRatio || 1, 1, 2),
 ) => {
     if (typeof document === 'undefined') {
         return null;
     }
 
-    const rasterScale = resolveMobileCanvasDpr(window.devicePixelRatio);
     const padding = Math.ceil(Math.max(block.fontPx * 0.32, shadowBlur + block.fontPx * 0.08, 4));
     const canvas = document.createElement('canvas');
     canvas.width = Math.max(1, Math.ceil((block.width + padding * 2) * rasterScale));
@@ -105,24 +104,11 @@ export const createStaticBlockSnapshot = (
     context.shadowColor = shadowColor;
 
     for (const renderLine of block.renderLines) {
-        if (renderLine.segments.length > 0) {
-            for (const segment of renderLine.segments) {
-                if (!segment.text) continue;
-                context.direction = segment.rtl ? 'rtl' : 'ltr';
-                context.fillText(
-                    segment.text,
-                    renderLine.left + padding + segment.x,
-                    renderLine.top + baselineOffset + padding,
-                );
-            }
-        } else {
-            context.direction = detectTextDirection(renderLine.text || block.line.fullText);
-            context.fillText(
-                renderLine.text,
-                renderLine.left + padding,
-                renderLine.top + baselineOffset + padding,
-            );
-        }
+        context.fillText(
+            renderLine.text,
+            renderLine.left + padding,
+            renderLine.top + baselineOffset + padding,
+        );
     }
 
     context.shadowBlur = 0;
@@ -202,7 +188,6 @@ export const drawFumeLiveBlock = (
                     continue;
                 }
 
-                context.direction = segment.rtl ? 'rtl' : 'ltr';
                 fillGlowText(context, segment.text, glowBaseX + segment.x, glowBaseY);
             }
         }
@@ -371,12 +356,7 @@ export const drawFumeLiveBlock = (
                                 glyphAdvance * 0.88,
                                 isCJK(grapheme) ? block.fontPx * 0.56 : block.fontPx * 0.38,
                             );
-                            const rawGlyphOffset = resolveSegmentGlyphOffset(segment, globalOffset);
-                            const totalSegmentWidth = segment.measuredGlyphOffsets[segment.measuredGlyphOffsets.length - 1] || segment.width;
-                            const visualGlyphOffset = segment.rtl
-                                ? Math.max(totalSegmentWidth - rawGlyphOffset - glyphAdvance, 0)
-                                : rawGlyphOffset;
-                            const blockCenterX = baseX + segment.x + visualGlyphOffset + glyphAdvance * 0.5;
+                            const blockCenterX = baseX + segment.x + resolveSegmentGlyphOffset(segment, globalOffset) + glyphAdvance * 0.5;
                             const dropDistance = block.lineHeight * (block.variant === 'hero' ? 0.24 : 0.2);
                             const activationBlockAlpha = blockPulse * (block.variant === 'hero' ? 0.82 : 0.72);
                             const activationBlockWidth = glyphVisualWidth + block.fontPx * (block.variant === 'hero' ? 0.18 : 0.12);

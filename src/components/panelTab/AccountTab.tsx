@@ -6,6 +6,7 @@ import type { LibraryAccountController, LibraryAccountSnapshot } from '../../lib
 import { useLibraryAccountProviders, useLibraryAccountSelector } from '../../library/core/account/useLibraryAccount';
 import { canLogoutProvider } from '../../library/core/account/accountRules';
 import { omni } from '../../services/onlineMusic/omni';
+import { providerDisplayName } from '../../i18n/providerName';
 import { openLoginWindow } from '../login/loginWindowStore';
 import { PlatformMark } from '../login/PlatformMark';
 import { Select } from '../modal/settings/kit';
@@ -14,6 +15,8 @@ import { GroupLine } from './shell/GroupLine';
 import { PanelButton } from './shell/PanelButton';
 import { PanelIconButton } from './shell/PanelIconButton';
 import { PanelRow } from './shell/PanelRow';
+import { shortAccountId } from '../../utils/accountIdDisplay';
+import { PlaybackSignalPathButton } from '../hifi/PlaybackSignalPathButton';
 
 // src/components/panelTab/AccountTab.tsx
 // The panel's account tab: who is signed in on the active platform (or that nobody is, or that the
@@ -66,6 +69,8 @@ const AccountTab: React.FC<AccountTabProps> = ({
     const qualityLevels = omni.getAudioQualityLevels(activeProviderId);
     const qualityOptions = AUDIO_QUALITY_OPTIONS.filter(option => qualityLevels.includes(option.value));
     const litQuality = omni.resolveAudioQuality(activeProviderId, audioQuality);
+    // A provider whose sound the preference does not choose now (its own player has its own setting) says where it is set.
+    const qualityNoticeKey = omni.audioQualityNoticeKey(activeProviderId);
 
     const handleLogout = () => accountController.logout(activeProviderId);
     // The sign-in of the platform in use ran out: the account has left, and the row says so.
@@ -105,7 +110,7 @@ const AccountTab: React.FC<AccountTabProps> = ({
                             )}
                         </div>
                         <div className="truncate text-xs leading-[18px] text-[color:var(--st-t2)]">
-                            {activeSummary?.shortName || activeSummary?.displayName || activeProviderId} · ID: {String(activeUser.id)}
+                            {activeSummary ? providerDisplayName(t, activeSummary, activeProviderId) : activeProviderId} · ID: {shortAccountId(String(activeUser.id))}
                         </div>
                     </div>
                     <PanelIconButton label={t('account.logout')} disabled={!canLogout} onClick={() => void handleLogout()}>
@@ -122,17 +127,23 @@ const AccountTab: React.FC<AccountTabProps> = ({
 
             {/* Provider-independent audio quality preference; each online provider maps these semantic presets. */}
             <PanelRow label={t('account.audioQuality')}>
-                <Select
-                    name={t('account.audioQuality')}
-                    // The panel sits at the bottom of the window: a list that opens down covers the tab row.
-                    preferAbove
-                    value={litQuality}
-                    options={qualityOptions.map(option => ({ value: option.value, label: t(option.labelKey) }))}
-                    // (The lit level is where the stored preference already stands on this provider: choosing it
-                    // changes nothing here, and must not lower what is stored for the other providers.)
-                    onChange={(quality) => { if (quality !== litQuality) onAudioQualityChange(quality); }}
-                />
+                {qualityNoticeKey ? (
+                    <span className="text-right text-xs leading-[18px] text-[color:var(--st-t2)]">{t(qualityNoticeKey)}</span>
+                ) : (
+                    <Select
+                        name={t('account.audioQuality')}
+                        // The panel sits at the bottom of the window: a list that opens down covers the tab row.
+                        preferAbove
+                        value={litQuality}
+                        options={qualityOptions.map(option => ({ value: option.value, label: t(option.labelKey) }))}
+                        // (The lit level is where the stored preference already stands on this provider: choosing it
+                        // changes nothing here, and must not lower what is stored for the other providers.)
+                        onChange={(quality) => { if (quality !== litQuality) onAudioQualityChange(quality); }}
+                    />
+                )}
             </PanelRow>
+
+            <PlaybackSignalPathButton />
 
             {activeUser && (
                 <div className="flex px-1 py-2">

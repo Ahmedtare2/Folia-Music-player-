@@ -46,6 +46,8 @@ export type MetaphorExportJob = {
     /** Seconds to render from startSec. */
     clipSec: number;
     sink: VideoChunkSink;
+    /** Desktop MP4 writer: ask the encoder for length-prefixed H.264 plus a decoder config. */
+    avcFormat?: 'annexb' | 'avc';
     signal: AbortSignal;
     onProgress: (info: { frame: number; total: number; fps: number; etaSec: number | null; phase: string }) => void;
 };
@@ -107,7 +109,7 @@ export const runMetaphorExport = async (job: MetaphorExportJob): Promise<Metapho
         runtime.setTuning(job.tuning);
 
         session = await openVideoEncoderSession(
-            { width: job.size.width, height: job.size.height, fps: preset.fps, bitrate: bitrateFor(preset, job.size), family: preset.family },
+            { width: job.size.width, height: job.size.height, fps: preset.fps, bitrate: bitrateFor(preset, job.size), family: preset.family, avcFormat: job.avcFormat },
             job.sink,
         );
         const setupMs = performance.now() - setupStart;

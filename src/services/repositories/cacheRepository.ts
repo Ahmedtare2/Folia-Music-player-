@@ -1,5 +1,5 @@
 import type { Table } from 'dexie';
-import { isBeatGridKey, isDrumHitsKey } from '../analysis/beatGridKeys';
+import { isBeatGridKey, isDrumHitsKey, isVocalEnvelopeKey } from '../analysis/beatGridKeys';
 import {
   appDatabase,
   LOCAL_LIBRARY_ARTIST_SPLIT_MARKER_KEY,
@@ -18,7 +18,7 @@ import { writeAndroidDiskCacheJson } from '../android/foliaAndroidBridge';
 // src/services/repositories/cacheRepository.ts
 // Centralizes cache routing, legacy user-cache migration, prefix operations, cleanup, and usage metrics.
 
-export type CacheCategory = 'playlist' | 'lyrics' | 'cover' | 'media' | 'analysis';
+export type CacheCategory = 'playlist' | 'lyrics' | 'cover' | 'media' | 'analysis' | 'volumeBalance';
 export type CacheTableName = 'api_cache' | 'user_cache' | 'media_cache' | 'metadata_cache';
 
 const CACHE_TABLE_NAMES: CacheTableName[] = [
@@ -34,8 +34,10 @@ export const getCacheTableName = (key: string): CacheTableName => {
   if (key.startsWith('audio_') || key.startsWith('cover_')) return 'media_cache';
   if (
     key.startsWith('automix_profile_') ||
+    key.startsWith('volume_balance_') ||
     isBeatGridKey(key) ||
     isDrumHitsKey(key) ||
+    isVocalEnvelopeKey(key) ||
     key.startsWith('lyric_') ||
     key.startsWith('theme_') ||
     key.startsWith('replayGain_') ||
@@ -150,6 +152,11 @@ export const removeCacheEntry = async (key: string): Promise<void> => {
   await getTable(getCacheTableName(key)).delete(key);
 };
 
+// The user's own playlists live in api_cache beside the caches (services/foliaPlaylist/foliaPlaylistRows.ts:
+// `folia_playlists_meta`, `folia_playlist:<id>`; before them `local_playlists`, kept for going back a version).
+// They are not a cache: clearing everything leaves them.
+const isUserPlaylistKey = (key: string): boolean => key.startsWith('folia_playlist') || key === 'local_playlists';
+
 const isPersistentLocalLibraryKey = (key: string): boolean => (
   key === 'local_dir_handles'
   || key === 'local_playlists'
@@ -171,7 +178,7 @@ export const clearCacheTables = async (preserveKeys: string[] = []): Promise<voi
     await Promise.all(CACHE_TABLE_NAMES.map(async name => {
       const table = getTable(name);
       const keys = await table.toCollection().primaryKeys();
-      const deletedKeys = keys.map(String).filter(key => !preserved.has(key) && !isPersistentLocalLibraryKey(key));
+      const deletedKeys = keys.map(String).filter(key => !preserved.has(key) && !isUserPlaylistKey(key) && !isPersistentLocalLibraryKey(key));
       await table.bulkDelete(deletedKeys);
     }));
   });

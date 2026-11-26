@@ -13,16 +13,14 @@ import {
     AUDIO_EQUALIZER_CUSTOM_SLOT_IDS,
     AUDIO_EQUALIZER_MAX_GAIN_DB,
     AUDIO_EQUALIZER_MIN_GAIN_DB,
-    AUDIO_EQUALIZER_PRESET_LABELS,
     getAudioEqualizerCustomSlotIndex,
     isAudioEqualizerCustomSlotId,
-    isAudioEqualizerFlat,
-    resetAudioEqualizerToFlat,
     type AudioEqualizerCustomSlotId,
     type AudioEqualizerModeId,
     type AudioEqualizerSettings,
 } from '../../utils/audioEqualizer';
 import { AUDIO_SOUND_PRESETS, AUDIO_SOUND_PRESET_IDS } from '../../utils/audioPresets';
+import { AUDIO_EQUALIZER_PRESET_LABELS, isAudioEqualizerFlat, resetAudioEqualizerToFlat } from '../../utils/audioEqualizerCompat';
 import {
     createNeutralAudioEffects,
     type AudioEffectId,
@@ -32,7 +30,7 @@ import {
     computeEqualizerFrequencyResponseDb,
     getAudioEqualizerRuntimeStatus,
     subscribeAudioEqualizerRuntime,
-} from '../../services/audioEqualizerGraph';
+} from '../../services/mobileEqualizerCompat';
 import { useAudioSettingsStore } from '../../stores/useAudioSettingsStore';
 
 // src/components/mobile/MobileEqualizerSheet.tsx

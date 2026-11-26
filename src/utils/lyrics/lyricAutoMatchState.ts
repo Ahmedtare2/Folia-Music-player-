@@ -7,6 +7,8 @@ import { getFromCache, saveToCache } from '../../services/db';
 
 export const LOCAL_LYRIC_NEGATIVE_CACHE_KEY = 'local_lyric_negative_cache_v1';
 export const AUTO_MATCH_FAILURE_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24 hours
+// Failures recorded before this moment came from the QQ/KuGou relay that did not work on Android: retry them now.
+export const AUTO_MATCH_FAILURE_EPOCH_MS = Date.UTC(2026, 10, 26, 12, 0, 0);
 const MAX_NEGATIVE_CACHE_ENTRIES = 2000;
 
 export interface NegativeLyricMatchRecord {
@@ -145,6 +147,7 @@ export const isSongOnAutomaticLyricMatchCooldown = (
     if (
         typeof song.lastAutoMatchFailedAt === 'number'
         && song.lastAutoMatchFailedQuerySignature === currentSignature
+        && song.lastAutoMatchFailedAt >= AUTO_MATCH_FAILURE_EPOCH_MS
         && (now - song.lastAutoMatchFailedAt) < AUTO_MATCH_FAILURE_COOLDOWN_MS
     ) {
         return true;

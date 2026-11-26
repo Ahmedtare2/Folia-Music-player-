@@ -1,6 +1,11 @@
+import { EMPTY_PERSONAL_FM_CATALOG } from './fmModes';
+import type { PersonalFmCatalog } from '../../types/personalFm';
 import type { SongResult, UnifiedSong } from '../../types';
 import type {
     AudioQualityPreference,
+    DailyStyleGroup,
+    DailyStyleSelection,
+    DailyStyleSongs,
     LoginStep,
     MediaId,
     OmniAudioSource,
@@ -15,40 +20,65 @@ import type {
     OmniProviderCapabilities,
     OmniProviderId,
     OmniProviderSummary,
+    OmniRequestRunner,
+    OmniSearchKind,
     OmniSongAvailability,
+    OmniSongDetail,
     OmniSongReplacement,
     OmniUser,
     OnlineAuthProvider,
     OnlineFailureOperation,
     OnlineMusicProvider,
+    OnlineSearchProvider,
     PersonalFmRequestOptions,
     ProviderCatalogEntityKind,
+    ProviderExternalPlaybackStatus,
+    ProviderLoginForm,
+    ProviderSearchContext,
+    ProviderSongCatalogRefs,
     ProviderLikedSongIds,
     LoginDiagnosticLine,
     LoginLocalService,
     LoginMethod,
     LoginSelfCheckResult,
+    ProviderSetupView,
     ProviderNotice,
     LoginState,
     LoginTexts,
     ProviderMark,
+    JsonValue,
+    ProviderRawEndpoint,
+    RecommendationPreferenceChanges,
+    RecommendationPreferenceEntry,
+    RecommendationPreferences,
+    RecommendationPreferencesSaveResult,
 } from '../../types/onlineMusic';
 import { resolveProviderLyricsChorus } from '../../utils/lyrics/chorusResolver';
-import { DEFAULT_ONLINE_PROVIDER_ID, OnlineProviderError } from '../../types/onlineMusic';
-import { useOnlineProviderAccountStore } from '../../stores/useOnlineProviderAccountStore';
+import { OnlineProviderError } from '../../types/onlineMusic';
+import { resolveEffectiveProviderId, useOnlineProviderAccountStore, type OnlineProviderAccountState } from '../../stores/useOnlineProviderAccountStore';
 import { getPlaybackSourceRef } from '../../utils/appPlaybackGuards';
 import { toSafePlaybackUrl } from '../../utils/appPlaybackHelpers';
 import { saveSongReplayGain } from './resourceCache';
 import {
+    canPlaySongExternally,
     getOnlineMusicProvider,
     getOnlineMusicProviderForSong,
     getOnlineMusicProviderRegistryVersion,
     listOnlineMusicProviders,
+    playsSongOnSurface,
+    sortOnlineMusicSourceIds,
     providerSupports,
     requireOnlineMusicProvider,
     subscribeOnlineMusicProviderRegistry,
 } from './providerRegistry';
+import { getSourceState, getSourceStates, getSourceStatesVersion, subscribeSourceStates } from './sourceStates';
+import { itemTraits } from './itemTraits';
 import { saveProviderAccountSnapshot } from './providerAccountCache';
+import {
+    checkRecommendationPreferenceChanges,
+    normalizeRecommendationPreferences,
+    readRecommendationPreferenceEntries,
+} from './recommendationPreferences';
 import { applyOmniAudioHook, applyOmniLyricsHook } from '../hostExtensionHooks';
 import { createLikePresses } from '../../utils/likePresses';
 import type { LikePress, LikePresses } from '../../utils/likePresses';
@@ -63,6 +93,9 @@ import type { SongInPlay } from './account/likedChecks';
 import { createAccountMoments } from './account/readMoments';
 import type { AccountMoment } from './account/readMoments';
 import { createAccountReads } from './account/accountRead';
+import { withoutCredentials } from './rawResponse';
+import { resolveSongCatalogRefSet } from './catalogRefs';
+import { ARTIST_SONGS_CAP, readAlignedPages } from './alignedPages';
 import type { AccountReadOutcome, AccountReadReason } from './account/accountRead';
 
 // src/services/onlineMusic/omni.ts
@@ -90,14 +123,16 @@ const audioQualityFor = (providerId: OmniProviderId, preference: AudioQualityPre
 };
 
 // What is known of each URL handed out by `getAudioSource`, newest last: the level it was asked for
-// at, and whether its provider said it plays a preview clip of the song. The media cache asks by URL
-// when it saves a song's bytes: the preference may have moved since the URL was fetched, and the URL
-// is where the bytes came from. Playback asks by URL whether what it plays is a clip, wherever it
-// got the URL from (the prefetch pass, or its own request). In memory and bounded; a URL that has
-// dropped out is of an unknown level and not known to be a clip.
+// at, whether its provider said it plays a preview clip of the song, and where that clip starts.
+// The media cache asks by URL when it saves a song's bytes: the preference may have moved since the
+// URL was fetched, and the URL is where the bytes came from. Playback asks by URL whether what it
+// plays is a clip, and where the clip begins in the song, wherever it got the URL from (the prefetch
+// pass, or its own request). In memory and bounded; a URL that has dropped out is of an unknown
+// level and not known to be a clip.
 const AUDIO_SOURCE_LEVEL_LIMIT = 200;
-type HandedOutAudioSource = { level: AudioQualityPreference; preview: boolean };
+type HandedOutAudioSource = { level: AudioQualityPreference; preview: boolean; clipStartMs?: number };
 const audioSourceLevels = new Map<string, HandedOutAudioSource>();
+let audioSourceMetadataVersion = 0;
 // One spelling per URL: the form playback holds (`toSafePlaybackUrl`), written as the URL parser
 // writes it - a deck that has played out reports its element's `currentSrc`, which is that form.
 const audioSourceLevelKey = (url: string): string => {
@@ -116,20 +151,151 @@ const noteAudioSourceLevel = (url: string, handedOut: HandedOutAudioSource): voi
         const oldestKey = audioSourceLevels.keys().next().value;
         if (oldestKey !== undefined) audioSourceLevels.delete(oldestKey);
     }
+    audioSourceMetadataVersion++;
 };
 
-const activeProviderId = (): OmniProviderId => {
-    const storedProviderId = useOnlineProviderAccountStore.getState().activeProviderId;
-    // A persisted selection can outlive its provider when switching builds or branches.
-    return getOnlineMusicProvider(storedProviderId) ? storedProviderId : DEFAULT_ONLINE_PROVIDER_ID;
+// Which registered sources the interface has (Folium 2.0 plan §5.3). Only an enabled one is shown: a source used
+// only for matching - and one the host still registers itself while it is switched off - is in none of the lists
+// drawn for the listener (the switcher, the sign-in window, the search sources, the home and explore pages, the
+// command palette, what folium.omni and folium.account show a mod), is never the source in effect, does not
+// play, and counts as signed out: its account is not read, shown or reported to. It stays registered, so the
+// lyric and the metadata match still ask it by id (crossSource.ts), and its name and mark are still read by id.
+// Only the source state table decides (sourceStates.ts), the same for a source mod and for a platform the host
+// registers itself.
+const isSourceShown = (providerId: OmniProviderId): boolean => getSourceState(providerId) === 'enabled';
+
+/** The registered sources the interface shows: the enabled ones, in the order they registered. */
+const listShownProviders = (): OnlineMusicProvider[] => listOnlineMusicProviders().filter(provider => isSourceShown(provider.id));
+
+/** The registered sources that may be asked to match: the shown ones and the ones used only for matching. */
+const listMatchingProviders = (): OnlineMusicProvider[] => listOnlineMusicProviders()
+    .filter(provider => getSourceState(provider.id) !== 'disabled');
+
+/** Calls `listener` whenever the lists above may have changed: a source registered or removed, a state switched. */
+const subscribeProviderLists = (listener: () => void): (() => void) => {
+    const offRegistry = subscribeOnlineMusicProviderRegistry(listener);
+    const offStates = subscribeSourceStates(listener);
+    return () => {
+        offRegistry();
+        offStates();
+    };
 };
 
-const activeProvider = () => requireOnlineMusicProvider(activeProviderId());
+// The platform in effect is kept in the account store, in memory: the listener's stored choice while it is
+// shown, else another shown one (useOnlineProviderAccountStore.resolveEffectiveProviderId). It is worked out
+// again whenever a platform comes or goes or is switched, so a choice whose platform is missing for now
+// (registered later, turned off, used only for matching, a build or branch without it) is never written over,
+// and is in effect again once it is back. With no shown source at all the store would keep the stored choice in
+// effect, for its readers to find missing; a source used only for matching is not missing (it stays registered),
+// so then nothing is in effect ('').
+const settleActiveProvider = () => {
+    const shownIds = listShownProviders().map(provider => provider.id);
+    const { chosenProviderId, activeProviderId: current } = useOnlineProviderAccountStore.getState();
+    const next = resolveEffectiveProviderId(chosenProviderId, shownIds, current);
+    const settled = shownIds.includes(next) || !getOnlineMusicProvider(next) ? next : '';
+    if (settled !== current) useOnlineProviderAccountStore.setState({ activeProviderId: settled });
+};
+settleActiveProvider();
+subscribeProviderLists(settleActiveProvider);
+// A choice of a platform that is not registered (yet) is stored as it is; the one in effect falls back meanwhile.
+useOnlineProviderAccountStore.subscribe((state, previous) => {
+    if (state.chosenProviderId !== previous.chosenProviderId) settleActiveProvider();
+});
+
+const activeProviderId = (): OmniProviderId => useOnlineProviderAccountStore.getState().activeProviderId;
+
+type HeldAccount = OnlineProviderAccountState | undefined;
+
+/** How a source used only for matching is summed up: nobody signed in, nothing being read. */
+const SIGNED_OUT: OnlineProviderAccountState = Object.freeze({
+    status: 'anonymous',
+    user: null,
+    collections: [],
+    likedSongIds: [],
+    wantedLikes: {},
+    hydration: 'ready',
+    freshness: 'fresh',
+});
+
+/** One source's summary: what it is, and its account as held. */
+const summaryOf = (provider: OnlineMusicProvider, account: HeldAccount): OmniProviderSummary => ({
+    providerId: provider.id,
+    displayName: provider.displayName,
+    shortName: provider.shortName || provider.displayName,
+    shortNameKey: provider.shortNameKey,
+    availability: provider.getAvailability?.() ?? { configured: true },
+    requiresAccount: provider.capabilities.auth,
+    status: account?.status || 'unknown',
+    user: account?.user || null,
+    collections: account?.collections || [],
+    error: account?.error,
+    hydration: account?.hydration || 'loading',
+    freshness: account?.freshness || 'stale',
+    lastUpdatedAt: account?.lastUpdatedAt,
+});
+
+/** What a platform that is not there supports: nothing (no platform at all is an empty state, not an error). */
+const NO_CAPABILITIES: OmniProviderCapabilities = Object.freeze({
+    search: false,
+    playback: false,
+    lyrics: false,
+    auth: false,
+    userLibrary: false,
+    playlists: false,
+    albums: false,
+    artists: false,
+    recommendations: false,
+    mutations: false,
+    wordByWordLyrics: false,
+});
+
+/** A provider has recommendation preferences when it declares the capability and can both read and save them. */
+const hasRecommendationPreferences = (provider: OnlineMusicProvider | null | undefined): provider is OnlineMusicProvider => (
+    providerSupports(provider, 'recommendationPreferences')
+    && typeof provider?.recommendations?.getRecommendationPreferences === 'function'
+    && typeof provider.recommendations.saveRecommendationPreferences === 'function'
+);
+
+const unsupportedPreferences = (provider: OnlineMusicProvider): OnlineProviderError => (
+    new OnlineProviderError('unsupported', `Recommendation preferences are not supported by ${provider.id}`, provider.id)
+);
+
+/** Told which provider's account preferences were written, confirmed or not: what it recommends may differ now. */
+const preferenceSaveListeners = new Set<(providerId: OmniProviderId) => void>();
+
+const tellPreferencesSaved = (providerId: OmniProviderId) => {
+    for (const listener of preferenceSaveListeners) {
+        try {
+            listener(providerId);
+        } catch (error) {
+            console.warn('[Omni] recommendation preference save listener failed', error);
+        }
+    }
+};
 
 const providerForSong = (song: SongResult) => {
     const provider = getOnlineMusicProviderForSong(song);
     if (!provider) throw new OnlineProviderError('unsupported', 'Song is not owned by an online provider');
     return provider;
+};
+
+// The provider a song plays from. A song of a source that is not shown (used only for matching, plan §5.3) stays
+// in the queue, the history and the playlists, marked (songAvailability.isSongSourceMissing), and is not played:
+// its source is not asked for audio.
+const playbackProviderForSong = (song: SongResult) => {
+    const provider = providerForSong(song);
+    if (!isSourceShown(provider.id)) {
+        throw new OnlineProviderError('unavailable', `The source ${provider.id} is not enabled; its songs do not play`, provider.id);
+    }
+    return provider;
+};
+
+// Favorite identities may differ from playback identities; keep all reads and presses on one key.
+const likeSourceOf = (song: SongResult) => {
+    const source = getPlaybackSourceRef(song);
+    if (source.kind !== 'online') return source;
+    const mediaId = getOnlineMusicProvider(source.providerId)?.library?.getSongLikeId?.(song) ?? source.mediaId;
+    return { ...source, mediaId };
 };
 
 const providerForCollection = (collection: OmniCollection) => requireOnlineMusicProvider(collection.providerId);
@@ -171,6 +337,57 @@ const runRequest = async <T>(provider: OnlineMusicProvider, operation: OnlineFai
 };
 
 const emptyPage = <T>(offset: number): OmniPage<T> => ({ items: [], hasMore: false, nextOffset: offset });
+
+// Lists the app makes from a provider's reads, that are nobody's playlist: the listening ranking
+// (the platform's count of plays) and an artist's every song (`artist_songs`, #918). Nobody edits
+// or saves them; their id is not a playlist's.
+const isReadOnlyListType = (type: string): boolean => type === 'listening_rank' || type === 'artist_songs';
+
+// A search with the caller's context (`ProviderSearchContext`) where it gave one, handed on as it
+// is; a search without one reaches the provider as the host's own searches always have.
+const searchWith = (
+    search: OnlineSearchProvider,
+    query: string,
+    page: PageInput,
+    context?: ProviderSearchContext,
+): Promise<OmniPage<UnifiedSong>> => (
+    context
+        ? search.searchSongs(query, page.limit, page.offset, context)
+        : search.searchSongs(query, page.limit, page.offset)
+);
+
+// A request that goes straight to the provider, for a caller that hands in no runner.
+const runDirectly: OmniRequestRunner = work => work();
+
+// One request through a caller's runner (`OmniRequestRunner`), telling a failure of the request
+// itself (`failed`, with the provider's own error) apart from the runner refusing it or giving up
+// waiting for it (`refused`, with what the runner rejected with).
+type RunOutcome<T> =
+    | { kind: 'answered'; value: T }
+    | { kind: 'failed'; error: unknown }
+    | { kind: 'refused'; error: unknown };
+
+const runThrough = async <T>(run: OmniRequestRunner, work: () => Promise<T>): Promise<RunOutcome<T>> => {
+    const own: { failed: boolean; error: unknown } = { failed: false, error: undefined };
+    try {
+        const value = await run(async () => {
+            try {
+                return await work();
+            } catch (error) {
+                own.failed = true;
+                own.error = error;
+                throw error;
+            }
+        });
+        return { kind: 'answered', value };
+    } catch (error) {
+        return own.failed ? { kind: 'failed', error: own.error } : { kind: 'refused', error };
+    }
+};
+
+const songDetailOf = (song: UnifiedSong | null | undefined): OmniSongDetail => (
+    song ? { status: 'found', song } : { status: 'missing' }
+);
 
 // 点赞状态改完要落盘：只更内存的话，重启后靠快照 hydration 的那一帧会恢复旧心形，
 // 后台刷新再失败就一直是旧的。
@@ -392,6 +609,9 @@ const withActiveProvider = async <T>(run: (provider: OnlineMusicProvider) => Pro
     return result;
 };
 
+/** How many songs one playlist-add request carries (omni.addSongsToPlaylist). */
+export const PLAYLIST_ADD_BATCH = 50;
+
 export const omni = {
     invalidateActiveRequests(): void {
         activeRequestGeneration += 1;
@@ -401,34 +621,51 @@ export const omni = {
         return activeRequestGeneration;
     },
 
-    // The provider list changes at runtime (Folium mods). A useSyncExternalStore pair for the UI.
+    // The provider lists change at runtime: Folium mods register and remove sources, and a source is switched
+    // between enabled, used only for matching and off (plan §5.3). A useSyncExternalStore pair for the UI: both
+    // follow the registry and the source states.
     subscribeProviders(listener: () => void): () => void {
-        return subscribeOnlineMusicProviderRegistry(listener);
+        return subscribeProviderLists(listener);
     },
 
     getProviderRegistryVersion(): number {
-        return getOnlineMusicProviderRegistryVersion();
+        return getOnlineMusicProviderRegistryVersion() + getSourceStatesVersion();
     },
 
+    // The sources the interface shows (isSourceShown above): the enabled ones. Everything drawn for the
+    // listener, and everything a mod is shown, lists these.
     getProviderSummaries(): OmniProviderSummary[] {
         const accounts = useOnlineProviderAccountStore.getState().accounts;
-        return listOnlineMusicProviders().map(provider => {
-            const account = accounts[provider.id];
-            return {
-                providerId: provider.id,
-                displayName: provider.displayName,
-                shortName: provider.shortName || provider.displayName,
-                availability: provider.getAvailability?.() ?? { configured: true },
-                requiresAccount: provider.capabilities.auth,
-                status: account?.status || 'unknown',
-                user: account?.user || null,
-                collections: account?.collections || [],
-                error: account?.error,
-                hydration: account?.hydration || 'loading',
-                freshness: account?.freshness || 'stale',
-                lastUpdatedAt: account?.lastUpdatedAt,
-            };
+        return listShownProviders().map(provider => summaryOf(provider, accounts[provider.id]));
+    },
+
+    // The sources that may be asked to match (the lyric and the metadata match, plan §7.1): the shown ones, and
+    // the ones used only for matching, which are summed up signed out (plan §5.3).
+    getMatchingProviderSummaries(): OmniProviderSummary[] {
+        const accounts = useOnlineProviderAccountStore.getState().accounts;
+        return listMatchingProviders().map(provider => summaryOf(provider, isSourceShown(provider.id) ? accounts[provider.id] : SIGNED_OUT));
+    },
+
+    // The sources the interface does not show now (plan §5.3): registered and used only for matching or switched
+    // off, and the ones the source states name as not enabled (a source mod switched off is not registered). Their
+    // songs stay where they are (the play history, the queue), marked.
+    getSourcesNotShown(): OmniProviderId[] {
+        const ids = new Set(listOnlineMusicProviders().map(provider => provider.id).filter(id => !isSourceShown(id)));
+        Object.entries(getSourceStates()).forEach(([id, state]) => {
+            if (state !== 'enabled') ids.add(id);
         });
+        return [...ids];
+    },
+
+    // Whether the interface shows `providerId` now: registered and enabled.
+    isProviderShown(providerId: OmniProviderId): boolean {
+        return Boolean(getOnlineMusicProvider(providerId)) && isSourceShown(providerId);
+    },
+
+    // Whether `providerId` is switched on in the source states (registered yet or not). A song of a source that
+    // is switched to "used only for matching" or off does not play, not even from a kept copy.
+    isSourceSwitchedOn(providerId: OmniProviderId): boolean {
+        return isSourceShown(providerId);
     },
 
     getActiveProviderSummary(): OmniProviderSummary | undefined {
@@ -438,9 +675,10 @@ export const omni = {
 
     // Reads cached like state through Omni. A heart pressed and not yet settled answers with what
     // was asked for (`pressSongLike`).
+    // A song of a source that is not shown shows no heart of the account it kept (plan §5.3).
     isSongLiked(song: SongResult): boolean {
-        const source = getPlaybackSourceRef(song);
-        if (source.kind !== 'online') return false;
+        const source = likeSourceOf(song);
+        if (source.kind !== 'online' || !isSourceShown(source.providerId)) return false;
 
         const account = useOnlineProviderAccountStore.getState().accounts[source.providerId];
         const songKey = String(source.mediaId);
@@ -462,7 +700,7 @@ export const omni = {
     },
 
     getActiveCapabilities(): OmniProviderCapabilities {
-        return activeProvider().capabilities;
+        return getOnlineMusicProvider(activeProviderId())?.capabilities ?? NO_CAPABILITIES;
     },
 
     getProviderCapabilities(providerId: OmniProviderId): OmniProviderCapabilities {
@@ -473,22 +711,71 @@ export const omni = {
         return typeof requireOnlineMusicProvider(providerId).recommendations?.getDailySongs === 'function';
     },
 
+    // The names of a registered source whatever its state, for "Settings → Sources", which lists the sources not
+    // shown too; null for one not registered now (a source mod switched off).
+    getProviderNaming(providerId: OmniProviderId): { displayName: string; shortName: string; shortNameKey?: string } | null {
+        const provider = getOnlineMusicProvider(providerId);
+        return provider ? { displayName: provider.displayName, shortName: provider.shortName ?? '', shortNameKey: provider.shortNameKey } : null;
+    },
+
+    // Source ids in the order every list of sources follows (providerRegistry.ts); ids not registered now go last.
+    sortSourceIds(ids: readonly OmniProviderId[]): OmniProviderId[] {
+        return sortOnlineMusicSourceIds(ids);
+    },
+
     getProviderLabel(providerId: OmniProviderId): string {
         const provider = getOnlineMusicProvider(providerId);
         return provider?.shortName || provider?.displayName || providerId;
     },
 
-    async searchSongs(query: string, page: PageInput): Promise<OmniPage<UnifiedSong>> {
+    // `context.session` keeps a caller's paging apart from the host's own (`ProviderSearchContext`);
+    // without it the search is the host UI's.
+    async searchSongs(query: string, page: PageInput, context?: ProviderSearchContext): Promise<OmniPage<UnifiedSong>> {
         return withActiveProvider(async provider => {
             if (!providerSupports(provider, 'search') || !provider.search) return emptyPage(page.offset);
-            return provider.search.searchSongs(query, page.limit, page.offset);
+            return searchWith(provider.search, query, page, context);
         });
     },
 
-    async searchProviderSongs(providerId: OmniProviderId, query: string, page: PageInput): Promise<OmniPage<UnifiedSong>> {
+    async searchProviderSongs(
+        providerId: OmniProviderId,
+        query: string,
+        page: PageInput,
+        context?: ProviderSearchContext,
+    ): Promise<OmniPage<UnifiedSong>> {
         const provider = requireOnlineMusicProvider(providerId);
         if (!providerSupports(provider, 'search') || !provider.search) return emptyPage(page.offset);
-        return provider.search.searchSongs(query, page.limit, page.offset);
+        return searchWith(provider.search, query, page, context);
+    },
+
+    // What the provider's search finds: songs wherever it searches, albums and playlists where it has
+    // a search for them and also opens them. Empty for a provider that is not there or has no search.
+    getProviderSearchKinds(providerId: OmniProviderId): OmniSearchKind[] {
+        const provider = getOnlineMusicProvider(providerId);
+        if (!provider || !providerSupports(provider, 'search') || !provider.search) return [];
+        const search = provider.search;
+        return [
+            'song' as const,
+            ...(search.searchAlbums && providerSupports(provider, 'albums') ? ['album' as const] : []),
+            ...(search.searchPlaylists && providerSupports(provider, 'playlists') ? ['playlist' as const] : []),
+        ];
+    },
+
+    // Albums or playlists found at one provider (`getProviderSearchKinds` says which it finds); an
+    // empty page where it finds none of the kind.
+    async searchProviderCollections(
+        providerId: OmniProviderId,
+        kind: Exclude<OmniSearchKind, 'song'>,
+        query: string,
+        page: PageInput,
+    ): Promise<OmniPage<OmniCollection>> {
+        if (!omni.getProviderSearchKinds(providerId).includes(kind)) return emptyPage(page.offset);
+        const search = requireOnlineMusicProvider(providerId).search!;
+        const found = kind === 'album'
+            ? await search.searchAlbums!(query, page.limit, page.offset)
+            : await search.searchPlaylists!(query, page.limit, page.offset);
+        // A provider names its own collections: one that answers with another's would open nowhere.
+        return { ...found, items: found.items.filter(collection => collection.providerId === providerId) };
     },
 
     // 平台的记号（一个字和一种颜色）。平台没有声明就回 null，界面自己从它的短名取。
@@ -503,9 +790,27 @@ export const omni = {
 
     // Starts what each provider watches while the app is open (`watch`): the registered ones,
     // once. Answers with the way to stop them all.
+    // A provider registered later (a Folium source mod) is watched from then on, and one taken out is stopped.
     watchProviders(tell: (notice: ProviderNotice) => void): () => void {
-        const stops = listOnlineMusicProviders().flatMap(provider => (provider.watch ? [provider.watch(tell)] : []));
-        return () => stops.forEach(stop => stop());
+        const watched = new Map<OnlineMusicProvider, () => void>();
+        const settle = () => {
+            const present = new Set(listOnlineMusicProviders());
+            watched.forEach((stop, provider) => {
+                if (present.has(provider)) return;
+                watched.delete(provider);
+                stop();
+            });
+            present.forEach(provider => {
+                if (provider.watch && !watched.has(provider)) watched.set(provider, provider.watch(tell));
+            });
+        };
+        settle();
+        const off = subscribeOnlineMusicProviderRegistry(settle);
+        return () => {
+            off();
+            watched.forEach(stop => stop());
+            watched.clear();
+        };
     },
 
     // 登录要靠的、可以在登录窗口里重启的本地服务；这个平台没有就回 null。
@@ -522,6 +827,19 @@ export const omni = {
         const auth = requireOnlineMusicProvider(providerId).auth;
         if (!auth) return [];
         return auth.resolveLoginMethods?.() ?? auth.getLoginMethods?.() ?? [];
+    },
+
+    // 表单式登录：provider 声明了字段，登录窗口按声明渲染表单；没有就回 null（UI 走扫码/浏览器流程）。
+    // 宽松查询（像 getLoginTexts）：界面在选中一行时就要问，平台未注册时也要能回答“没有表单”。
+    getLoginForm(providerId: OmniProviderId): ProviderLoginForm | null {
+        return getOnlineMusicProvider(providerId)?.auth?.getLoginForm?.() ?? null;
+    },
+
+    // 提交表单式登录：字段值交给 provider 自己完成登录。
+    async submitLoginForm(providerId: OmniProviderId, values: Record<string, string>): Promise<unknown> {
+        const auth = requireOnlineMusicProvider(providerId).auth;
+        if (!auth?.submitLoginForm) return unsupported(providerId, 'form-login');
+        return runLoginStep(auth, 'form', () => auth.submitLoginForm!(values));
     },
 
     // 扫码的 provider 回二维码图片；在浏览器里确认的登录没有图片，回空串。
@@ -582,6 +900,31 @@ export const omni = {
         return await requireOnlineMusicProvider(providerId).auth?.runLoginSelfCheck?.() ?? null;
     },
 
+    // 登录读到账号之后还要不要多查一步（`checkAfterLogin`）。宽松查询：平台不在了就是不查。
+    checksAfterLogin(providerId: OmniProviderId): boolean {
+        return Boolean(getOnlineMusicProvider(providerId)?.auth?.checkAfterLogin);
+    },
+
+    // 登录之后的那一步检查：回一份要用的人做完的配置清单，没有要做的回 null。抛错照常抛出，由账户 controller 记日志。
+    async checkAfterLogin(providerId: OmniProviderId, methodId: string | null): Promise<ProviderSetupView | null> {
+        return await requireOnlineMusicProvider(providerId).auth?.checkAfterLogin?.(methodId) ?? null;
+    },
+
+    // 平台有没有配置清单（账号那一幅、命令面板与播放失败的提示据它给「播放设置」的入口）。宽松查询。
+    hasSetup(providerId: OmniProviderId): boolean {
+        return Boolean(getOnlineMusicProvider(providerId)?.auth?.getSetup);
+    },
+
+    async getSetup(providerId: OmniProviderId): Promise<ProviderSetupView | null> {
+        return await requireOnlineMusicProvider(providerId).auth?.getSetup?.() ?? null;
+    },
+
+    async runSetupAction(providerId: OmniProviderId, stepId: string, actionId: string, value?: string): Promise<ProviderSetupView> {
+        const auth = requireOnlineMusicProvider(providerId).auth;
+        if (!auth?.runSetupAction) return unsupported(providerId, 'setup');
+        return auth.runSetupAction(stepId, actionId, value);
+    },
+
     // 只有明确声明了这一次登录有效期的 provider 才由前端计时；其余照旧只认后端报出的过期状态。
     getLoginTtlMs(providerId: OmniProviderId): number | null {
         const ttlMs = requireOnlineMusicProvider(providerId).auth?.getLoginTtlMs?.();
@@ -596,7 +939,13 @@ export const omni = {
     // platform, and settles them in the account store (account/accountRead.ts): at app start,
     // after a sign-in, at a platform switch and for the sync button. A read asked for while one
     // of the provider is under way joins it. Never rejects.
+    // A source that is not shown (used only for matching, plan §5.3) counts as signed out: it is not asked, and
+    // what it kept stays as it is for when it is enabled again.
     readAccount(providerId: OmniProviderId, reason: AccountReadReason): Promise<AccountReadOutcome> {
+        if (!isSourceShown(providerId)) {
+            console.info(`[Omni] the account of ${providerId} is not read (${reason}): the source is not enabled`);
+            return Promise.resolve('not asked');
+        }
         return accountReads.read(providerId, reason);
     },
 
@@ -614,9 +963,10 @@ export const omni = {
     },
 
     // Returns the cached playlists owned by the provider that owns the current song.
+    // None for a song of a source that is not shown: its kept account is not offered (plan §5.3).
     getPlaylistsForSong(song: SongResult): OmniCollection[] {
         const source = getPlaybackSourceRef(song);
-        if (source.kind !== 'online') return [];
+        if (source.kind !== 'online' || !isSourceShown(source.providerId)) return [];
         const provider = getOnlineMusicProvider(source.providerId);
         if (
             !providerSupports(provider, 'mutations')
@@ -632,9 +982,10 @@ export const omni = {
         ));
     },
 
+    // Not for a song of a source that is not shown: nothing is written to its kept account (plan §5.3).
     canAddSongToPlaylist(song: SongResult): boolean {
         const source = getPlaybackSourceRef(song);
-        if (source.kind !== 'online') return false;
+        if (source.kind !== 'online' || !isSourceShown(source.providerId)) return false;
         const provider = getOnlineMusicProvider(source.providerId);
         return providerSupports(provider, 'mutations')
             && providerSupports(provider, 'playlistTrackMutations')
@@ -649,18 +1000,29 @@ export const omni = {
             && Boolean(getOnlineMusicProvider(source.providerId)?.mutations?.createPlaylist);
     },
 
-    canLikeSong(song: SongResult): boolean {
-        const source = getPlaybackSourceRef(song);
-        if (source.kind !== 'online') return false;
-        const provider = getOnlineMusicProvider(source.providerId);
+    // Whether the source keeps likes in an account at all (its declared capabilities, whatever the song and whether
+    // the source is shown). A source without it has no heart of its own: the app keeps those hearts itself, in
+    // Folia's "Liked songs" (utils/foliaHeart). A source that is not registered has none either.
+    sourceHasLikes(providerId: OmniProviderId): boolean {
+        const provider = getOnlineMusicProvider(providerId);
         return providerSupports(provider, 'mutations')
             && providerSupports(provider, 'likes')
             && Boolean(provider?.mutations?.likeSong);
     },
 
+    // Not for a song of a source that is not shown: nothing is written to its kept account (plan §5.3).
+    canLikeSong(song: SongResult): boolean {
+        const source = getPlaybackSourceRef(song);
+        if (source.kind !== 'online' || !isSourceShown(source.providerId)) return false;
+        return this.sourceHasLikes(source.providerId)
+            // An item of a kind its source says cannot be liked (plan §4.4).
+            && itemTraits(song).likable;
+    },
+
     canEditCollectionTracks(collection: OmniCollection): boolean {
         const provider = getOnlineMusicProvider(collection.providerId);
-        if (!providerSupports(provider, 'mutations')) return false;
+        // The listening ranking is the platform's count of plays: nobody edits it; nor an artist's songs.
+        if (isReadOnlyListType(collection.type) || !providerSupports(provider, 'mutations')) return false;
         if (collection.isLiked === true) {
             return providerSupports(provider, 'likes') && Boolean(provider?.mutations?.likeSong);
         }
@@ -669,9 +1031,10 @@ export const omni = {
             && (provider?.mutations?.canEditPlaylistTracks?.(collection) ?? true);
     },
 
+    // Not for a song of a source that is not shown: nothing is written to its kept account (plan §5.3).
     canDislikeSong(song: SongResult): boolean {
         const source = getPlaybackSourceRef(song);
-        if (source.kind !== 'online') return false;
+        if (source.kind !== 'online' || !isSourceShown(source.providerId)) return false;
         const provider = getOnlineMusicProvider(source.providerId);
         return providerSupports(provider, 'recommendations')
             && Boolean(provider?.recommendations?.dislikeSong);
@@ -687,7 +1050,8 @@ export const omni = {
     canSubscribeCollection(collection: OmniCollection): boolean {
         const provider = getOnlineMusicProvider(collection.providerId);
         if (
-            !providerSupports(provider, 'mutations')
+            isReadOnlyListType(collection.type)
+            || !providerSupports(provider, 'mutations')
             || !providerSupports(provider, 'playlistSubscription')
             || provider?.mutations?.canSubscribe?.(collection) === false
         ) {
@@ -752,6 +1116,17 @@ export const omni = {
         });
     },
 
+    async getPersonalFmCatalog(providerId: OmniProviderId) {
+        // A platform without a catalogue of its own has none; one with modes answers with its own. A platform that is
+        // not registered (no platform at all) has none either: an empty state, not an error.
+        return await getOnlineMusicProvider(providerId)?.recommendations?.getPersonalFmCatalog?.() ?? EMPTY_PERSONAL_FM_CATALOG;
+    },
+
+    /** The mode choices of one of the provider's extra radios; null where the provider has no such radio. */
+    async getPersonalFmStationCatalog(providerId: OmniProviderId, station: string): Promise<PersonalFmCatalog | null> {
+        return (await requireOnlineMusicProvider(providerId).recommendations?.getPersonalFmCatalog?.(station)) ?? null;
+    },
+
     async getPersonalFm(options?: PersonalFmRequestOptions): Promise<UnifiedSong[]> {
         return withActiveProvider(async provider => provider.recommendations?.getPersonalFm?.(options) ?? []);
     },
@@ -772,6 +1147,70 @@ export const omni = {
         return withActiveProvider(async provider => provider.recommendations?.getHistorySongs?.(entry) ?? []);
     },
 
+    // Style recommendations (capability `dailyStyleRecommendations`): the style groups, the daily songs
+    // of the picked styles, and saving a pick.
+    async getDailyStyleGroups(): Promise<DailyStyleGroup[]> {
+        return withActiveProvider(async provider => provider.recommendations?.getDailyStyleGroups?.() ?? []);
+    },
+
+    async getDailyStyleSongs(): Promise<DailyStyleSongs> {
+        return withActiveProvider(async provider => (
+            provider.recommendations?.getDailyStyleSongs?.() ?? { songs: [], selection: null }
+        ));
+    },
+
+    async setDailyStyle(selection: DailyStyleSelection): Promise<void> {
+        return withActiveProvider(async provider => {
+            const setStyle = provider.recommendations?.setDailyStyle;
+            if (!setStyle) throw new OnlineProviderError('unsupported', `Daily styles are not supported by ${provider.id}`, provider.id);
+            await setStyle.call(provider.recommendations, selection);
+        });
+    },
+
+    // Recommendation preferences (capability `recommendationPreferences`): whether the active provider
+    // has them, where it offers them, reading them and saving what changed. A provider counts only when
+    // it declares the capability and has both members.
+    supportsRecommendationPreferences(): boolean {
+        return hasRecommendationPreferences(getOnlineMusicProvider(activeProviderId()));
+    },
+
+    getRecommendationPreferenceEntries(): RecommendationPreferenceEntry[] {
+        const provider = getOnlineMusicProvider(activeProviderId());
+        return hasRecommendationPreferences(provider)
+            ? readRecommendationPreferenceEntries(provider?.recommendations?.preferenceEntries)
+            : [];
+    },
+
+    async getRecommendationPreferences(): Promise<RecommendationPreferences> {
+        return withActiveProvider(async provider => {
+            if (!hasRecommendationPreferences(provider)) throw unsupportedPreferences(provider);
+            const recommendations = provider.recommendations!;
+            return normalizeRecommendationPreferences(await recommendations.getRecommendationPreferences!.call(recommendations));
+        });
+    },
+
+    async saveRecommendationPreferences(changes: RecommendationPreferenceChanges): Promise<RecommendationPreferencesSaveResult> {
+        const checked = checkRecommendationPreferenceChanges(changes);
+        return withActiveProvider(async provider => {
+            if (!hasRecommendationPreferences(provider)) throw unsupportedPreferences(provider);
+            // Nothing changed: nothing to write, and what the account has is what it had.
+            if (!Object.keys(checked).length) return { confirmed: true };
+            const recommendations = provider.recommendations!;
+            const result = await recommendations.saveRecommendationPreferences!.call(recommendations, checked);
+            // The write reached that account whatever is active by now, so the listeners hear of it first.
+            tellPreferencesSaved(provider.id);
+            return { confirmed: result?.confirmed === true };
+        });
+    },
+
+    /** Hears which provider's account preferences were written; a provider that fails to save is not told of. */
+    subscribeRecommendationPreferenceSaves(listener: (providerId: OmniProviderId) => void): () => void {
+        preferenceSaveListeners.add(listener);
+        return () => {
+            preferenceSaveListeners.delete(listener);
+        };
+    },
+
     supportsExplore(providerId: OmniProviderId): boolean {
         const provider = getOnlineMusicProvider(providerId);
         return providerSupports(provider, 'explore') && Boolean(provider?.explore);
@@ -787,12 +1226,157 @@ export const omni = {
         return withActiveProvider(async provider => provider.explore?.getSectionItems?.(cursor) ?? { items: [] });
     },
 
+    // The provider's `explore.songsShownAs`, or null where it has none (see `OnlineExploreProvider`).
+    exploreSongsShownAs(providerId: OmniProviderId): ((songs: UnifiedSong[]) => Promise<Map<string, UnifiedSong | null>>) | null {
+        const explore = getOnlineMusicProvider(providerId)?.explore;
+        return explore?.songsShownAs ? songs => explore.songsShownAs!(songs) : null;
+    },
+
     async getSongDetail(providerId: OmniProviderId, id: MediaId): Promise<UnifiedSong | null> {
         return requireOnlineMusicProvider(providerId).playback?.getSongDetail(id) ?? null;
     },
 
+    // Songs by id at one provider: one OmniSongDetail for each id, in the order of `ids`. A provider
+    // that looks many up in one request (`playback.getSongDetails`) is asked so, in groups of at most
+    // `playback.songDetailsPerRequest` ids (all of them where it says no number), one group after
+    // another; any other is asked `getSongDetail` for one id after another, never two at a time. A
+    // group or an id whose request fails does not stop the others. Each of those calls to the
+    // provider goes through `options.run` where the caller hands one in, for it to count and limit
+    // them: once `run` refuses one (or stops waiting for it), nothing more is asked and the ids left
+    // are `skipped`. The call itself rejects only for a provider that is not there.
+    async getSongDetails(
+        providerId: OmniProviderId,
+        ids: MediaId[],
+        options?: { run?: OmniRequestRunner },
+    ): Promise<OmniSongDetail[]> {
+        const playback = requireOnlineMusicProvider(providerId).playback;
+        if (!playback || ids.length === 0) return ids.map(() => ({ status: 'missing' }));
+        const run = options?.run ?? runDirectly;
+        const lookUpMany = playback.getSongDetails?.bind(playback);
+        if (lookUpMany) {
+            const per = playback.songDetailsPerRequest;
+            const size = typeof per === 'number' && Number.isSafeInteger(per) && per > 0 ? per : ids.length;
+            const details: OmniSongDetail[] = [];
+            for (let start = 0; start < ids.length; start += size) {
+                const group = ids.slice(start, start + size);
+                const outcome = await runThrough(run, () => lookUpMany(group));
+                if (outcome.kind === 'refused') {
+                    while (details.length < ids.length) details.push({ status: 'skipped', error: outcome.error });
+                    break;
+                }
+                if (outcome.kind === 'failed') group.forEach(() => details.push({ status: 'failed', error: outcome.error }));
+                else group.forEach((_, index) => details.push(songDetailOf(outcome.value[index])));
+            }
+            return details;
+        }
+        const details: OmniSongDetail[] = [];
+        for (const id of ids) {
+            const outcome = await runThrough(run, () => playback.getSongDetail(id));
+            if (outcome.kind === 'refused') {
+                while (details.length < ids.length) details.push({ status: 'skipped', error: outcome.error });
+                break;
+            }
+            details.push(outcome.kind === 'failed' ? { status: 'failed', error: outcome.error } : songDetailOf(outcome.value));
+        }
+        return details;
+    },
+
+    // A song of a source that is not shown (used only for matching) does not play (playbackProviderForSong).
+    // `playback` holds more than the audio (a source mod with `songs@1` alone has one, for its availability), so
+    // the audio route counts only where the capability says so, as canPlayOnlineMusicSong reads it.
     canPlaySong(song: SongResult): boolean {
-        return Boolean(getOnlineMusicProviderForSong(song)?.playback);
+        const provider = getOnlineMusicProviderForSong(song);
+        if (provider && !isSourceShown(provider.id)) return false;
+        return (providerSupports(provider, 'playback') && Boolean(provider?.playback))
+            || (canPlaySongExternally(song) && provider?.externalPlayback?.canPlay?.(song) !== false);
+    },
+
+    // A provider whose audio plays in a player of its own outside this app: the app steers that
+    // player and follows its clock; no URL ever comes back.
+    canPlayExternally(song: SongResult): boolean {
+        const provider = getOnlineMusicProviderForSong(song);
+        return (!provider || isSourceShown(provider.id)) && canPlaySongExternally(song);
+    },
+
+    async playSongExternally(song: SongResult, startSec = 0): Promise<void> {
+        const provider = playbackProviderForSong(song);
+        if (!providerSupports(provider, 'externalPlayback') || !provider.externalPlayback) {
+            return unsupported(provider.id, 'externalPlayback');
+        }
+        await runRequest(provider, 'audio', () => provider.externalPlayback!.play(song, startSec));
+    },
+
+    // A window rebuild keeps the player sounding: the new window takes the running song over
+    // instead of starting it again. A provider without the call has nothing of its own to carry over.
+    adoptExternalPlayback(song: SongResult): void {
+        getOnlineMusicProviderForSong(song)?.externalPlayback?.adopt?.(song);
+    },
+
+    // A song of `playback.surface` (plan §4.2): its player is the external route's and shows a picture of its own
+    // in the box the host keeps under the player page.
+    playsOnSurface(song: SongResult): boolean {
+        return omni.canPlayExternally(song) && playsSongOnSurface(song);
+    },
+
+    // Puts the picture of `song` into `container`; answers what takes it out (nothing to take out where the song
+    // does not play on a surface). Never throws: the adapter answers for the source.
+    mountSurface(song: SongResult, container: HTMLElement): (() => void) | null {
+        const provider = getOnlineMusicProviderForSong(song);
+        if (!provider?.externalPlayback?.mount || !omni.playsOnSurface(song)) return null;
+        return provider.externalPlayback.mount(container, song);
+    },
+
+    isExternalPlaybackPrepared(song: SongResult): boolean {
+        return getOnlineMusicProviderForSong(song)?.externalPlayback?.isPrepared?.(song) === true;
+    },
+
+    async prepareExternalPlaybackQueue(song: SongResult, upcoming: SongResult[]): Promise<void> {
+        const provider = providerForSong(song);
+        if (!provider.externalPlayback?.prepareNext) return;
+        await runRequest(provider, 'audio', () => provider.externalPlayback!.prepareNext!(song, upcoming));
+    },
+
+    async pauseExternalPlayback(song: SongResult): Promise<void> {
+        const provider = providerForSong(song);
+        if (!provider.externalPlayback) return unsupported(provider.id, 'externalPlayback');
+        await runRequest(provider, 'audio', () => provider.externalPlayback!.pause(song));
+    },
+
+    async resumeExternalPlayback(song: SongResult): Promise<void> {
+        const provider = providerForSong(song);
+        if (!provider.externalPlayback) return unsupported(provider.id, 'externalPlayback');
+        await runRequest(provider, 'audio', () => provider.externalPlayback!.resume(song));
+    },
+
+    async seekExternalPlayback(song: SongResult, seconds: number): Promise<void> {
+        const provider = providerForSong(song);
+        if (!provider.externalPlayback) return unsupported(provider.id, 'externalPlayback');
+        await runRequest(provider, 'audio', () => provider.externalPlayback!.seek(seconds, song));
+    },
+
+    // A player without its own level control is left alone: the call is a no-op, not an error.
+    async setExternalPlaybackVolume(song: SongResult, volume: number): Promise<void> {
+        const provider = providerForSong(song);
+        if (!provider.externalPlayback?.setVolume) return;
+        await runRequest(provider, 'audio', () => provider.externalPlayback!.setVolume!(volume, song));
+    },
+
+    // A player without its own single-track repeat is left alone: the route starts the track again itself.
+    async setExternalPlaybackRepeatOne(song: SongResult, enabled: boolean): Promise<void> {
+        const provider = providerForSong(song);
+        const player = provider.externalPlayback;
+        if (!player?.setRepeatOne) return;
+        await runRequest(provider, 'audio', () => player.setRepeatOne?.(enabled, song) ?? Promise.resolve());
+    },
+
+    async getExternalPlaybackStatus(song: SongResult): Promise<ProviderExternalPlaybackStatus> {
+        const provider = providerForSong(song);
+        if (!provider.externalPlayback) return unsupported(provider.id, 'externalPlayback');
+        return await runRequest(provider, 'audio', () => provider.externalPlayback!.getStatus(song));
+    },
+
+    isExternalPlaybackStatusForSong(song: SongResult, status: ProviderExternalPlaybackStatus): boolean {
+        return getOnlineMusicProviderForSong(song)?.externalPlayback?.isStatusForSong(song, status) === true;
     },
 
     // The quality levels a provider tells apart, lowest first (`OnlinePlaybackProvider.audioQualityLevels`;
@@ -802,6 +1386,12 @@ export const omni = {
         return audioQualityLevelsOf(providerId);
     },
 
+    // The i18n key of what the quality option says in place of its pick list for a provider whose sound the
+    // preference does not choose now (`OnlinePlaybackProvider.audioQualityNoticeKey`); undefined for the pick list.
+    audioQualityNoticeKey(providerId: OmniProviderId): string | undefined {
+        return getOnlineMusicProvider(providerId)?.playback?.audioQualityNoticeKey || undefined;
+    },
+
     // The level `preference` means to a provider: the one the quality option lights, and the one
     // `getAudioSource` asks the provider for.
     resolveAudioQuality(providerId: OmniProviderId, preference: AudioQualityPreference): AudioQualityPreference {
@@ -809,7 +1399,7 @@ export const omni = {
     },
 
     async getAudioSource(song: SongResult, quality: AudioQualityPreference): Promise<OmniAudioSource | null> {
-        const provider = providerForSong(song);
+        const provider = playbackProviderForSong(song);
         const level = audioQualityFor(provider.id, quality);
         let source: OmniAudioSource | null;
         try {
@@ -838,6 +1428,8 @@ export const omni = {
             noteAudioSourceLevel(source.url, {
                 level: listed?.includes(source.quality) ? source.quality : level,
                 preview: Boolean(source.preview),
+                ...(source.preview && Number.isFinite(source.clipStartMs) && source.clipStartMs! > 0
+                    ? { clipStartMs: source.clipStartMs } : {}),
             });
         }
         // Extension layers (Folium omni hooks) may swap the URL; the ReplayGain above stays the provider's.
@@ -856,30 +1448,59 @@ export const omni = {
         return audioSourceLevels.get(audioSourceLevelKey(url))?.preview === true;
     },
 
+    // The i18n key of the notice for a preview clip of a provider's song (`OnlinePlaybackProvider.previewNoticeKey`).
+    previewNoticeKey(providerId: OmniProviderId): string {
+        return getOnlineMusicProvider(providerId)?.playback?.previewNoticeKey ?? 'status.songPreviewOnly';
+    },
+
+    // Cheap invalidation for playback's small per-URL cache: a provider may reuse a URL with
+    // different metadata, and the bounded registry may evict a previously remembered URL.
+    audioSourceMetadataVersion(): number {
+        return audioSourceMetadataVersion;
+    },
+
+    // Where a URL handed out by `getAudioSource` starts inside its song, for a preview clip; 0 for a
+    // whole song, any other URL, and one handed out too long ago to be remembered.
+    previewClipStartMsOfAudioSource(url: string): number {
+        return Math.max(0, audioSourceLevels.get(audioSourceLevelKey(url))?.clipStartMs ?? 0);
+    },
+
     // Asked once per track, including for local and Navidrome songs, so an unsupported source is a
     // plain `false` rather than the throw `providerForSong` would raise. A song its provider
     // cannot vouch for (`canReport`) is false too.
+    // A source that is not shown takes no report (plan §5.3: it counts as signed out), also of a song that was
+    // playing when it was switched.
     canReportPlayback(song: SongResult): boolean {
         const provider = getOnlineMusicProviderForSong(song);
-        if (!providerSupports(provider, 'playbackReports') || !provider?.playbackReports) return false;
+        if (!providerSupports(provider, 'playbackReports') || !provider?.playbackReports || !isSourceShown(provider.id)) return false;
+        // An item of a kind its source does not want reported (plan §4.4).
+        if (!itemTraits(song).reported) return false;
         return provider.playbackReports.canReport?.(song) ?? true;
     },
 
     async reportPlayback(song: SongResult, report: OmniPlaybackReport): Promise<void> {
-        const provider = providerForSong(song);
+        const provider = playbackProviderForSong(song);
         if (!provider.playbackReports) return unsupported(provider.id, 'playbackReports');
         await provider.playbackReports.reportPlayback(song, report);
     },
 
-    async getLyrics(song: SongResult, context?: { userId?: MediaId | null }): Promise<OmniLyricsResult> {
+    // `extensionHooks: false` answers the lyrics as the provider gave them, chorus marked, before any
+    // extension layer rewrites them: a reader that is itself such a layer would otherwise call itself.
+    async getLyrics(song: SongResult, context?: { userId?: MediaId | null; extensionHooks?: boolean }): Promise<OmniLyricsResult> {
         const provider = providerForSong(song);
         if (!provider.lyrics) return unsupported(provider.id, 'lyrics');
-        const providerUserId = useOnlineProviderAccountStore.getState().accounts[provider.id]?.user?.id ?? context?.userId;
-        const providerResult = await provider.lyrics.getLyrics(song, { ...context, userId: providerUserId });
+        const { extensionHooks = true, ...providerContext } = context ?? {};
+        // A source used only for matching is asked as nobody (plan §5.3): no account of it is handed over.
+        const accounts: Partial<Record<OmniProviderId, OnlineProviderAccountState>> = useOnlineProviderAccountStore.getState().accounts;
+        const providerUserId = isSourceShown(provider.id)
+            ? accounts[provider.id]?.user?.id ?? providerContext.userId
+            : null;
+        const providerResult = await provider.lyrics.getLyrics(song, { ...providerContext, userId: providerUserId });
         const resolved = (await resolveProviderLyricsChorus(providerResult, {
             providerId: provider.id,
             songId: song.id,
         })).result;
+        if (!extensionHooks) return resolved;
         // Extension layers (Folium omni hooks) may rewrite the lyrics after the provider answered.
         return applyOmniLyricsHook(song, resolved);
     },
@@ -887,6 +1508,17 @@ export const omni = {
     async getChorusRanges(song: SongResult): Promise<OmniChorusRange[]> {
         const provider = providerForSong(song);
         return provider.lyrics?.getChorusRanges?.(song.id) ?? [];
+    },
+
+    // Whether a provider's own word-level lyric is the timing to keep even with automatic
+    // matching on (`OnlineLyricsProvider.prefersOwnWordByWord`).
+    prefersOwnWordByWordLyrics(song: SongResult): boolean {
+        return getOnlineMusicProviderForSong(song)?.lyrics?.prefersOwnWordByWord === true;
+    },
+
+    // Ask only the song's own provider for a paired title and artist alias.
+    async getLyricSearchAlias(song: SongResult): Promise<import('../../types/onlineMusic').ProviderLyricSearchAlias | null> {
+        return await getOnlineMusicProviderForSong(song)?.lyrics?.getSearchAlias?.(song) ?? null;
     },
 
     // Another name the song's artist may be listed under elsewhere, when its provider knows one.
@@ -913,6 +1545,27 @@ export const omni = {
             }
             if (collection.type === 'cloud') {
                 return await (provider.catalog?.getCloudTracks?.(page.limit, page.offset, collection) ?? emptyPage(page.offset));
+            }
+            if (collection.type === 'listening_rank') {
+                // An entry that names no span is not one this build made: there is nothing to read for it.
+                if (!collection.listeningRank) return emptyPage(page.offset);
+                return await (provider.catalog?.getListeningRankTracks?.(collection.listeningRank, page.limit, page.offset, collection) ?? emptyPage(page.offset));
+            }
+            if (collection.type === 'artist_songs') {
+                // The artist page's "all songs": the id is the artist's. Read in small pages on whole
+                // multiples of their size, so a provider that pages by number reads each stretch once.
+                // Stops at ARTIST_SONGS_CAP songs: an artist of tens of thousands is read that far and no further.
+                const getArtistSongs = provider.catalog?.getArtistSongs?.bind(provider.catalog);
+                if (!getArtistSongs || page.offset >= ARTIST_SONGS_CAP) return emptyPage(page.offset);
+                const read = await readAlignedPages((limit, offset) => getArtistSongs(collection.id, limit, offset), {
+                    limit: Math.min(page.limit, ARTIST_SONGS_CAP - page.offset),
+                    offset: page.offset,
+                });
+                return {
+                    ...read,
+                    ...(read.total !== undefined ? { total: Math.min(read.total, ARTIST_SONGS_CAP) } : {}),
+                    hasMore: read.hasMore && read.nextOffset < ARTIST_SONGS_CAP,
+                };
             }
             return await (provider.catalog?.getPlaylistTracks?.(collection.id, page.limit, page.offset, collection) ?? emptyPage(page.offset));
         });
@@ -942,6 +1595,7 @@ export const omni = {
     },
 
     async getSubscriptionStatus(collection: OmniCollection): Promise<boolean> {
+        if (isReadOnlyListType(collection.type)) return false;
         const type = collection.type === 'album' ? 'album' : 'playlist';
         return providerForCollection(collection).catalog?.getSubscriptionStatus?.(type, collection.id, collection) ?? false;
     },
@@ -963,7 +1617,8 @@ export const omni = {
         const provider = providerForCollection(collection);
         const mutations = provider.mutations;
         if (
-            !providerSupports(provider, 'mutations')
+            isReadOnlyListType(collection.type)
+            || !providerSupports(provider, 'mutations')
             || !providerSupports(provider, 'playlistTrackMutations')
             || !mutations?.updatePlaylistTracks
         ) {
@@ -974,14 +1629,20 @@ export const omni = {
 
     // Makes a playlist on the song's provider and puts the song in it.
     async createPlaylistWithSong(song: SongResult, name: string): Promise<void> {
-        const source = getPlaybackSourceRef(song);
-        const mutations = source.kind === 'online' ? getOnlineMusicProvider(source.providerId)?.mutations : undefined;
-        if (source.kind !== 'online' || !this.canCreatePlaylistForSong(song) || !mutations?.createPlaylist) {
-            throw new OnlineProviderError('unsupported', 'Song provider does not make playlists', source.kind === 'online' ? source.providerId : undefined);
+        return this.createPlaylistWithSongs([song], name);
+    },
+
+    // Makes a playlist on the songs' provider (the first song's: they are all of one) and puts them in it.
+    async createPlaylistWithSongs(songs: SongResult[], name: string): Promise<void> {
+        const [song] = songs;
+        const source = song ? getPlaybackSourceRef(song) : null;
+        const mutations = source?.kind === 'online' ? getOnlineMusicProvider(source.providerId)?.mutations : undefined;
+        if (!song || source?.kind !== 'online' || !this.canCreatePlaylistForSong(song) || !mutations?.createPlaylist) {
+            throw new OnlineProviderError('unsupported', 'Song provider does not make playlists', source?.kind === 'online' ? source.providerId : undefined);
         }
         const playlist = await mutations.createPlaylist(name);
         try {
-            await this.addSongToPlaylist(song, playlist);
+            await this.addSongsToPlaylist(songs, playlist);
         } catch (error) {
             // The playlist exists: it must show in the picker, or a second try makes a second one.
             void this.refreshProviderPlaylists(playlist.providerId).catch(() => undefined);
@@ -990,21 +1651,44 @@ export const omni = {
     },
 
     async addSongToPlaylist(song: SongResult, playlist: OmniCollection): Promise<void> {
-        const source = getPlaybackSourceRef(song);
-        if (source.kind !== 'online') {
-            throw new OnlineProviderError('unsupported', 'Only online songs can be added to online playlists');
-        }
-        if (playlist.providerId !== source.providerId || playlist.type !== 'playlist') {
-            throw new OnlineProviderError('unsupported', 'Playlist does not belong to the song provider', source.providerId);
-        }
-        if (!this.canAddSongToPlaylist(song)) {
-            throw new OnlineProviderError('unsupported', 'Song provider does not support playlist track mutations', source.providerId);
+        return this.addSongsToPlaylist([song], playlist);
+    },
+
+    // Several songs into one playlist. Every song must be of the playlist's provider: one that is not
+    // refuses the whole call before anything is sent. Sent PLAYLIST_ADD_BATCH at a time, in order: some
+    // platforms take at most 100 a request and some put the list in the query string. A batch that
+    // fails stops the rest, and the ones before it stay added.
+    async addSongsToPlaylist(songs: SongResult[], playlist: OmniCollection): Promise<void> {
+        if (songs.length === 0) return;
+        for (const song of songs) {
+            const source = getPlaybackSourceRef(song);
+            if (source.kind !== 'online') {
+                throw new OnlineProviderError('unsupported', 'Only online songs can be added to online playlists');
+            }
+            if (playlist.providerId !== source.providerId || playlist.type !== 'playlist') {
+                throw new OnlineProviderError('unsupported', 'Playlist does not belong to the song provider', source.providerId);
+            }
+            if (!this.canAddSongToPlaylist(song)) {
+                throw new OnlineProviderError('unsupported', 'Song provider does not support playlist track mutations', source.providerId);
+            }
         }
         const provider = providerForCollection(playlist);
         if (provider.mutations?.canAddToPlaylist && !provider.mutations.canAddToPlaylist(playlist)) {
-            throw new OnlineProviderError('unsupported', 'Playlist does not accept track mutations', source.providerId);
+            throw new OnlineProviderError('unsupported', 'Playlist does not accept track mutations', playlist.providerId);
         }
-        await this.updateCollectionTracks(playlist, 'add', [song]);
+        let sent = 0;
+        try {
+            for (; sent < songs.length; sent += PLAYLIST_ADD_BATCH) {
+                await this.updateCollectionTracks(playlist, 'add', songs.slice(sent, sent + PLAYLIST_ADD_BATCH));
+            }
+        } catch (error) {
+            // The batches before this one are in the playlist: the account's list still has to hear of them.
+            if (sent > 0) {
+                console.warn('[Omni] Playlist add stopped part way', { providerId: playlist.providerId, added: sent, of: songs.length });
+                void this.refreshProviderPlaylists(playlist.providerId).catch(() => undefined);
+            }
+            throw error;
+        }
         try {
             await this.refreshProviderPlaylists(playlist.providerId);
             if (playlist.isLiked === true && providerSupports(provider, 'likes')) {
@@ -1031,7 +1715,7 @@ export const omni = {
         if (!this.canLikeSong(song) || !provider.mutations?.likeSong) return unsupported(provider.id, 'likes');
 
         // canLikeSong 已经保证了这一点，这里只是把类型收窄；真走到就说明上面的判断被绕过了。
-        const source = getPlaybackSourceRef(song);
+        const source = likeSourceOf(song);
         if (source.kind !== 'online') return unsupported(provider.id, 'likes');
 
         const press = likePressesOf(source.providerId).press(
@@ -1084,7 +1768,7 @@ export const omni = {
     endLikedListRead(read: LikedListRead, songs: SongResult[], whole: boolean): void {
         const ids: MediaId[] = [];
         for (const song of songs) {
-            const source = getPlaybackSourceRef(song);
+            const source = likeSourceOf(song);
             if (source.kind === 'online' && source.providerId === read.providerId) ids.push(source.mediaId);
         }
         if (applyLikedIdsRead(read, { ids, whole }).changed) void persistProviderLikedSongIds(read.providerId);
@@ -1105,16 +1789,17 @@ export const omni = {
     // The songs being played and queued, the one playing first (src/hooks/useAccountReads.ts
     // tells of them). Where a platform's liked list was not read to the end, their hearts are
     // asked of the platform (account/likedChecks.ts). Never throws or rejects.
+    // A source that is not shown is not asked (its account is not read, plan §5.3).
     songsInPlay(songs: SongResult[]): void {
         const inPlay: SongInPlay[] = [];
         for (const song of songs) {
-            const source = getPlaybackSourceRef(song);
-            if (source.kind === 'online') inPlay.push({ providerId: source.providerId, mediaId: source.mediaId });
+            const source = likeSourceOf(song);
+            if (source.kind === 'online' && isSourceShown(source.providerId)) inPlay.push({ providerId: source.providerId, mediaId: source.mediaId });
         }
         likedChecks.songsInPlay(inPlay);
     },
 
-    async dislikeSong(song: SongResult): Promise<{ replacement?: UnifiedSong; limitReached?: boolean }> {
+    async dislikeSong(song: SongResult): Promise<{ replacement?: UnifiedSong; limitReached?: boolean; removed?: boolean }> {
         const provider = providerForSong(song);
         if (!this.canDislikeSong(song) || !provider.recommendations?.dislikeSong) {
             return unsupported(provider.id, 'recommendation-dislike');
@@ -1135,8 +1820,75 @@ export const omni = {
         return getOnlineMusicProvider(source.providerId)?.catalog?.resolveSongCatalogRefs?.(song) ?? song;
     },
 
+    // The catalog refs a song's album and artists open as at its provider (catalogRefs.ts), each
+    // with the name the song gives it, from one lookup. Only the kinds the provider has (its
+    // `albums` / `artists` capabilities); none for a song that is not online. May ask the provider.
+    async getSongCatalogRefs(song: UnifiedSong): Promise<ProviderSongCatalogRefs> {
+        const source = getPlaybackSourceRef(song);
+        if (source.kind !== 'online') return { album: null, artists: [] };
+        const provider = getOnlineMusicProvider(source.providerId);
+        return resolveSongCatalogRefSet(song, {
+            album: providerSupports(provider, 'albums'),
+            artists: providerSupports(provider, 'artists'),
+        });
+    },
+
     getSongPageUrl(song: SongResult): string | null {
         return providerForSong(song).getSongPageUrl?.(song) ?? null;
+    },
+
+    // ---- 平台后端的原始接口（OnlineRawRequestProvider）：调用平台专有能力的后备通道，只给 Folium 的
+    // 实验接口 platform.raw 用。omni 已有对应能力的接口，调用方应改用 omni（分类表的 `omni` 一列）。
+
+    // 这个平台能否直通：后端库的名字和版本，和宿主自己设置的参数名。不能直通回 null。
+    getRawRequestInfo(providerId: OmniProviderId): { backend: { name: string; version: string }; reservedParams: readonly string[] } | null {
+        const raw = getOnlineMusicProvider(providerId)?.raw;
+        return raw ? { backend: { name: raw.backend.name, version: raw.backend.version }, reservedParams: raw.reservedParams } : null;
+    },
+
+    // 一个接口在平台分类表里的那一行；不能直通的平台、表外的接口回 null。
+    describeRawEndpoint(providerId: OmniProviderId, endpoint: string): ProviderRawEndpoint | null {
+        return getOnlineMusicProvider(providerId)?.raw?.describeEndpoint(endpoint) ?? null;
+    },
+
+    // 参数的取值有没有问题（平台的 checkParams，比如会拼进上游路径的参数只收数字）：有回一句说明，没有回 null。
+    // 调用方在发请求之前问，把问题当作参数错误报给它的调用方；requestProviderRaw 自己也会再挡一次。
+    checkRawParams(providerId: OmniProviderId, endpoint: string, params: Record<string, JsonValue>): string | null {
+        return getOnlineMusicProvider(providerId)?.raw?.checkParams?.(endpoint, params) ?? null;
+    },
+
+    // 以当前登录的会话调用一个平台接口，回平台原始的 JSON，凭据字段（rawResponse.ts）已经剥掉。
+    // 权限由调用方查；这里再挡一次表外和永远拒绝的接口、宿主自己设置的参数、取值不合平台格式的参数（unsupported）。
+    // 分类表说接口要「当前用户」而调用方没给时，填上当前账号的用户 id；没有登录就是 auth-required。
+    async requestProviderRaw(
+        providerId: OmniProviderId,
+        endpoint: string,
+        params: Record<string, JsonValue>,
+        signal: AbortSignal,
+    ): Promise<JsonValue> {
+        const raw = getOnlineMusicProvider(providerId)?.raw;
+        if (!raw) return unsupported(providerId, 'raw-requests');
+        const rule = raw.describeEndpoint(endpoint);
+        if (!rule || rule.access === 'denied') {
+            throw new OnlineProviderError('unsupported', `${endpoint} is not open to raw requests`, providerId);
+        }
+        const reserved = Object.keys(params).find(name => raw.reservedParams.includes(name));
+        if (reserved !== undefined) {
+            throw new OnlineProviderError('unsupported', `The parameter ${reserved} is set by the host`, providerId);
+        }
+        const problem = raw.checkParams?.(endpoint, params) ?? null;
+        if (problem !== null) {
+            throw new OnlineProviderError('unsupported', `Refused parameters for ${endpoint}: ${problem}`, providerId);
+        }
+        let sent = params;
+        if (rule.selfParam && params[rule.selfParam] === undefined) {
+            const userId = useOnlineProviderAccountStore.getState().accounts[providerId]?.user?.id;
+            if (userId === undefined || userId === null) {
+                throw new OnlineProviderError('auth-required', `${endpoint} is about the signed-in account, and nobody is signed in`, providerId);
+            }
+            sent = { ...params, [rule.selfParam]: userId };
+        }
+        return withoutCredentials(await raw.request(endpoint, sent, signal), raw.credentialFields);
     },
 };
 

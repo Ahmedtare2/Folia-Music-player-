@@ -1,20 +1,15 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import type { MutableRefObject, RefObject } from 'react';
 import { PlayerState } from '../../../../types';
-import type { ReplayGainInfo, SongResult } from '../../../../types';
+import type { ReplayGainInfo, ReplayGainMode, SongResult, StatusMessage } from '../../../../types';
 import type { LocalSong } from '../../../../types';
 import { isLocalPlaybackSong, resolveNavidromePlaybackCarrier } from '../../../../utils/appPlaybackGuards';
 import { calculateReplayGain } from '../../../../utils/replayGain';
-import { shouldBypassWebAudioDspGraph } from '../../../../utils/audioEqualizer';
-import {
-    applyAudioEqualizerSettings,
-    applyEqualizerPreampHeadroom,
-} from '../../../../services/audioEqualizerGraph';
+import { applyAudioEqualizerSettings, planAudioEqualizerApply } from '../../../../services/audioEqualizerGraph';
 import { type AudioEffectChain } from '../../../../services/audioEffects/effectChain';
 import { buildPlaybackGraph } from '../../../../services/playbackGraph';
 import { cachePlayedTrackAssets } from '../../../../services/playedTrackCache';
 import { markProgrammaticPause, registerPlaybackFadeGraph } from '../../../../services/playbackFade';
-import { rampGain, type AutomixDeckChain } from '../../../../services/automix/crossfadeGraph';
 import {
     bindAudioElementToNativeExoPlayer,
     isAndroidSafStreamUrl,
@@ -23,20 +18,26 @@ import {
     shouldRouteToAndroidNativeExoPlayer,
 } from '../../../../services/android/foliaAndroidBridge';
 import { getSongAlbumLabel, getSongArtistLabel } from '../../../../services/onlineMusic/songMetadata';
+import { shouldBypassWebAudioDspGraph } from '../../../../utils/audioEqualizer';
+import { registerRoomSlot } from '../../../../services/sceneSound/roomStage';
+import { applySavedAudioOutputToContext } from '../../../../services/audioOutputSink';
+import { rampGain, type AutomixDeckChain } from '../../../../services/automix/crossfadeGraph';
+import { onTrackProfile } from '../../../../services/automix/profileService';
+import { onPlayWrapped } from '../../../../services/volumeBalance/balanceMeter';
+import { createBalancePlay } from '../../../../services/volumeBalance/balancePlay';
+import { onBalanceRecord } from '../../../../services/volumeBalance/balanceRecords';
 import { setStatusMessage as setStatusMsg } from '../../../../stores/useStatusMessageStore';
 import { useAudioSettingsStore } from '../../../../stores/useAudioSettingsStore';
-import { setPlayerState } from '../../../../stores/usePlaybackStore';
+import { setPlayerState, setReplayGainAppliedDb, setReplayGainEstimated } from '../../../../stores/usePlaybackStore';
 import { useTranslation } from 'react-i18next';
 import { usePlaybackStore } from '../../../../stores/usePlaybackStore';
+import { resolveHeardAudioEqualizerSettings } from '../../../../utils/audioEqualizerModCurve';
 
 // src/components/app/playback/bridges/usePlaybackAudioBridge.ts
 
-type ManagedEffectChainHandle = AudioEffectChain & {
-    setGraphDspBypass?: (bypassed: boolean) => void;
-    isGraphDspBypassed?: () => boolean;
-};
-
 type UsePlaybackAudioBridgeParams = {
+    automixEnabled?: boolean;
+    stemSeparationEnabled?: boolean;
 
     audioRef: RefObject<HTMLAudioElement | null>;
     localSongs: LocalSong[];
@@ -56,14 +57,19 @@ type UsePlaybackAudioBridgeParams = {
     syncOutputGain: (targetVolume: number, smoothing?: number) => void;
     getTargetPlaybackVolume: () => number;
     getCoverUrl: () => string | null;
-    /** True when Automix crossfade/blend transitions are enabled. */
-    automixEnabled?: boolean;
-    /** True when Stem Separation is enabled for transitions. */
-    stemSeparationEnabled?: boolean;
+    /** Whether an automix blend can be heard now; a mod's equalizer change waits until it cannot. */
+    isTransitionAudible?: () => boolean;
 };
 
-// Bridges audio element setup, direct hardware decoder bypass vs. WebAudio DSP graph, autoplay, replay gain, and media caching.
+/** How often a mod's equalizer change held back for a blend checks whether the blend has ended. */
+const DEFERRED_EQUALIZER_POLL_MS = 250;
+/** How often 智能平衡 looks again at a playing song: its deck's meter, a blend that ended. */
+const BALANCE_POLL_MS = 500;
+
+// Bridges audio element setup, autoplay, replay gain, and media caching.
 export function usePlaybackAudioBridge({
+    automixEnabled = false,
+    stemSeparationEnabled = false,
     audioRef,
     localSongs,
     isLyricsLoading,
@@ -78,8 +84,7 @@ export function usePlaybackAudioBridge({
     syncOutputGain,
     getTargetPlaybackVolume,
     getCoverUrl,
-    automixEnabled = false,
-    stemSeparationEnabled = false,
+    isTransitionAudible,
 }: UsePlaybackAudioBridgeParams) {
     // Read here rather than passed in: all store fields or i18n.
     const { t } = useTranslation();
@@ -90,19 +95,14 @@ export function usePlaybackAudioBridge({
 
     const previousAudioSrcRef = useRef<string | null>(null);
     const replayGainLogSignatureRef = useRef<string | null>(null);
+    const balancePlayRef = useRef<ReturnType<typeof createBalancePlay> | null>(null);
+    balancePlayRef.current ??= createBalancePlay();
     const equalizerNodesRef = useRef<BiquadFilterNode[]>([]);
-    const preampNodeRef = useRef<GainNode | null>(null);
-    const effectChainRef = useRef<ManagedEffectChainHandle | null>(null);
+    const effectChainRef = useRef<AudioEffectChain | null>(null);
     const audioEqualizerSettings = useAudioSettingsStore(state => state.audioEqualizerSettings);
 
-    // When Chorus/Effects, EQ, Automix, and Stem Separation are all turned off, bypass the WebAudio
-    // AudioContext processing nodes so the Android hardware audio decoder handles playback directly
-    // with minimal CPU usage, leaving maximum CPU/GPU resources for the 60/120fps lyrics visualizer.
-    const shouldBypassDsp = shouldBypassWebAudioDspGraph({
-        equalizerSettings: audioEqualizerSettings,
-        automixEnabled,
-        stemSeparationEnabled,
-    });
+    // The flat, no-automix case may hand playback to Android's native ExoPlayer (opt-in).
+    const shouldBypassDsp = shouldBypassWebAudioDspGraph({ equalizerSettings: audioEqualizerSettings, automixEnabled, stemSeparationEnabled });
     const forceNativeExoOverride = typeof window !== 'undefined'
         && Boolean((window as Window & { __FOLIA_FORCE_NATIVE_EXOPLAYER__?: boolean }).__FOLIA_FORCE_NATIVE_EXOPLAYER__);
     const useNativeExoPlayer = forceNativeExoOverride && shouldRouteToAndroidNativeExoPlayer({
@@ -125,6 +125,21 @@ export function usePlaybackAudioBridge({
             }
         };
     }, [audioRef, useNativeExoPlayer]);
+    // What is heard: the listener's own settings with a mod's curve over the gains (Folium 1.7). Worked out
+    // here rather than in a selector, which would hand useSyncExternalStore a new object on every read.
+    const modCurve = useAudioSettingsStore(state => state.audioEqualizerModCurve);
+    const modCurveSuspended = useAudioSettingsStore(state => state.audioEqualizerModCurveSuspended);
+    const equalizerOrigin = useAudioSettingsStore(state => state.audioEqualizerChangeOrigin);
+    const heardEqualizerSettings = useMemo(
+        () => resolveHeardAudioEqualizerSettings(audioEqualizerSettings, modCurve, modCurveSuspended),
+        [audioEqualizerSettings, modCurve, modCurveSuspended],
+    );
+    const heardEqualizerSettingsRef = useRef(heardEqualizerSettings);
+    const isTransitionAudibleRef = useRef(isTransitionAudible);
+    // Read only in the equalizer effect and its timer; written in an effect, not while rendering.
+    useEffect(() => {
+        isTransitionAudibleRef.current = isTransitionAudible;
+    }, [isTransitionAudible]);
 
     // Recalculates source-specific gain after the audio graph or playback settings become ready.
     const applyReplayGain = useCallback(() => {
@@ -154,14 +169,30 @@ export function usePlaybackAudioBridge({
             replayGainInfo = currentSong.replayGain;
         }
 
-        const calculation = calculateReplayGain(replayGainInfo, replayGainMode);
-
         try {
             // Onto the deck rather than the shared output: loudness compensation is a per-track
             // value, so during a blend the two decks legitimately need different ones.
             const activeChain = getActiveChain();
+            // 智能平衡 decides per play, from what it knows of the song (services/volumeBalance).
+            if (replayGainMode === 'auto') {
+                const applied = balancePlayRef.current!.apply({
+                    song: currentSong,
+                    info: replayGainInfo,
+                    chain: activeChain,
+                    context: audioContextRef.current,
+                    transitionAudible: isTransitionAudibleRef.current?.() ?? false,
+                });
+                // With no deck to take it nothing is applied, and the last song's figure must not stay shown.
+                setReplayGainAppliedDb(applied?.gainDb ?? 0);
+                setReplayGainEstimated(applied?.estimated ?? false);
+                return;
+            }
+            balancePlayRef.current!.reset();
+            setReplayGainEstimated(false);
+            const calculation = calculateReplayGain(replayGainInfo, replayGainMode);
             if (activeChain) {
                 rampGain(audioContextRef.current, activeChain.replayGain, calculation.linearGain, 0.1);
+                setReplayGainAppliedDb(calculation.effectiveGainDb);
             }
 
             const replayGainLogSignature = JSON.stringify({
@@ -181,69 +212,61 @@ export function usePlaybackAudioBridge({
         }
     }, [audioContextRef, currentSong, gainNodeRef, getActiveChain, localSongs, replayGainMode]);
 
-    const setupAudioAnalyzer = useCallback((forceCreate = false) => {
-        if (!audioRef.current) return;
-        // If the AudioContext already exists, update its DSP bypass state and ensure it is not stuck
-        // in 'suspended' state when playback starts.
-        if (audioContextRef.current) {
-            effectChainRef.current?.setGraphDspBypass?.(shouldBypassDsp);
-            if (audioContextRef.current.state === 'suspended') {
-                void audioContextRef.current.resume().catch(() => {});
-            }
-            return;
-        }
-        // Direct Hardware Audio Path: when Chorus, EQ, Automix, and Stem Separation are all turned off,
-        // do not instantiate AudioContext or hijack the HTMLAudioElement via createMediaElementSource.
-        if (shouldBypassDsp && !forceCreate) {
-            syncOutputGain(getTargetPlaybackVolume(), 0);
-            return;
-        }
+    const setupAudioAnalyzer = useCallback(() => {
+        // The context is the sentinel, not the source node: a deck that failed to connect must
+        // not let this run twice, because createMediaElementSource throws on a second call.
+        if (!audioRef.current || audioContextRef.current) return;
         try {
+            try {
+                const nav = navigator as Navigator & { audioSession?: { type: string } };
+                if (nav.audioSession) nav.audioSession.type = 'playback';
+            } catch { /* audioSession unsupported */ }
             const AudioContextClass = window.AudioContext || (window as Window & typeof globalThis & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-            if (!AudioContextClass) return;
             const ctx = new AudioContextClass();
             audioContextRef.current = ctx;
+            void applySavedAudioOutputToContext(ctx, useAudioSettingsStore.getState().audioOutputDeviceId);
 
             const analyser = ctx.createAnalyser();
             analyser.fftSize = 2048;
             analyser.smoothingTimeConstant = 0.6;
             analyserRef.current = analyser;
 
-            const builtGraph = buildPlaybackGraph({
+            const { gainNode, fadeNode, effectChain, decksConnected } = buildPlaybackGraph({
                 context: ctx,
                 analyser,
                 connectDecks,
                 equalizerNodesRef,
-                settings: audioEqualizerSettings,
-                bypassDsp: shouldBypassDsp,
+                settings: heardEqualizerSettings,
             });
-            if (!builtGraph) return;
-            const { gainNode, fadeNode, preampNode, effectChain, decksConnected, setDspBypass, isDspBypassed } = builtGraph;
             gainNodeRef.current = gainNode;
-            preampNodeRef.current = preampNode ?? null;
             // Hands the transport its own fade node; until this runs (or if setup fails) pause and
             // resume see no graph and fall back to plain element pause/play.
             registerPlaybackFadeGraph({ context: ctx, gain: fadeNode });
-            const managedChain: ManagedEffectChainHandle = Object.assign(effectChain, {
-                setGraphDspBypass: setDspBypass,
-                isGraphDspBypassed: isDspBypassed,
-            });
-            effectChainRef.current = managedChain;
+            // Where a scene's room goes when one is shown with its sound on; nothing is wired until then.
+            registerRoomSlot({ context: ctx, from: fadeNode, to: gainNode });
+            effectChainRef.current = effectChain;
             if (!decksConnected) {
                 console.warn('[AudioContext] Deck setup incomplete, automix will stay idle');
             }
             applyReplayGain();
             syncOutputGain(getTargetPlaybackVolume(), 0);
-            if (ctx.state === 'suspended') {
-                void ctx.resume().catch(() => {});
-            }
         } catch (error) {
             console.error('Audio Context Setup Failed:', error);
         }
-    }, [analyserRef, applyReplayGain, audioContextRef, audioEqualizerSettings, audioRef, connectDecks, gainNodeRef, getTargetPlaybackVolume, shouldBypassDsp, syncOutputGain]);
+    }, [analyserRef, applyReplayGain, audioContextRef, audioRef, connectDecks, gainNodeRef, getTargetPlaybackVolume, heardEqualizerSettings, syncOutputGain]);
 
     /**
      * Writes a fully-played track's audio and cover into the media cache.
+     *
+     * Takes the song and its source explicitly rather than reading `currentSong`/`audioSrc`, because
+     * the automix settle path caches the track that just faded OUT - and by then the app's own state
+     * already names the track that arrived. `coverUrl` is passed for the currently-displayed track
+     * (which may carry a user override); left undefined - the automix path - the cover is taken from
+     * the song's own metadata instead.
+     *
+     * The writes themselves live in `cachePlayedTrackAssets`, which is where the audio and cover
+     * conditions are kept apart from each other; this only adds the setting gate, which does not
+     * belong in a service.
      */
     const cacheSongAssetsFor = useCallback(async (
         song: SongResult | null,
@@ -274,27 +297,59 @@ export function usePlaybackAudioBridge({
         applyReplayGain();
     }, [applyReplayGain]);
 
+    // 智能平衡 looks again when a reading lands - a profile, the song's own record, the deck's meter once it
+    // has heard enough - and when a blend ends; the rules decide whether a playing song may still move. A loop
+    // come round is a new play, set at once rather than at the next poll.
     useEffect(() => {
-        if (!shouldBypassDsp && !audioContextRef.current && audioRef.current) {
-            setupAudioAnalyzer(true);
-        }
+        if (replayGainMode !== 'auto') return undefined;
+        const offProfile = onTrackProfile(() => applyReplayGain());
+        const offRecord = onBalanceRecord(() => applyReplayGain());
+        const offWrap = onPlayWrapped(() => applyReplayGain());
+        const timer = setInterval(() => applyReplayGain(), BALANCE_POLL_MS);
+        return () => {
+            offProfile();
+            offRecord();
+            offWrap();
+            clearInterval(timer);
+        };
+    }, [applyReplayGain, replayGainMode]);
+
+    /*
+     * Writes what is heard into the graph. A mod's change waits while an automix blend can be heard and is
+     * then applied as it stands by then; any later change re-runs this, which drops the wait and applies at
+     * once by its own origin (planAudioEqualizerApply).
+     */
+    useEffect(() => {
+        heardEqualizerSettingsRef.current = heardEqualizerSettings;
         const context = audioContextRef.current;
-        if (!context) {
+        if (!context || equalizerNodesRef.current.length === 0) {
             return;
         }
-        effectChainRef.current?.setGraphDspBypass?.(shouldBypassDsp);
-        if (equalizerNodesRef.current.length === 0) {
+        const plan = planAudioEqualizerApply({
+            origin: equalizerOrigin,
+            transitionAudible: isTransitionAudibleRef.current?.() ?? false,
+        });
+        const apply = (settings: typeof heardEqualizerSettings) => {
+            applyAudioEqualizerSettings(context, equalizerNodesRef.current, settings, plan.timeConstant);
+            effectChainRef.current?.apply(settings.effects, settings.enabled);
+        };
+        if (!plan.defer) {
+            apply(heardEqualizerSettings);
             return;
         }
-        applyAudioEqualizerSettings(context, equalizerNodesRef.current, audioEqualizerSettings);
-        applyEqualizerPreampHeadroom(context, preampNodeRef.current, audioEqualizerSettings);
-        effectChainRef.current?.apply(audioEqualizerSettings.effects, audioEqualizerSettings.enabled && !shouldBypassDsp);
-    }, [audioContextRef, audioEqualizerSettings, audioRef, setupAudioAnalyzer, shouldBypassDsp]);
+        const timer = setInterval(() => {
+            if (isTransitionAudibleRef.current?.()) {
+                return;
+            }
+            clearInterval(timer);
+            apply(heardEqualizerSettingsRef.current);
+        }, DEFERRED_EQUALIZER_POLL_MS);
+        return () => clearInterval(timer);
+    }, [audioContextRef, heardEqualizerSettings, equalizerOrigin]);
 
     useEffect(() => () => {
         effectChainRef.current?.dispose();
         effectChainRef.current = null;
-        preampNodeRef.current = null;
     }, []);
 
     useEffect(() => {
@@ -306,8 +361,7 @@ export function usePlaybackAudioBridge({
 
         if (audioSrc && previousAudioSrcRef.current && previousAudioSrcRef.current !== audioSrc) {
             if (!audioElement.paused && !audioElement.ended) {
-                // Mark as programmatic pause before calling pause() on source switch so the queued
-                // DOM 'pause' event is not misinterpreted by App.tsx's onPause handler as a user pause.
+                // Programmatic pause on source switch: App.tsx's onPause must not read it as a user pause.
                 markProgrammaticPause(audioElement);
                 audioElement.pause();
             }
@@ -319,6 +373,17 @@ export function usePlaybackAudioBridge({
 
     useEffect(() => {
         if (audioSrc && audioRef.current) {
+            // `audioRef` and `audioSrc` describe the same track almost always - but not while a
+            // blend is being armed. Automix repoints the ref at the incoming deck the instant it
+            // arms, and `audioSrc` keeps naming the OUTGOING track until playSong has resolved the
+            // next URL, which takes an await or two. Playing in that window starts whatever the
+            // incoming deck still had loaded from an earlier song AND spends the autoplay intent
+            // on it, so when the real source lands there is nothing left to press play with: the
+            // deck sits fully buffered at currentTime 0 in silence.
+            //
+            // The deck's own src attribute is written from `audioSrc`, so an exact match is the
+            // whole test. Bail WITHOUT spending the intent - this effect runs again on the commit
+            // that gives the deck its real source, and that run is the one meant to start it.
             if (useNativeExoPlayer) {
                 bindAudioElementToNativeExoPlayer(audioRef.current, true);
                 const autoPlayWanted = Boolean(shouldAutoPlayRef.current && !isAutoplayHeld && !suppressAutoplayRef.current);
@@ -352,33 +417,50 @@ export function usePlaybackAudioBridge({
                 return;
             }
             if (audioRef.current.getAttribute('src') !== audioSrc) return;
+
+            // The deck has already failed on this exact source and something else - the transcode
+            // fallback - is off resolving it. play() on an element in error state cannot start
+            // anything; it rejects with NotSupportedError. Pressing it here only spends the intent,
+            // so when the recovered source lands there is nothing left to start the deck with.
+            // Bail WITHOUT spending it, the same way the autoplay hold below does: replacing the
+            // source runs this effect again, and that run is the one meant to start it.
             if (audioRef.current.error) return;
 
+            // Local sources already have their playable URL and local lyrics before audioSrc commits;
+            // do not delay local playback while optional online lyric/cover matching runs in the background.
             const isLocalSourceReady = Boolean(
                 isLocalPlaybackSong(currentSong)
                 || audioSrc.startsWith('blob:')
                 || isAndroidSafStreamUrl(audioSrc)
             );
-
-            // Local sources already have their playable URL and local lyrics resolved before audioSrc commits;
-            // do not delay starting local audio playback while optional online lyric/cover matching runs in the background.
             if (shouldAutoPlayRef.current && (!isLyricsLoading || isLocalSourceReady)) {
+                // The deck has its source and is buffering, but its blend is not due yet. Bail
+                // WITHOUT spending the intent - this effect runs again when the hold lifts, and
+                // that run is the one meant to start it.
+                //
+                // This is what keeps the load out of the blend. Pressing play here instead starts
+                // the fade wherever loading happened to finish, which took the same second or two
+                // off every transition and capped an eight second plan at three.
                 if (isAutoplayHeld) {
+                    // The outgoing deck is still sounding. playSong dropped the state to IDLE on
+                    // its way past and nothing else puts it back until this deck starts, so left
+                    // alone the transport reads "stopped" for the whole lead - and the play button
+                    // it offers would start this deck early and take the blend with it.
                     setPlayerState(PlayerState.PLAYING);
                     return;
                 }
 
                 shouldAutoPlayRef.current = false;
 
+                // Automix starts the next track seconds early, so a pause can land after the
+                // advance is already in flight and too late to recall. Honour the pause instead:
+                // without this the listener presses pause and the next song starts anyway.
                 if (suppressAutoplayRef.current) {
                     suppressAutoplayRef.current = false;
                     setPlayerState(PlayerState.PAUSED);
                     return;
                 }
 
-                if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
-                    void audioContextRef.current.resume().catch(() => {});
-                }
                 syncOutputGain(getTargetPlaybackVolume(), 0);
                 const playPromise = audioRef.current.play();
                 if (playPromise !== undefined) {
@@ -390,10 +472,15 @@ export function usePlaybackAudioBridge({
                         .catch(error => {
                             if (audioRef.current && !audioRef.current.paused && !audioRef.current.ended) {
                                 setPlayerState(PlayerState.PLAYING);
-                                setupAudioAnalyzer();
                                 return;
                             }
 
+                            // A load() landing between play() and its promise aborts the play.
+                            // That happens whenever the source changes again while a track is
+                            // still starting - skipping during an automix transition is the
+                            // reliable way to see it - and the autoplay flag was spent before
+                            // play() was ever called, so nothing would press play again and the
+                            // app sits silent. Put the intent back for the next run.
                             if (error.name === 'AbortError') {
                                 shouldAutoPlayRef.current = true;
                                 return;
@@ -407,8 +494,13 @@ export function usePlaybackAudioBridge({
                 }
             }
         }
-    }, [audioContextRef, audioRef, audioSrc, currentSong, getCoverUrl, getTargetPlaybackVolume, isAutoplayHeld, isLyricsLoading, setPlayerState, setStatusMsg, setupAudioAnalyzer, shouldAutoPlayRef, suppressAutoplayRef, syncOutputGain, t, useNativeExoPlayer]);
+    }, [audioRef, audioSrc, currentSong, getCoverUrl, getTargetPlaybackVolume, isAutoplayHeld, isLyricsLoading, useNativeExoPlayer, setPlayerState, setStatusMsg, setupAudioAnalyzer, shouldAutoPlayRef, suppressAutoplayRef, syncOutputGain, t]);
 
+    // Tells this bridge that the active deck ALREADY holds `src` and is sounding it, so the next time
+    // `audioSrc` settles on that value the reload effect above treats it as a no-op instead of calling
+    // load(). Used when a transition is cancelled back onto the deck still playing the outgoing track:
+    // that deck has the song loaded and playing, and reloading it would run the whole song-change
+    // shape - a fresh load, a visible hitch - for a track that never actually left.
     const adoptActiveDeckSource = useCallback((src: string) => {
         previousAudioSrcRef.current = src;
     }, []);

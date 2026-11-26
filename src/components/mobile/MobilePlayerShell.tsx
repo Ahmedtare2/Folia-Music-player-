@@ -1,3 +1,4 @@
+import type { FoliaPlaylistSummary } from '../../types/foliaPlaylist';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MotionValue } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
@@ -29,7 +30,6 @@ import {
     X,
 } from 'lucide-react';
 import {
-    type LocalPlaylist,
     type LocalSong,
     type LyricData,
     PlayerState,
@@ -47,7 +47,7 @@ import { detectTextDirection } from '../../utils/lyrics/arabicText';
 import { VISUALIZER_REGISTRY, getVisualizerModeLabel } from '../visualizer/registry';
 import { ANDROID_VISIBILITY_EVENT, hasAndroidNativeVisualizerBridge, minimizeAndroidApp } from '../../services/android/foliaAndroidBridge';
 import type { NavidromeSong } from '../../types/navidrome';
-import { AUDIO_EQUALIZER_PRESET_LABELS } from '../../utils/audioEqualizer';
+import { AUDIO_EQUALIZER_PRESET_LABELS } from '../../utils/audioEqualizerCompat';
 import { useAudioSettingsStore } from '../../stores/useAudioSettingsStore';
 import { useDynamicAlbumArtworkStore } from '../../stores/useDynamicAlbumArtworkStore';
 import {
@@ -93,7 +93,7 @@ import {
 
 export interface MobilePlayerShellProps {
     localSongs: LocalSong[];
-    localPlaylists: LocalPlaylist[];
+    localPlaylists: FoliaPlaylistSummary[];
     localLibraryCatalog: LocalLibraryDisplayCatalog;
     currentSong: SongResult | null;
     artistName: string;

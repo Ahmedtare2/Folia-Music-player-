@@ -8,6 +8,8 @@ export type VideoChunk = {
     timestampUs: number;
     durationUs: number;
     keyFrame: boolean;
+    /** Only on the first chunk, and only when the encoder reports it (the desktop MP4 writer needs it). */
+    decoderConfig?: { codec: string; description?: Uint8Array; codedWidth?: number; codedHeight?: number };
 };
 
 export type VideoChunkSink = {
@@ -25,6 +27,8 @@ export type VideoEncoderSettings = {
     fps: number;
     bitrate: number;
     family: VideoCodecFamily;
+    /** 'avc' makes the encoder output length-prefixed H.264 with a decoder config (for MP4 muxers). Default is Annex B. */
+    avcFormat?: 'annexb' | 'avc';
 };
 
 type EncoderLike = {
@@ -38,7 +42,10 @@ type EncoderLike = {
 
 type EncoderCtor = {
     new (init: {
-        output: (chunk: { byteLength: number; timestamp: number; duration: number | null; type: string; copyTo: (target: Uint8Array) => void }) => void;
+        output: (
+            chunk: { byteLength: number; timestamp: number; duration: number | null; type: string; copyTo: (target: Uint8Array) => void },
+            metadata?: { decoderConfig?: { codec: string; description?: ArrayBuffer | ArrayBufferView; codedWidth?: number; codedHeight?: number } },
+        ) => void;
         error: (error: Error) => void;
     }): EncoderLike;
     isConfigSupported: (config: Record<string, unknown>) => Promise<{ supported?: boolean }>;
@@ -100,7 +107,7 @@ export const openVideoEncoderSession = async (
                 framerate: settings.fps,
                 bitrate: settings.bitrate,
                 latencyMode: 'quality',
-                ...(settings.family === 'hevc' ? { hevc: { format: 'annexb' } } : { avc: { format: 'annexb' } }),
+                ...(settings.family === 'hevc' ? { hevc: { format: 'annexb' } } : { avc: { format: settings.avcFormat ?? 'annexb' } }),
                 hardwareAcceleration: preference,
             };
             try {
@@ -125,7 +132,7 @@ export const openVideoEncoderSession = async (
     let queuedWrites = 0;
     let bytesWritten = 0;
     const encoder = new Encoder({
-        output: chunk => {
+        output: (chunk, metadata) => {
             const data = new Uint8Array(chunk.byteLength);
             chunk.copyTo(data);
             bytesWritten += data.byteLength;
@@ -135,6 +142,15 @@ export const openVideoEncoderSession = async (
                 durationUs: chunk.duration ?? Math.round(1_000_000 / settings.fps),
                 keyFrame: chunk.type === 'key',
             };
+            const config = metadata?.decoderConfig;
+            if (config) {
+                const description = config.description
+                    ? (ArrayBuffer.isView(config.description)
+                        ? new Uint8Array(config.description.buffer.slice(config.description.byteOffset, config.description.byteOffset + config.description.byteLength))
+                        : new Uint8Array(config.description.slice(0)))
+                    : undefined;
+                entry.decoderConfig = { codec: config.codec, description, codedWidth: config.codedWidth, codedHeight: config.codedHeight };
+            }
             queuedWrites += 1;
             pending = pending
                 .then(() => sink.write(entry))

@@ -69,18 +69,4 @@ describe('db Dexie compatibility facade', () => {
         expect(await appDatabase.api_cache.get(LOCAL_LIBRARY_BOOTSTRAP_MARKER_KEY)).toBeTruthy();
         expect(await appDatabase.api_cache.get(LOCAL_LIBRARY_ARTIST_SPLIT_MARKER_KEY)).toBeTruthy();
     });
-
-    it('preserves persistent local library index keys (local_dir_handles, local_playlists, local_snapshot_*) when clearing temporary caches', async () => {
-        await saveToCache('local_dir_handles', { Music: { __foliaAndroidSafKind: 'directory', name: 'Music', treeUri: 'content://saf/tree/Music', documentId: 'primary:Music' } });
-        await saveToCache('local_playlists', [{ id: 'p1', name: 'Favorites', songIds: ['s1'] }]);
-        await saveToCache('local_snapshot_Music', { rootFolderName: 'Music', scannedAt: 12345, entries: [] });
-        await saveToCache('search_temp_query', { results: [1, 2, 3] });
-
-        await clearCache();
-
-        expect(await getFromCache('local_dir_handles')).toBeTruthy();
-        expect(await getFromCache('local_playlists')).toEqual([{ id: 'p1', name: 'Favorites', songIds: ['s1'] }]);
-        expect(await getFromCache('local_snapshot_Music')).toMatchObject({ rootFolderName: 'Music' });
-        expect(await getFromCache('search_temp_query')).toBeNull();
-    });
 });

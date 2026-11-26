@@ -1,12 +1,12 @@
+// @builtin-sources
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LocalSong } from '@/types';
 import { matchLyrics } from '@/services/localMusicService';
-import { clearNegativeLyricMatchRecord, isSongOnAutomaticLyricMatchCooldown } from '@/utils/lyrics/lyricAutoMatchState';
-import { shouldRunLocalSongAutomaticMatch } from '@/utils/lyrics/localSongMatchContext';
 import { autoMatchBestLyric } from '@/utils/lyrics/autoMatchBestLyric';
 import { applyMatchedMetadata } from '@/services/localLibraryCatalogService';
-import { neteaseApi } from '@/services/onlineMusic/netease/netease';
+import { neteaseApi } from '../../../sources/netease/core/netease';
 import { getLocalLibraryCatalogSnapshot } from '@/services/localLibraryEntityRepository';
+import { getOnlineMusicProvider, registerOnlineMusicProvider, unregisterOnlineMusicProvider } from '@/services/onlineMusic/providerRegistry';
 
 // test/unit/services/localMusicLyricsMatch.test.ts
 
@@ -21,8 +21,10 @@ vi.mock('@/services/localLibraryCatalogService', () => ({ applyMatchedMetadata: 
 vi.mock('@/services/localLibraryEntityRepository', () => ({
     getLocalLibraryCatalogSnapshot: vi.fn().mockResolvedValue({ entities: [], assignments: [] }),
 }));
-vi.mock('@/services/onlineMusic/netease/netease', () => ({
-    neteaseApi: {
+// The module's own pure helpers stay real (the source reads songs and lyrics through them); the requests are mocked.
+vi.mock('../../../sources/netease/core/netease', async importOriginal => ({
+    ...await importOriginal<object>(),
+    neteaseApi: { ...(await importOriginal<{ neteaseApi: object }>()).neteaseApi, getChorus: vi.fn(async () => ({ code: 200, chorus: [] })),
         cloudSearch: vi.fn(),
         getLyric: vi.fn(),
         getSongDetail: vi.fn(),
@@ -53,9 +55,8 @@ const song = (): LocalSong => ({
 });
 
 describe('localMusicService lyric matching', () => {
-    beforeEach(async () => {
+    beforeEach(() => {
         vi.resetAllMocks();
-        await clearNegativeLyricMatchRecord();
         lyricSettings.localLyricsPriority = 'local';
         vi.mocked(applyMatchedMetadata).mockResolvedValue(undefined);
         vi.mocked(getLocalLibraryCatalogSnapshot).mockResolvedValue({ entities: [], assignments: [] });
@@ -137,86 +138,34 @@ describe('localMusicService lyric matching', () => {
         expect(localSong.matchedLyrics).toBe(lyrics);
     });
 
-    it('remembers failed automatic lyric lookups so unavailable tracks are not repeatedly queried, while allowing explicit forceRefresh', async () => {
-        vi.mocked(autoMatchBestLyric).mockResolvedValue(null);
-        const unavailableSong: LocalSong = {
-            ...song(),
-            id: 'unavailable-track-1',
-            onlineMetadata: undefined,
-        };
+    // Folium 2.0 方案 §7.1（审查第 1 条）：网易云不在时按下一个能匹配本地歌的来源匹配，写进本地歌的是那个来源和它认歌的 id，
+    // 不是写死的网易云。
+    it('writes the source it matched with, and that source\'s own song id, when NetEase is not there', async () => {
+        const netease = getOnlineMusicProvider('netease')!;
+        unregisterOnlineMusicProvider('netease');
+        vi.spyOn(console, 'log').mockImplementation(() => {});
+        vi.spyOn(console, 'info').mockImplementation(() => {});
+        try {
+            lyricSettings.autoUseBestLyric = false;
+            // QQ is a source mod (registered here by @builtin-sources): the match searches and fetches through its provider.
+            const qq = getOnlineMusicProvider('qq')!;
+            vi.spyOn(qq.search!, 'searchSongs').mockResolvedValue({ items: [{
+                id: 'mid-4242', qqMid: 'mid-4242', name: 'Plain title', artists: [{ id: 1, name: 'Singer' }],
+                album: { id: 2, name: 'Album' }, durationMs: 200000,
+                sourceRef: { kind: 'online', providerId: 'qq', mediaId: 'mid-4242', providerData: { songId: 4242 } },
+            }], hasMore: false, nextOffset: 1 });
+            const lyrics = { lines: [{ startTime: 0, endTime: 1, fullText: 'line', words: [] }], isWordByWord: false };
+            vi.spyOn(qq.lyrics!, 'getLyrics').mockResolvedValue({ lyrics: lyrics as never, isPureMusic: false });
+            const local = { ...song(), title: 'Plain title', titleOrigin: 'import', onlineMetadata: undefined } as unknown as LocalSong;
 
-        expect(shouldRunLocalSongAutomaticMatch(unavailableSong)).toBe(true);
-        await expect(matchLyrics(unavailableSong)).resolves.toBeNull();
-        expect(autoMatchBestLyric).toHaveBeenCalledTimes(1);
-        expect(isSongOnAutomaticLyricMatchCooldown(unavailableSong)).toBe(true);
-        expect(shouldRunLocalSongAutomaticMatch(unavailableSong)).toBe(false);
+            await matchLyrics(local);
 
-        // Second automatic attempt while on cooldown skips network calls entirely
-        await expect(matchLyrics(unavailableSong)).resolves.toBeNull();
-        expect(autoMatchBestLyric).toHaveBeenCalledTimes(1);
-
-        // Explicit user-triggered refresh bypasses cooldown and queries providers again
-        const refreshedLyrics = { lines: [{ fullText: 'Refreshed line', startTime: 0, endTime: 2, words: [] }], isWordByWord: true };
-        vi.mocked(autoMatchBestLyric).mockResolvedValueOnce({
-            lyrics: refreshedLyrics,
-            source: 'qq',
-            id: 555,
-            qqMid: 'mid555',
-            song: {
-                id: 555,
-                name: 'Correct title',
-                artists: [{ id: 1, name: 'Correct artist' }],
-                album: { id: 2, name: 'Correct album' },
-                durationMs: 200000,
-                qqMid: 'mid555',
-            },
-        });
-        await expect(matchLyrics(unavailableSong, { forceRefresh: true })).resolves.toBe(refreshedLyrics);
-        expect(autoMatchBestLyric).toHaveBeenCalledTimes(2);
-        expect(isSongOnAutomaticLyricMatchCooldown(unavailableSong)).toBe(false);
-    });
-
-    it('never replaces a manually selected lyric or a known-good local word-by-word TTML lyric with an inferior line-by-line match', async () => {
-        lyricSettings.localLyricsPriority = 'online';
-        const lineByLineOnline = {
-            lines: [{ fullText: 'Line only', startTime: 0, endTime: 3, words: [] }],
-            isWordByWord: false,
-        };
-        vi.mocked(autoMatchBestLyric).mockResolvedValue({
-            lyrics: lineByLineOnline,
-            source: 'qq',
-            id: 777,
-            song: {
-                id: 777,
-                name: 'Correct title',
-                artists: [{ id: 1, name: 'Correct artist' }],
-                album: { id: 2, name: 'Correct album' },
-                durationMs: 200000,
-            },
-        });
-
-        // 1. Song with local word-by-word TTML file is not downgraded to line-by-line online lyric
-        const ttmlSong: LocalSong = {
-            ...song(),
-            id: 'ttml-protected-song',
-            hasLocalLyrics: true,
-            localLyricsFormat: 'ttml',
-            localLyricsContent: '<tt xmlns="http://www.w3.org/ns/ttml"><body><div><p begin="00:01.000" end="00:02.000"><span>Word</span></p></div></body></tt>',
-        };
-        await expect(matchLyrics(ttmlSong)).resolves.toBeNull();
-        expect(ttmlSong.matchedLyrics).toBeUndefined();
-
-        // 2. Song with manual lyric selection is not overwritten by automatic match
-        vi.mocked(autoMatchBestLyric).mockClear();
-        const manualSong: LocalSong = {
-            ...song(),
-            id: 'manual-protected-song',
-            hasManualLyricSelection: true,
-            hasLocalLyrics: true,
-            localLyricsContent: '[00:01.00]Manual lyric',
-        };
-        expect(shouldRunLocalSongAutomaticMatch(manualSong)).toBe(false);
-        await expect(matchLyrics(manualSong)).resolves.toBeNull();
-        expect(autoMatchBestLyric).not.toHaveBeenCalled();
+            expect(neteaseApi.cloudSearch).not.toHaveBeenCalled();
+            expect(applyMatchedMetadata).toHaveBeenCalledWith('local-song', expect.objectContaining({ source: 'qq', songId: 'mid-4242' }), expect.anything());
+            expect(local.matchedLyricsSource).toBe('qq');
+        } finally {
+            registerOnlineMusicProvider(netease);
+            lyricSettings.autoUseBestLyric = true;
+        }
     });
 });

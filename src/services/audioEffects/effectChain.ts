@@ -1,129 +1,99 @@
 import {
-    createNeutralAudioEffects,
+    DEFAULT_AUDIO_EFFECT_SETTINGS,
     normalizeAudioEffects,
     type AudioEffectSettings,
 } from '../../utils/audioEffects';
-import {
-    connectAudioEffectNodes,
-    createAudioEffectNodes,
-    disconnectAudioEffectNodes,
-    SUBSONIC_BUTTERWORTH_Q,
-    SUBSONIC_CUTOFF_HZ,
-} from './effectNodes';
-import { dbToLinear, rampParam } from './effectParams';
 import { createBitCrushCurve, createSaturationCurve } from './effectSources';
 import { createNoiseBranch } from './noiseBranch';
 import { createReverbBranch } from './reverbBranch';
 import { createWowBranch } from './wowBranch';
+import { dbToLinear, rampParam } from './effectParams';
+import { connectAudioEffectNodes, createAudioEffectNodes, disconnectAudioEffectNodes } from './effectNodes';
 
 // src/services/audioEffects/effectChain.ts
-// Owns the post-EQ effect graph between the equalizer tail and the master gain node.
-
-export type AudioEffectChain = {
-    apply: (effects: Partial<AudioEffectSettings> | undefined, enabled: boolean) => void;
-    dispose: () => void;
-};
+// Owns the post-EQ effect chain: cutoff filters, saturation, bit crush, wow/flutter,
+// vinyl noise, stereo width, dynamics and reverb, without routing audio through React.
 
 type CreateAudioEffectChainParams = {
     context: AudioContext;
     input: AudioNode;
     output: AudioNode;
-    effects?: Partial<AudioEffectSettings>;
-    enabled?: boolean;
+    effects: AudioEffectSettings;
+    enabled: boolean;
 };
 
+export type AudioEffectChain = {
+    apply: (effects: AudioEffectSettings, enabled: boolean) => void;
+    dispose: () => void;
+};
+
+// Creates the effect chain between two existing nodes and returns a handle for later updates.
 export const createAudioEffectChain = ({
     context,
     input,
     output,
     effects,
-    enabled = true,
+    enabled,
 }: CreateAudioEffectChainParams): AudioEffectChain => {
-    const nyquist = context.sampleRate * 0.475;
     const nodes = createAudioEffectNodes(context);
-    const reverbBranch = createReverbBranch(context, nodes);
-    const noiseBranch = createNoiseBranch(context, nodes);
-    const wowBranch = createWowBranch(context, nodes);
-
     connectAudioEffectNodes(nodes, input, output);
 
+    const reverb = createReverbBranch(context, nodes);
+    const noise = createNoiseBranch(context, nodes);
+    const wow = createWowBranch(context, nodes);
     let lastDrive = -1;
     let lastCrush = -1;
 
-    const apply = (nextEffects: Partial<AudioEffectSettings> | undefined, isEnabled: boolean) => {
-        const normalized = normalizeAudioEffects(nextEffects);
-        const active = isEnabled ? normalized : createNeutralAudioEffects();
+    // Maps normalized settings onto every stage; a disabled chain falls back to the neutral set.
+    const apply = (nextEffects: AudioEffectSettings, nextEnabled: boolean) => {
+        const active = nextEnabled ? normalizeAudioEffects(nextEffects) : DEFAULT_AUDIO_EFFECT_SETTINGS;
 
-        // Always enforce at least a 22 Hz 2nd-order Butterworth sub-sonic high-pass filter
-        // when EQ/effects are active so DC offset and inaudible < 22 Hz rumble are removed
-        // before hitting the drive or limiter stages.
-        const effectiveHighpassHz = isEnabled
-            ? Math.max(SUBSONIC_CUTOFF_HZ, active.highpass)
-            : active.highpass;
-        if (nodes.highpass.Q) {
-            nodes.highpass.Q.value = SUBSONIC_BUTTERWORTH_Q;
-        }
-        rampParam(context, nodes.highpass.frequency, Math.min(nyquist, effectiveHighpassHz));
-        rampParam(context, nodes.lowpass.frequency, Math.min(nyquist, active.lowpass));
+        rampParam(context, nodes.highpass.frequency, active.highpass);
+        rampParam(context, nodes.lowpass.frequency, Math.min(active.lowpass, context.sampleRate * 0.475));
+        // Both cutoffs at their neutral ends take the bypass (see connectAudioEffectNodes); moving
+        // either one crossfades over to the filtered branch, so the switch itself makes no click.
+        const filtersNeutral = active.highpass <= DEFAULT_AUDIO_EFFECT_SETTINGS.highpass
+            && active.lowpass >= DEFAULT_AUDIO_EFFECT_SETTINGS.lowpass;
+        rampParam(context, nodes.filterBypass.gain, filtersNeutral ? 1 : 0);
+        rampParam(context, nodes.filterReturn.gain, filtersNeutral ? 0 : 1);
 
         if (active.drive !== lastDrive) {
-            nodes.drive.curve = createSaturationCurve(active.drive);
             lastDrive = active.drive;
+            nodes.drive.curve = createSaturationCurve(active.drive);
         }
-
         if (active.crush !== lastCrush) {
-            nodes.crush.curve = createBitCrushCurve(active.crush);
             lastCrush = active.crush;
+            nodes.crush.curve = createBitCrushCurve(active.crush);
         }
 
-        wowBranch.set(active.wow);
+        wow.set(active.wow);
+        noise.set(active.noise);
+        reverb.set(active.space);
 
-        // Mid/side width matrix: L' = (1+w)/2 * L + (1-w)/2 * R, R' = (1-w)/2 * L + (1+w)/2 * R.
-        // At width = 1 the cross terms vanish (identity); at 0 both channels get (L+R)/2 (mono).
-        const directGain = (1 + active.width) / 2;
-        const crossGain = (1 - active.width) / 2;
-        rampParam(context, nodes.leftDirect.gain, directGain);
-        rampParam(context, nodes.rightDirect.gain, directGain);
-        rampParam(context, nodes.leftCross.gain, crossGain);
-        rampParam(context, nodes.rightCross.gain, crossGain);
+        const direct = (1 + active.width) / 2;
+        const cross = (1 - active.width) / 2;
+        rampParam(context, nodes.leftDirect.gain, direct);
+        rampParam(context, nodes.rightDirect.gain, direct);
+        rampParam(context, nodes.leftCross.gain, cross);
+        rampParam(context, nodes.rightCross.gain, cross);
 
-        // Post-EQ Soft-Knee Limiter & Dynamic Punch stage:
-        // - When `punch === 0` (no extra dynamic compression requested), keep the DynamicsCompressorNode
-        //   engaged as a transparent brickwall safety limiter:
-        //     threshold: -0.8 dBFS, knee: 3 dB, ratio: 16:1, attack: 2 ms, release: 80 ms, makeup: 0 dB (1.0)
-        //   so any boosted sub-bass transient is cleanly caught right below 0 dBFS without clipping.
-        // - When `punch > 0` (e.g. Bass Boost preset `punch = 0.45`), blend smoothly into a musical
-        //   low-distortion punch compressor/limiter with conservative threshold (-0.8 dB down to -11 dB)
-        //   and zero positive makeup clipping (makeup stays at 1.0 so peaks never exceed the limiter ceiling).
-        if (active.punch > 0.001) {
-            rampParam(context, nodes.compressor.threshold, -0.8 - active.punch * 10.2);
-            rampParam(context, nodes.compressor.knee, 3 + active.punch * 6);
-            rampParam(context, nodes.compressor.ratio, 12 + active.punch * 8);
-            rampParam(context, nodes.compressor.attack, 0.002 + active.punch * 0.003);
-            rampParam(context, nodes.compressor.release, 0.08 + active.punch * 0.04);
-            // Keep makeup unity (1.0) so compressed bass transients never get pushed back above 0 dBFS.
-            rampParam(context, nodes.makeup.gain, dbToLinear(0));
-        } else {
-            rampParam(context, nodes.compressor.threshold, -0.8);
-            rampParam(context, nodes.compressor.knee, 3);
-            rampParam(context, nodes.compressor.ratio, 16);
-            rampParam(context, nodes.compressor.attack, 0.002);
-            rampParam(context, nodes.compressor.release, 0.08);
-            rampParam(context, nodes.makeup.gain, 1);
-        }
-
-        reverbBranch.set(active.space);
-        noiseBranch.set(active.noise);
+        rampParam(context, nodes.compressor.threshold, -6 - active.punch * 26);
+        rampParam(context, nodes.compressor.ratio, 1 + active.punch * 7);
+        rampParam(context, nodes.compressor.knee, 30 - active.punch * 18);
+        // Compression pulls peaks down, so the makeup stage gives that headroom back.
+        // Saturation needs no term here: its transfer curve is already loudness matched.
+        rampParam(context, nodes.makeup.gain, dbToLinear(active.punch * 3));
     };
 
     apply(effects, enabled);
 
-    const dispose = () => {
-        noiseBranch.dispose();
-        wowBranch.dispose();
-        reverbBranch.dispose();
-        disconnectAudioEffectNodes(nodes, input);
+    return {
+        apply,
+        dispose: () => {
+            wow.dispose();
+            noise.dispose();
+            reverb.dispose();
+            disconnectAudioEffectNodes(nodes, input);
+        },
     };
-
-    return { apply, dispose };
 };

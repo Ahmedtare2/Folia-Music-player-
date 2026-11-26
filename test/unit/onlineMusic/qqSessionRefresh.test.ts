@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { FoliumSourceDef } from '@/mods/folium/sources/contract';
 
 // test/unit/onlineMusic/qqSessionRefresh.test.ts
-// 网页版接 Serverless 后端时的续期：真的 provider 与 transport，只有 fetch 和 localStorage 是替身。
+// 网页版接 Serverless 后端时的续期：真的模组 core 与 transport（createQqCore 现载，网页版），只有 fetch 和 localStorage 是替身。
+// 会话在页面存储的 online_provider:qq:cookie。
 
 const storage = new Map<string, string>();
 const HOUR = 60 * 60 * 1000;
@@ -33,15 +35,19 @@ const serve = ({ sessionMode = 'sealed', refresh }: Backend) => {
 
 const refreshCalls = (fetchMock: ReturnType<typeof serve>) => fetchMock.mock.calls.filter(([url]) => String(url).includes('/login/refresh'));
 
+const SESSION_KEY = 'online_provider:qq:cookie';
+const writeSession = (value: string) => storage.set(SESSION_KEY, value);
+
 const load = async () => {
-    const { qqProvider } = await import('@/services/onlineMusic/qq/qqProvider');
-    const { readProviderSessionValue, writeProviderSessionValue } = await import('@/services/onlineMusic/providerStorage');
-    const { refreshQqSession } = await import('@/services/onlineMusic/qq/qqSessionRefresh');
-    writeProviderSessionValue('qq', 'cookie', 'qqmusic_session=old-token');
+    const { createQqCore } = await import('../helpers/qqSource');
+    const def = (await createQqCore()).def as FoliumSourceDef;
+    const { refreshQqSession } = await import('../../../sources/qq/core/qqSessionRefresh');
+    writeSession('qqmusic_session=old-token');
+    const auth = def.capabilities['auth@1']!;
     return {
-        signedIn: () => qqProvider.auth!.getLoginStatus(),
-        logout: () => qqProvider.auth!.logout(),
-        session: () => readProviderSessionValue('qq', 'cookie'),
+        signedIn: () => auth.getLoginStatus(),
+        logout: () => auth.logout!(),
+        session: () => storage.get(SESSION_KEY) ?? null,
         refreshQqSession,
     };
 };
@@ -89,31 +95,31 @@ describe('QQ session refresh on a serverless backend', () => {
         expect(qq.session()).toBe('qqmusic_session=old-token');
     });
 
-    it('never asks a backend that keeps its sessions itself (desktop, Docker)', async () => {
-        vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
-        const fetchMock = serve({ sessionMode: 'stored', refresh: () => Response.json({ code: 200, data: { rotated: false } }) });
+    it('asks a backend that keeps its sessions itself (desktop, Docker) once an hour too, keeping the token', async () => {
+        // stored 后端只在离到期不到 6 小时、又有请求进来时续：Folia 开着就每小时给它一个请求。
+        vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+        const fetchMock = serve({ sessionMode: 'stored', refresh: () => Response.json({ code: 200, data: { token: 'old-token', rotated: false } }) });
         const qq = await load();
 
         await qq.signedIn();
-        await vi.waitFor(() => expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/login/channels'))).toBe(true));
-        await new Promise(resolve => setTimeout(resolve, 0));
+        await vi.waitFor(() => expect(refreshCalls(fetchMock)).toHaveLength(1));
+        expect(vi.getTimerCount()).toBe(1);
 
-        expect(refreshCalls(fetchMock)).toHaveLength(0);
-        // 也不起每小时一次的定时器。
-        expect(vi.getTimerCount()).toBe(0);
+        await vi.advanceTimersByTimeAsync(HOUR);
+        await vi.waitFor(() => expect(refreshCalls(fetchMock)).toHaveLength(2));
+        expect(qq.session()).toBe('qqmusic_session=old-token');
     });
 
     it('does not put a token back over a session that changed while it was asked', async () => {
         let answer: (response: Response) => void = () => { };
         const fetchMock = serve({ refresh: () => new Promise<Response>(resolve => { answer = resolve; }) });
         const qq = await load();
-        const { writeProviderSessionValue } = await import('@/services/onlineMusic/providerStorage');
-        const { noteQqBackendDeclaration } = await import('@/services/onlineMusic/qq/qqBackendDeclaration');
+        const { noteQqBackendDeclaration } = await import('../../../sources/qq/core/qqBackendDeclaration');
         noteQqBackendDeclaration({ sessionMode: 'sealed' });
 
         const asked = qq.refreshQqSession();
         await vi.waitFor(() => expect(refreshCalls(fetchMock)).toHaveLength(1));
-        writeProviderSessionValue('qq', 'cookie', 'qqmusic_session=another-account');
+        writeSession('qqmusic_session=another-account');
         answer(Response.json({ code: 200, data: { token: 'new-token', rotated: true } }));
         await asked;
 
@@ -143,21 +149,19 @@ describe('QQ session refresh on a serverless backend', () => {
         expect(refreshCalls(fetchMock)).toHaveLength(2);
     });
 
-    it('starts the timer while the session mode is not known yet and asks once it turns out sealed', async () => {
+    it('asks and starts the timer while the session mode is not known yet', async () => {
         vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
         const fetchMock = serve({ refresh: () => Response.json({ code: 200, data: { token: 'old-token', rotated: false } }) });
         await load();
-        const { keepQqSessionFresh } = await import('@/services/onlineMusic/qq/qqSessionRefresh');
-        const { noteQqBackendDeclaration } = await import('@/services/onlineMusic/qq/qqBackendDeclaration');
+        const { keepQqSessionFresh } = await import('../../../sources/qq/core/qqSessionRefresh');
 
-        // 通道探测失败了，会话存法还不知道：定时器照样起，这一次不问。
+        // 通道探测失败了，会话存法还不知道：存法不影响要不要问，照样问、照样起定时器。
         keepQqSessionFresh();
         expect(vi.getTimerCount()).toBe(1);
-        expect(refreshCalls(fetchMock)).toHaveLength(0);
-
-        noteQqBackendDeclaration({ sessionMode: 'sealed' });
-        await vi.advanceTimersByTimeAsync(HOUR);
         await vi.waitFor(() => expect(refreshCalls(fetchMock)).toHaveLength(1));
+
+        await vi.advanceTimersByTimeAsync(HOUR);
+        await vi.waitFor(() => expect(refreshCalls(fetchMock)).toHaveLength(2));
     });
 
     it('stops asking an older backend without the route', async () => {

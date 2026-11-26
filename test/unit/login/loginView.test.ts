@@ -1,3 +1,4 @@
+// @builtin-sources
 import { describe, expect, it } from 'vitest';
 import { LOGIN_CASE_TEXTS, LOGIN_KIND_TEXTS, loginStepText } from '@/components/login/window/loginCaseTexts';
 import {
@@ -6,6 +7,7 @@ import {
 import { accountPictureSrc } from '@/components/login/PlatformMark';
 import { orderRows, pillNameUnfolds, pillProvider, pillSeenNext, rowStatus, type PillSeen } from '@/components/login/platformRows';
 import { resolvePlatformMark } from '@/components/login/resolvePlatformMark';
+import i18n from '@/i18n/config';
 import en from '@/i18n/locales/en';
 import id from '@/i18n/locales/in';
 import zh from '@/i18n/locales/zh-CN';
@@ -35,6 +37,7 @@ describe('the platform column', () => {
         expect(rowStatus(row('a', signedIn))).toBe('signed-in');
         expect(rowStatus(row('a', ranOut))).toBe('ran-out');
         expect(rowStatus(row('a'))).toBe('signed-out');
+        expect(rowStatus(row('a', { status: 'unknown', hydration: 'loading' }))).toBe('checking');
         expect(rowStatus(row('a', { requiresAccount: false }))).toBe('accountless');
         // Out of reach wins over everything: such a row cannot be chosen, whoever was signed in there.
         expect(rowStatus(row('a', { ...signedIn, ...off }))).toBe('off');
@@ -59,6 +62,13 @@ describe('the platform column', () => {
         expect(filterRows(rows, 'a').map(entry => entry.providerId)).toEqual(['alpha', 'beta', 'gamma']);
         expect(filterRows(rows, '  ')).toHaveLength(3);
         expect(filterRows(rows, 'none')).toEqual([]);
+    });
+
+    it('also finds a row by the name shown on screen, which may be a translated one', () => {
+        const rows = [row('alpha'), row('beta', { shortName: '波点', displayName: '波点音乐' })];
+        const shownName = (entry: ProviderAccountSummary) => (entry.providerId === 'beta' ? 'Bodian' : entry.shortName);
+        expect(filterRows(rows, 'bodian', shownName).map(entry => entry.providerId)).toEqual(['beta']);
+        expect(filterRows(rows, 'bodian')).toEqual([]);
     });
 });
 
@@ -141,6 +151,7 @@ describe('what a chosen row leads to', () => {
         expect(rowLeadsTo('signed-out')).toBe('sign-in');
         expect(rowLeadsTo('ran-out')).toBe('sign-in');
         expect(rowLeadsTo('off')).toBeNull();
+        expect(rowLeadsTo('checking')).toBe('sign-in');
     });
 });
 
@@ -311,7 +322,14 @@ describe('the texts the window can ask for', () => {
     const has = (texts: unknown, key: string): boolean => (
         typeof key.split('.').reduce<unknown>((at, part) => (at as Record<string, unknown> | undefined)?.[part], texts) === 'string'
     );
-    const missing = (keys: string[]) => keys.flatMap(key => [['zh-CN', zh], ['en', en], ['in', id]].filter(([, texts]) => !has(texts, key)).map(([name]) => `${key} in ${name}`));
+    // A source mod's texts (`folium-mod/<mod id>:<key>`) are in its own locale files, which the host loads into i18n.
+    const hasModText = (language: string, key: string): boolean => {
+        const [namespace, path] = key.split(':');
+        return typeof i18n.getResource(language, namespace, path) === 'string';
+    };
+    const missing = (keys: string[]) => keys.flatMap(key => [['zh-CN', zh], ['en', en], ['in', id]]
+        .filter(([name, texts]) => !(key.startsWith('folium-mod/') ? hasModText(name as string, key) : has(texts, key)))
+        .map(([name]) => `${key} in ${name}`));
 
     it('has a headline for each of the 19 cases, a name for each kind and each step, in the three languages', () => {
         expect(Object.keys(LOGIN_CASE_TEXTS).sort()).toEqual([...LOGIN_CASE_IDS].sort());
@@ -341,11 +359,29 @@ describe('the texts the window can ask for', () => {
     it('declares a second line of its own only where the sentence names that platform\'s own thing', () => {
         const notes = Object.fromEntries(listOnlineMusicProviders().map(provider => [provider.id, omni.getLoginTexts(provider.id)?.caseNotes ?? null]));
         expect(notes).toEqual({
-            netease: null, kugou: null, bodian: null,
+            netease: null, kugou: null, bodian: null, fnmusic: null, qishui: null, appleMusic: null, lxmusic: null,
             // 扫错 App 的那一句按后端有没有 QQ 音乐 App 扫码说（这里还没问到后端）。
-            qq: { 'local-service-unavailable': 'home.loginCaseQqRestart', 'wrong-scan-app': 'home.loginCaseQqWrongScanAppMobileOnly', 'device-limit': 'home.loginCaseQqDeviceLimit' },
-            ytm: { 'browser-unfinished': 'home.loginCaseYtmUnfinished', 'no-browser': 'home.loginNoBrowserYtm' },
-            spotify: { 'browser-unfinished': 'home.loginCaseSpotifyUnfinished', 'not-authorized': 'home.loginCaseSpotifyDenied', 'cannot-listen': 'home.loginCaseSpotifyPort' },
+            qq: { 'local-service-unavailable': 'folium-mod/qq:login.case.restart', 'wrong-scan-app': 'folium-mod/qq:login.case.wrongScanAppMobileOnly', 'device-limit': 'folium-mod/qq:login.case.deviceLimit' },
+            ytm: { 'browser-unfinished': 'folium-mod/ytm:login.unfinished', 'no-browser': 'folium-mod/ytm:login.noBrowser' },
+            spotify: { 'browser-unfinished': 'folium-mod/spotify:login.unfinished', 'not-authorized': 'folium-mod/spotify:login.denied', 'cannot-listen': 'folium-mod/spotify:login.port' },
         });
+    });
+});
+
+describe('loginView · the check after a sign-in and the setup checklist', () => {
+    it('shows the check as its own scene and the checklist over whatever the row leads to', () => {
+        expect(loginScene({ lead: 'sign-in', phase: 'checking', inBrowser: true, failed: false })).toBe('checking');
+        expect(loginScene({ lead: 'sign-in', phase: 'checking', inBrowser: true, failed: false, setup: true })).toBe('setup');
+        expect(loginScene({ lead: 'account', phase: null, inBrowser: false, failed: false, setup: true })).toBe('setup');
+        expect(loginScene({ lead: null, phase: null, inBrowser: false, failed: false, setup: true })).toBe('none');
+        expect(sceneHeadline('checking', true)).toBe('login.checkingAccount');
+    });
+
+    it('adds a check mark after the account when the platform checks, and walks onto it', () => {
+        expect(stepMarks('browser', true, true)).toEqual({ marks: ['browser', 'account', 'check'], current: 0 });
+        expect(stepMarks('reading', true, true)?.current).toBe(1);
+        expect(stepMarks('checking', true, true)?.current).toBe(2);
+        expect(stepMarks('reading', false, true)).toEqual({ marks: ['code', 'phone', 'account', 'check'], current: 2 });
+        expect(stepMarks('setup', true, true)).toBeNull();
     });
 });

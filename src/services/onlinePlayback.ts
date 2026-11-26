@@ -2,17 +2,18 @@ import { LyricData, OnlineLyricsState, ReplayGainInfo, SongResult } from '../typ
 import { saveToCache } from './db';
 import { PrefetchedSongData, isUrlValid, updatePrefetchedAudioUrl } from './prefetchService';
 import { isPureMusicLyricText } from '../utils/lyrics/pureMusic';
-import { migrateLyricDataRenderHints } from '../utils/lyrics/renderHints';
+import { readCachedPlaybackLyrics } from './onlineMusic/cachedPlaybackLyrics';
 import { loadOnlineLyricsState, markOnlineLyricsPureMusic, resolveOnlineLyrics, resolveOnlineLyricsPureMusic, saveOnlineLyricsState } from '../utils/onlineLyricsState';
 import { autoMatchBestLyric } from '../utils/lyrics/autoMatchBestLyric';
 import { getPlatformLyricSource } from '../utils/lyrics/lyricSources';
+import { settlesOnOwnWordTiming } from '../utils/lyrics/ownWordTiming';
 import { createSafeObjectUrl } from '../utils/blobGuards';
 import type { AudioQualityPreference, MediaId, ProviderAudioSource } from '../types/onlineMusic';
 import { omni } from './onlineMusic/omni';
 import { autoRetryDelaysMs, logOnlineFailure, onlineFailureOf, type OnlineFailure } from './onlineMusic/failure/onlineFailureCase';
 import { noteOnlineRequestCooldown, onlineRequestCooldown } from './onlineMusic/failure/onlineRequestCooldown';
 import { getSongResourceCacheKey } from './onlineMusic/resourceKeys';
-import { deleteCachedSongAudio, getCachedSongAudioBlob, getCachedSongReplayGain, getSongCacheWithLegacyMigration } from './onlineMusic/resourceCache';
+import { deleteCachedSongAudio, getCachedSongAudioBlob, getCachedSongReplayGain } from './onlineMusic/resourceCache';
 import { measureSongAudio, notTheSongWhy } from './wholeSongCheck';
 import { isCachedSongAudioDistrusted } from './playbackRecovery/mediaCacheGuard';
 import { toPlayableAudioUrl } from '../utils/appPlaybackHelpers';
@@ -22,6 +23,7 @@ import { useLyricSettingsStore } from '../stores/useLyricSettingsStore';
 import { useOnlineProviderAccountStore } from '../stores/useOnlineProviderAccountStore';
 import { saveLyricCacheSongMetadata } from './lyricExport/lyricCacheMetadata';
 import { errorFields } from '../utils/errorText';
+import { itemTraits } from './onlineMusic/itemTraits';
 
 // How long playback waits for a stored copy's header to give its play length (`wholeCopy`). Past
 // it the copy plays untested: the check must not hold up a song that starts from the cache.
@@ -58,6 +60,14 @@ export async function loadOnlineSongAudioSource(
     // means for this song's provider, or at an unknown one. A copy of another level is passed
     // over for a URL of the level asked for: the option decides what plays, cached or not.
     const providerId = getOnlineProviderIdForSong(song) ?? undefined;
+    // A song of a source switched to "used only for matching" or off (Folium 2.0 plan §5.3) does not play: its
+    // platform is not asked, and a copy kept of it is not played either. It stays where it is, marked, and
+    // plays again once its source is enabled.
+    if (providerId && !omni.isSourceSwitchedOn(providerId)) {
+        const failure = onlineFailureOf({ operation: 'audio', providerId }, { detail: { case: 'no-audio' } });
+        logOnlineFailure(failure);
+        return { kind: 'unavailable', failure };
+    }
     const level = providerId ? omni.resolveAudioQuality(providerId, audioQuality) : undefined;
     // A copy that failed to decode earlier in this session, or that the caller passes over, is not
     // read; a copy that cannot be read is logged and passed over: the platform is asked instead.
@@ -188,10 +198,21 @@ export async function loadOnlineSongLyrics(
         onPureMusicChange?: (isPureMusic: boolean) => void;
         onStateChange?: (state: OnlineLyricsState | null) => void;
         onAutoMatchStart?: () => void;
+        onAutoMatchError?: () => void;
         onDone: () => void;
     }
 ): Promise<void> {
-    const { isCurrent, onLyrics, onPureMusicChange, onStateChange, onAutoMatchStart, onDone } = callbacks;
+    const { isCurrent, onLyrics, onPureMusicChange, onStateChange, onAutoMatchStart, onAutoMatchError, onDone } = callbacks;
+    // An item of a kind with no lyrics (a video, say: plan §4.4) is never asked for any, nor matched.
+    const itemLyrics = itemTraits(song).lyrics;
+    if (itemLyrics === 'none') {
+        onStateChange?.(null);
+        onLyrics(null);
+        onDone();
+        return;
+    }
+    // `own`: only its source's own lyrics; another source's are never matched in for it.
+    const mayMatchOthers = itemLyrics === 'match';
     const lyricCacheKey = getSongResourceCacheKey('lyric', song);
     const onlineLyricsState = await loadOnlineLyricsState(song);
   const initialSettingsLyricSettings = useLyricSettingsStore.getState();
@@ -199,11 +220,26 @@ export async function loadOnlineSongLyrics(
     if (!isCurrent()) return;
     onStateChange?.(onlineLyricsState);
 
-    const cachedLyrics = await getSongCacheWithLegacyMigration<LyricData>('lyric', song, migrateLyricDataRenderHints);
+    // With the best-lyric search on, the cached entry is not what plays (only an imported or chosen lyric is, and the
+    // reader leaves the entry alone under those): the lyrics are fetched below and written over it, so an entry saved
+    // before chorus origins is not fetched a second time here, ahead of the audio.
+    const cachedLyrics = await readCachedPlaybackLyrics(song, { refresh: !initialSettingsLyricSettings.autoUseBestLyric });
     if (!isCurrent()) return;
     const preferredCachedLyrics = resolveOnlineLyrics(onlineLyricsState, cachedLyrics);
     const hasAuthoritativeLyricsSelection = onlineLyricsState?.lyricsSource === 'imported'
         || Boolean(onlineLyricsState?.hasOnlineOverride);
+    // A platform whose own word timing is kept as it is (`prefersOwnWordByWord`) is not searched
+    // for another source when it is also the preferred one: the automatic pick would replace the
+    // timing the song actually has. Any other preferred source is still asked (issue #1127).
+    const keepsOwnWordByWord = (candidate: LyricData | null | undefined) => {
+        const lyricSettings = useLyricSettingsStore.getState();
+        return settlesOnOwnWordTiming({
+            ownSource: getPlatformLyricSource(song.sourceRef?.kind === 'online' ? song.sourceRef.providerId : null)?.id,
+            prefersOwn: omni.prefersOwnWordByWordLyrics(song),
+            lyrics: candidate,
+            keepOwn: lyricSettings.keepProviderWordTiming,
+        }, lyricSettings.preferredAlternativeLyricSource);
+    };
     if (preferredCachedLyrics && (hasAuthoritativeLyricsSelection || !initialSettingsLyricSettings.autoUseBestLyric)) {
         const cachedText = preferredCachedLyrics.lines.map(line => line.fullText).join('\n');
         onPureMusicChange?.(resolveOnlineLyricsPureMusic(onlineLyricsState, cachedText));
@@ -225,7 +261,8 @@ export async function loadOnlineSongLyrics(
         const effectiveLyrics = preferredPrefetchedLyrics ?? prefetched.lyrics;
 
   const settingsLyricSettings = useLyricSettingsStore.getState();
-        const shouldAutoMatch = settingsLyricSettings.autoUseBestLyric && !onlineLyricsState?.hasOnlineOverride;
+        const shouldAutoMatch = mayMatchOthers && settingsLyricSettings.autoUseBestLyric && !onlineLyricsState?.hasOnlineOverride
+            && !keepsOwnWordByWord(effectiveLyrics);
 
         if (!shouldAutoMatch) {
             const effectiveText = effectiveLyrics?.lines.map(line => line.fullText).join('\n') ?? '';
@@ -270,7 +307,8 @@ export async function loadOnlineSongLyrics(
     let finalState = onlineLyricsState;
 
   const settingsLyricSettings = useLyricSettingsStore.getState();
-    const shouldAutoMatch = settingsLyricSettings.autoUseBestLyric && !onlineLyricsState?.hasOnlineOverride;
+    const shouldAutoMatch = mayMatchOthers && settingsLyricSettings.autoUseBestLyric && !onlineLyricsState?.hasOnlineOverride
+        && !keepsOwnWordByWord(parsedLyrics);
 
     if (shouldAutoMatch) {
         // The lyrics in hand are already displayable, so hand them over and report done BEFORE the
@@ -292,7 +330,9 @@ export async function loadOnlineSongLyrics(
             const bestMatch = await autoMatchBestLyric(song.name, artistName, metadata.durationMs, {
                 album: metadata.album?.name,
                 preferredSource: settingsLyricSettings.preferredAlternativeLyricSource,
+                keepOwnWordTiming: settingsLyricSettings.keepProviderWordTiming,
                 alternateArtist: () => omni.getAlternateArtistName(song),
+                searchAlias: () => omni.getLyricSearchAlias(song),
                 providerCandidate: ownLyricSource
                     ? {
                         providerId: ownLyricSource.id,
@@ -334,6 +374,7 @@ export async function loadOnlineSongLyrics(
             }
         } catch (error) {
             console.warn('[OnlinePlayback] Failed to auto-match best lyric:', error);
+            if (isCurrent()) onAutoMatchError?.();
         }
     }
 

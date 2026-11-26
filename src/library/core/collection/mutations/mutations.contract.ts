@@ -1,5 +1,5 @@
 import type { SongResult } from '../../../../types';
-import type { MediaId } from '../../../../types/onlineMusic';
+import type { DailyStyleGroup, DailyStyleSelection, MediaId } from '../../../../types/onlineMusic';
 import type { LibraryCapability } from '../../shared/capability.contract';
 import type { LibraryCollectionDescriptor } from '../collection.contract';
 import type { LibraryMutationPort, LibraryPlaylistOption } from '../../shared/ports.contract';
@@ -37,6 +37,8 @@ export type CollectionMutationBranches = {
     isLocalFolderCollection: boolean;
     isLocalAllSongsCollection: boolean;
     isLocalPlaylistCollection: boolean;
+    /** Folia 的「我喜欢的音乐」（isVirtual 的歌单）：能移除、能重排，不能改名、不能删。 */
+    isFoliaFavoritesCollection: boolean;
     isLocalEntityCollection: boolean;
     isNavidromePlaylistCollection: boolean;
     isCloudDrive: boolean;
@@ -61,10 +63,17 @@ export type CollectionMutationCapabilities = {
     deleteCollection: LibraryCapability;
     resyncFolder: LibraryCapability;
     resyncAllFolders: LibraryCapability;
+    reorderPlaylist: LibraryCapability;
     exportPlaylist: LibraryCapability;
+    /** 把这张平台歌单 / 专辑（在线音源或 Navidrome 的）存成 Folia 歌单：打开宿主的对话框。 */
+    saveToFolia: LibraryCapability;
+    /** 转存来的 Folia 歌单从原歌单更新：打开宿主的对话框。 */
+    refreshFromOrigin: LibraryCapability;
     addToPlaylist: LibraryCapability;
     createPlaylist: LibraryCapability;
     editEntity: LibraryCapability;
+    /** 本地文件夹 / 专辑 / 歌单的自定义封面（打开宿主的封面对话框）。 */
+    setCover: LibraryCapability;
     organizeSongInfo: LibraryCapability;
     /** 本地歌曲匹配在线信息；还要看条目本身是不是本地歌。 */
     matchSong: LibraryCapability;
@@ -89,6 +98,18 @@ export type CollectionMutationSnapshot = {
      * 当天的列表和刷新。不是每日推荐时为 false。
      */
     readonly dailyHistoryAvailable: boolean;
+    /**
+     * 每日推荐能不能看风格推荐（#938）：平台有这个功能（能力 dailyStyleRecommendations）才有。不是每日推荐时为 false。
+     */
+    readonly dailyStyleAvailable: boolean;
+    /** 正在看风格推荐（这时 dailyDate 是 ''）。 */
+    readonly dailyStyleShown: boolean;
+    /** 可选的风格分组；第一次看风格推荐时才去取，取到之前是空的。 */
+    readonly dailyStyleGroups: readonly DailyStyleGroup[];
+    /** 上一次取风格分组没取到（失败或一组都没有）；再调 loadDailyStyleGroups 重取。 */
+    readonly dailyStyleGroupsFailed: boolean;
+    /** 正在看的风格推荐是哪些风格（答复带回来的，答复没说时是刚保存的）；还不知道时为 null。 */
+    readonly dailyStyleSelection: DailyStyleSelection | null;
     /**
      * 改名成功、但宿主的集合描述还带着旧名字时的新名字（renderer 显示它）；宿主的描述跟上或变了就回到 null。
      */
@@ -126,14 +147,27 @@ export interface CollectionMutationController {
     deleteCollection(): Promise<LibraryMutationResult>;
     resyncFolder(): Promise<LibraryMutationResult>;
     resyncAllFolders(): Promise<LibraryMutationResult>;
+    reorderPlaylist(): Promise<LibraryMutationResult>;
     exportPlaylist(): Promise<LibraryMutationResult>;
+    /** 打开宿主的「存成 Folia 歌单」对话框；结果（存了几首、换了几首）由对话框自己报。 */
+    saveToFolia(): Promise<LibraryMutationResult>;
+    /** 打开宿主的「从原歌单更新」对话框。 */
+    refreshFromOrigin(): Promise<LibraryMutationResult>;
     /** tracks 由 renderer 给（网格给的是可播放曲目）。 */
     addToPlaylist(playlistId: string | number, tracks: SongResult[]): Promise<LibraryMutationResult>;
     createPlaylist(name: string, tracks: SongResult[]): Promise<LibraryMutationResult>;
     editEntity(): Promise<LibraryMutationResult>;
+    /** 打开宿主的集合封面对话框（poster.png、上传、选一首歌的封面、恢复默认）。 */
+    setCover(): Promise<LibraryMutationResult>;
     organizeSongInfo(): Promise<LibraryMutationResult>;
     matchSong(track: SongResult): Promise<LibraryMutationResult>;
-    /** date 为 '' 表示今天；afresh 让上游重新生成今天的推荐。 */
+    /** date 为 '' 表示今天；afresh 让上游重新生成今天的推荐。看风格推荐时换日期就回到默认推荐。 */
     setDailyDate(date: string, options?: { afresh?: boolean }): Promise<LibraryMutationResult>;
+    /** 换成风格推荐（按账号已选的风格）；风格分组第一次用到时一起去取。 */
+    showDailyStyle(): Promise<LibraryMutationResult>;
+    /** 把选的风格存到账号上，再换成这些风格的推荐。selection 至少要有一个风格。 */
+    setDailyStyle(selection: DailyStyleSelection): Promise<LibraryMutationResult>;
+    /** 取风格分组（打开风格选择时调）：已经取到或正在取时什么都不做，上次没取到就再取一次。 */
+    loadDailyStyleGroups(): void;
     dispose(): void;
 }

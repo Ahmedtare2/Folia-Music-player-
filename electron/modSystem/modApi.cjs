@@ -25,6 +25,34 @@ const PLAYBACK_PERMISSION = permissionGuarding('api.runtime.getPlaybackSnapshot'
 const EXPORT_PERMISSION = permissionGuarding('api.render.exportVideo');
 
 const RPC_NAME_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+// Cap on one `api.rpc.send` payload, in bytes of its JSON text. A message is pushed to the
+// window as it is sent; anything bulkier belongs in a file or behind an rpc.call.
+const RPC_SEND_MAX_BYTES = 64 * 1024;
+
+/*
+ * `api.rpc.send`'s payload as the JSON text that crosses to the window, checked
+ * here so a bad one throws at the mod's call instead of vanishing on the way.
+ * Leaving the payload out sends null, as an rpc.call answer of undefined does.
+ */
+const serializeRpcPayload = (payload) => {
+    if (payload === undefined) {
+        return 'null';
+    }
+    let json;
+    try {
+        json = JSON.stringify(payload);
+    } catch (error) {
+        throw new Error('rpc.send requires a JSON-serializable payload', { cause: error });
+    }
+    // A function or a symbol on its own stringifies to undefined: nothing to send.
+    if (typeof json !== 'string') {
+        throw new Error('rpc.send requires a JSON-serializable payload');
+    }
+    if (Buffer.byteLength(json, 'utf8') > RPC_SEND_MAX_BYTES) {
+        throw new Error(`rpc-payload-too-large:${RPC_SEND_MAX_BYTES}`);
+    }
+    return json;
+};
 
 const cloneJson = (value) => (value === undefined ? undefined : JSON.parse(JSON.stringify(value)));
 
@@ -129,19 +157,23 @@ const createModDataStore = (dataDir, { maxBytes = DATA_MAX_BYTES } = {}) => {
  *   emitLog(level, message, details),
  *   getPlaybackSnapshot(),      // Folium DTO, or null before the renderer pushed one
  *   registerDisposer(fn),       // run when the mod is disabled, reloaded, or the app quits
+ *   secrets: { get, has, set, subscribe },  // api.secrets, bound to this mod (modSecrets.cjs)
  *   registerRpc(name, fn),      // callable from this mod's client entry
+ *   sendToClient(name, json),   // pushes checked JSON text to this mod's client in the main window
  *   requestExport(spec),        // runs the export; its permission is checked here, not there
  * }
  */
 const createModApi = (context) => {
     const declaredPermissions = Array.isArray(context.manifest?.permissions) ? context.manifest.permissions : [];
+    // Folium 2.0 (plan §5.2): a source mod's storage needs no `filesystem.data`. Every other gate stays.
+    const exempt = new Set(context.sourceApi ? [STORAGE_PERMISSION] : []);
 
     /*
      * The one permission gate of the main entry, fail-closed. Throws the same
      * `permission-denied:<id>` shape everywhere, so a mod sees one consistent error.
      */
     const requirePermission = (permission) => {
-        if (!declaredPermissions.includes(permission)) {
+        if (!exempt.has(permission) && !declaredPermissions.includes(permission)) {
             throw permissionDenied(permission);
         }
     };
@@ -185,11 +217,32 @@ const createModApi = (context) => {
         cache: { get: () => modDirectory(context.cacheDir), enumerable: false },
     });
 
+    /*
+     * The user's folders are asked for when read: Electron throws for a folder
+     * the system does not have, and that must not keep the mod from starting.
+     * A source mod also has `legacy(name)`: the userData folder its row or claims name (sourceApi.cjs).
+     */
+    const userFolders = {
+        get documents() { return context.getUserFolder('documents'); },
+        get downloads() { return context.getUserFolder('downloads'); },
+        get music() { return context.getUserFolder('music'); },
+        get videos() { return context.getUserFolder('videos'); },
+    };
+    if (context.sourceApi) {
+        userFolders.legacy = context.sourceApi.legacyPath;
+    }
+
+    // A source mod reads the host's language as it is at the call (`api.host.locale`).
+    const hostInfo = cloneJson(context.hostInfo);
+    if (context.sourceApi) {
+        Object.defineProperty(hostInfo, 'locale', { get: () => context.getLocale(), enumerable: true });
+    }
+
     // Folium 1.6 only: the members Folium 2 removed, added back (deprecated.cjs).
-    return addOldMainNames({
+    const api = addOldMainNames({
         // Frozen manifest so mods cannot rewrite their own contract at runtime.
         manifest: Object.freeze(cloneJson(context.manifest)),
-        host: Object.freeze(cloneJson(context.hostInfo)),
+        host: Object.freeze(hostInfo),
         log,
         storage: {
             get: guardedAsync(STORAGE_PERMISSION, context.dataStore.get),
@@ -201,15 +254,17 @@ const createModApi = (context) => {
             paths: Object.freeze(storagePaths),
         },
         /*
-         * The user's folders are asked for when read: Electron throws for a folder
-         * the system does not have, and that must not keep the mod from starting.
+         * Folium 1.7: the values of the mod's `secret` settings fields, shared with its client's
+         * folium.secrets. No permission: a mod reaches only its own. Read from the context at the
+         * call, so the store is only met when a mod uses it.
          */
-        paths: Object.freeze({
-            get documents() { return context.getUserFolder('documents'); },
-            get downloads() { return context.getUserFolder('downloads'); },
-            get music() { return context.getUserFolder('music'); },
-            get videos() { return context.getUserFolder('videos'); },
+        secrets: Object.freeze({
+            get: (key) => context.secrets.get(key),
+            has: (key) => context.secrets.has(key),
+            set: (key, value) => context.secrets.set(key, value),
+            subscribe: (listener) => context.secrets.subscribe(listener),
         }),
+        paths: Object.freeze(userFolders),
         /*
          * Cleanup hook. Anything a mod starts in activate() — timers, watchers,
          * listeners, child processes — should be released here; the loader runs
@@ -238,6 +293,17 @@ const createModApi = (context) => {
                 }
                 context.registerRpc(name, handler);
             },
+            /*
+             * Folium 1.7: the other direction. Fire-and-forget to this mod's client in the
+             * main window (`folium.rpc.on(name, ...)`); a bad name or payload throws here,
+             * a missing window or client drops the message.
+             */
+            send: (name, payload) => {
+                if (typeof name !== 'string' || !RPC_NAME_PATTERN.test(name)) {
+                    throw new Error('rpc.send requires a name matching /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/');
+                }
+                context.sendToClient(name, serializeRpcPayload(payload));
+            },
         },
         /*
          * Starts a video export of the *current* song with the host's live mode,
@@ -248,6 +314,8 @@ const createModApi = (context) => {
             exportVideo: guardedAsync(EXPORT_PERMISSION, (spec) => context.requestExport(spec)),
         },
     }, context.manifest);
+    // Folium 2.0 (plan §5.5): the members only source mods have. An ordinary mod's api has none of them.
+    return context.sourceApi ? Object.assign(api, context.sourceApi.members) : api;
 };
 
 module.exports = {
@@ -256,4 +324,5 @@ module.exports = {
     DATA_FILE_NAME,
     DATA_MAX_BYTES,
     PLAYBACK_PERMISSION,
+    RPC_SEND_MAX_BYTES,
 };

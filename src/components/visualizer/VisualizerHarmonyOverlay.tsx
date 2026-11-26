@@ -5,7 +5,7 @@ import { resolveThemeFontStack, resolveThemeFontWeight, resolveThemeTranslationF
 import { detectTextDirection } from '../../utils/lyrics/arabicText';
 import { buildLineGraphemeTimeline } from '../../utils/lyrics/graphemeTiming';
 import { measureMonetGraphemeOffsets, resolveClampFontPx } from './monet/monetLyricsModel';
-import { colorWithAlpha } from './colorMix';
+import { colorWithAlpha } from '../../utils/colorMix';
 import { resolveWordColor } from './wordColoring';
 import {
     getLyricsBackgroundVocals,

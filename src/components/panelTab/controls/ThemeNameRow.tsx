@@ -57,7 +57,7 @@ const ThemeNameRow: React.FC<ThemeNameRowProps> = ({
             </span>
             <span className="ml-auto flex max-w-full items-center gap-1.5">
                 <Segments
-                    size="s"
+                    size="m"
                     value={isDaylight ? 'light' : 'dark'}
                     onChange={() => onToggleDaylight()}
                     options={[
@@ -82,7 +82,7 @@ const ThemeNameRow: React.FC<ThemeNameRowProps> = ({
                             size="s"
                             filled
                             label={themeSyncState === 'syncing'
-                                ? t('options.syncing')
+                                ? t('ui.syncing')
                                 : themeSyncState === 'complete'
                                     ? t('ui.synced')
                                     : t('commandPalette.commands.sync-now.title')}

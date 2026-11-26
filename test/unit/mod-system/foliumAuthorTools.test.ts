@@ -110,11 +110,11 @@ describe('folium:new', () => {
 
 describe('folium:check', () => {
     it('reports a manifest the app would refuse, in the app\'s own words', () => {
-        const directory = writeMod('bad-manifest', { folium: 2, permissions: ['everything'] }, 'export default function activate() {}\n');
+        const directory = writeMod('bad-manifest', { folium: 3, permissions: ['everything'] }, 'export default function activate() {}\n');
         const { ok, problems } = checkFoliumMod(directory);
         expect(ok).toBe(false);
         expect(problems).toEqual([
-            'mod.json: unsupported folium version 2; this host implements folium 1',
+            'mod.json: unsupported folium version 3; this host reads folium 1 and 2',
             'mod.json: unknown or unsupported permission everything',
         ]);
     });
@@ -250,6 +250,31 @@ describe('folium:check', () => {
             'folium.experimental[\'omni.providers\'] needs "omni.providers" under "experimental" in mod.json',
             'folium.experimental[\'omni.hooks\'] needs "omni.hooks" under "experimental" in mod.json',
         ]);
+    });
+
+    it('holds the platforms platform.raw requests to the read permissions in mod.json', () => {
+        const client = `
+            export default async function activate(folium) {
+                const platform = folium.experimental['platform.raw'];
+                platform.describe('netease');
+                await platform.request('netease', 'user_record', { type: 1 });
+                await folium.experimental['platform.raw']?.request("nowhere", 'x');
+            }
+        `;
+        const without = writeMod('raw-without', { experimental: ['platform.raw'] }, client);
+        expect(checkFoliumMod(without).problems).toEqual([
+            'folium.experimental[\'platform.raw\'].request(\'netease\', …) needs the permission "platform.netease.read" in mod.json',
+            'folium.experimental[\'platform.raw\'] cannot call "nowhere": no platform of that id has raw endpoints',
+        ]);
+        const declared = writeMod('raw-declared', { experimental: ['platform.raw'], permissions: ['platform.netease.read'] }, client.replace(/.*nowhere.*\n/, ''));
+        expect(checkFoliumMod(declared).problems).toEqual([]);
+        // The platform id is not written out: nothing to hold to a permission, so a note says what is missing.
+        const indirect = writeMod('raw-indirect', { experimental: ['platform.raw'] }, `
+            export default function activate(folium, id) { return folium.experimental['platform.raw'].request(id, 'user_record'); }
+        `);
+        const { problems, notes } = checkFoliumMod(indirect);
+        expect(problems).toEqual([]);
+        expect(notes.some((note) => note.includes('declares no platform.<platform>.read permission'))).toBe(true);
     });
 
     it('reports a Folia version the app would refuse, and names the mods it depends on without checking them', () => {

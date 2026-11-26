@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+// @builtin-sources
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const cachedAudioMock = vi.hoisted(() => vi.fn());
 const songCacheMock = vi.hoisted(() => vi.fn());
@@ -6,10 +7,16 @@ const sourceMock = vi.hoisted(() => vi.fn());
 const lyricsMock = vi.hoisted(() => vi.fn());
 const otherArtistNameMock = vi.hoisted(() => vi.fn());
 const autoMatchMock = vi.hoisted(() => vi.fn());
+const prefersOwnWordByWordMock = vi.hoisted(() => vi.fn(() => false));
 const loadLyricsStateMock = vi.hoisted(() => vi.fn());
 const saveLyricsStateMock = vi.hoisted(() => vi.fn());
 const isUrlValidMock = vi.hoisted(() => vi.fn(() => true));
 const updatePrefetchedAudioUrlMock = vi.hoisted(() => vi.fn());
+const lyricSettings = vi.hoisted(() => ({
+    autoUseBestLyric: true,
+    preferredAlternativeLyricSource: 'qq',
+    keepProviderWordTiming: true,
+}));
 
 vi.mock('@/services/onlineMusic/resourceCache', () => ({
     getCachedSongAudioBlob: cachedAudioMock,
@@ -24,12 +31,21 @@ vi.mock('@/services/onlineMusic/omni', () => ({
         getAlternateArtistName: otherArtistNameMock,
         resolveAudioQuality: (_providerId: string, preference: string) => preference,
         isPreviewAudioSource: () => false,
+        // Every source here is enabled (Folium 2.0 §5.3: a source used only for matching does not play).
+        isSourceSwitchedOn: () => true,
+        prefersOwnWordByWordLyrics: prefersOwnWordByWordMock,
     },
 }));
 
+afterEach(() => {
+    prefersOwnWordByWordMock.mockReturnValue(false);
+    lyricSettings.preferredAlternativeLyricSource = 'qq';
+    lyricSettings.keepProviderWordTiming = true;
+});
+
 vi.mock('@/stores/useLyricSettingsStore', () => ({
     useLyricSettingsStore: {
-        getState: () => ({ autoUseBestLyric: true, preferredAlternativeLyricSource: 'qq' }),
+        getState: () => lyricSettings,
     },
 }));
 
@@ -377,6 +393,37 @@ describe('online QQ lyric candidate plumbing', () => {
         loadLyricsStateMock.mockResolvedValue(null);
     });
 
+    // With the best-lyric search on, the lyrics are fetched for the search anyway: an entry saved before chorus origins
+    // (#1333) is not fetched a second time ahead of the audio.
+    it('asks the source for the lyrics once when the cached entry predates chorus origins', async () => {
+        const stale = {
+            lines: [{ startTime: 0, endTime: 1, fullText: 'line', words: [], isChorus: true, chorusEffect: 'bars' as const }],
+            isWordByWord: false,
+        };
+        songCacheMock.mockResolvedValue(stale);
+        lyricsMock.mockResolvedValue({ lyrics: null, isPureMusic: false });
+        autoMatchMock.mockResolvedValue(null);
+
+        await loadOnlineSongLyrics(song, null, null, { isCurrent: () => true, onLyrics: vi.fn(), onDone: vi.fn() });
+
+        expect(lyricsMock).toHaveBeenCalledOnce();
+    });
+
+    it.each(['match', 'save'])('reports an automatic lyric %s failure separately from finishing audio preparation', async failure => {
+        const lyrics = { lines: [{ startTime: 0, endTime: 1, fullText: 'line', words: [] }], isWordByWord: false };
+        lyricsMock.mockResolvedValue({ lyrics, isPureMusic: false });
+        if (failure === 'match') autoMatchMock.mockRejectedValueOnce(new Error('match failed'));
+        else {
+            autoMatchMock.mockResolvedValueOnce({ lyrics, source: 'qq', id: 'other' });
+            saveLyricsStateMock.mockRejectedValueOnce(new Error('save failed'));
+        }
+        const onAutoMatchError = vi.fn();
+        const onDone = vi.fn();
+        await loadOnlineSongLyrics(song, null, null, { isCurrent: () => true, onLyrics: vi.fn(), onAutoMatchError, onDone });
+        expect(onAutoMatchError).toHaveBeenCalledOnce();
+        expect(onDone).toHaveBeenCalled();
+    });
+
     it('passes the already-loaded QQ song and lyrics to auto-match as its provider candidate', async () => {
         const qqSong: SongResult = {
             ...song,
@@ -557,5 +604,56 @@ describe('instrumental tracks, once auto-match has settled them', () => {
         expect(merged.lyricsSource).toBe('imported');
         expect(merged.importedLyrics).toBe(imported);
         expect(merged.matchedIsPureMusic).toBe(true);
+    });
+});
+
+describe('lyrics a provider keeps as its own timing', () => {
+    const wordLevel = {
+        lines: [{ startTime: 0, endTime: 1, fullText: 'line', words: [{ text: 'line', startTime: 0, endTime: 1 }] }],
+        isWordByWord: true,
+    };
+
+    const load = async () => {
+        prefersOwnWordByWordMock.mockReturnValue(true);
+        lyricsMock.mockResolvedValue({ lyrics: wordLevel, isPureMusic: false });
+        songCacheMock.mockResolvedValue(null);
+        loadLyricsStateMock.mockResolvedValue(null);
+        autoMatchMock.mockResolvedValue(null);
+
+        const onLyrics = vi.fn();
+        await loadOnlineSongLyrics(song, null, null, {
+            isCurrent: () => true,
+            onLyrics,
+            onDone: vi.fn(),
+        });
+        return onLyrics;
+    };
+
+    it('keeps the provider\'s word-level lyrics without a search when it is the preferred source', async () => {
+        lyricSettings.preferredAlternativeLyricSource = 'kugou';
+
+        const onLyrics = await load();
+
+        expect(onLyrics).toHaveBeenCalledWith(wordLevel);
+        expect(autoMatchMock).not.toHaveBeenCalled();
+    });
+
+    it('still asks another preferred source, passing the setting on (issue #1127)', async () => {
+        const onLyrics = await load();
+
+        expect(onLyrics).toHaveBeenCalledWith(wordLevel);
+        expect(autoMatchMock).toHaveBeenCalledWith('Song', '', 1000, expect.objectContaining({
+            preferredSource: 'qq',
+            keepOwnWordTiming: true,
+        }));
+    });
+
+    it('searches as for any song when keeping the provider\'s timing is off', async () => {
+        lyricSettings.preferredAlternativeLyricSource = 'kugou';
+        lyricSettings.keepProviderWordTiming = false;
+
+        await load();
+
+        expect(autoMatchMock).toHaveBeenCalledWith('Song', '', 1000, expect.objectContaining({ keepOwnWordTiming: false }));
     });
 });

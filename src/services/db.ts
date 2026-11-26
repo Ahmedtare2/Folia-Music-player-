@@ -35,6 +35,7 @@ import { clearSessionValues, putSessionValue, readSession } from './repositories
 import { readThemeRegistryEntries, writeThemeRegistryEntries } from './repositories/themeRegistryRepository';
 import { clearCoverAssets, getCoverAssetUsage } from './binaryAssetStore';
 import { clearLocalCoverBinaries } from './localCoverBinaryStore';
+import { resetFoliaPlaylistStorage } from './foliaPlaylist/foliaPlaylistStorage';
 import {
   cancelLocalCoverAssetMigration,
   resetLocalCoverAssetRuntime,
@@ -175,6 +176,7 @@ export const getCacheUsageByCategory = async (): Promise<{
   cover: number;
   media: number;
   analysis: number;
+  volumeBalance: number;
   mediaCount: number;
 }> => {
   try {
@@ -189,7 +191,7 @@ export const getCacheUsageByCategory = async (): Promise<{
     usage.cover += await getCoverAssetUsage();
     return usage;
   } catch {
-    return { playlist: 0, lyrics: 0, cover: 0, media: 0, analysis: 0, mediaCount: 0 };
+    return { playlist: 0, lyrics: 0, cover: 0, media: 0, analysis: 0, volumeBalance: 0, mediaCount: 0 };
   }
 };
 
@@ -228,7 +230,7 @@ export const getLocalSongs = async (): Promise<LocalSong[]> => {
 
 /**
  * 按 id 读一首本地歌曲的最新记录。
- * 不走 ensureLocalLibraryInitialized：那一步会把 local_music 和 assignments 整表读一遍，
+ * 不走 ensureLocalLibraryInitialized：那一步要把 local_music 和 assignments 的主键整表读一遍，
  * 而这里只服务切歌、匹配写回这类「只关心一首」的热路径。读失败或记录不存在时返回 undefined。
  */
 export const getLocalSong = async (id: string): Promise<LocalSong | undefined> => {
@@ -272,15 +274,94 @@ export const clearAllData = async (): Promise<void> => {
     resetLocalAlbumVideoCatalogForTests();
     await appDatabase.delete();
     await appDatabase.open();
+    // Folia 歌单在它自己的库里（FoliaPlaylistsDB），一起清掉。
+    await resetFoliaPlaylistStorage();
+    // 歌曲评论（FoliaSongNotesDB）不清：用户定的长期保留（2026-11-24），确认框的文案写明了。
   } catch (error) {
     console.error('Failed to clear all data', error);
   }
 };
 
-export const saveDirHandles = async (handles: Record<string, FileSystemDirectoryHandle>): Promise<void> => {
-  const serialized = serializeDirHandlesForStorage(handles);
-  await saveToCache('local_dir_handles', serialized);
-  void writeAndroidDiskCacheJson('index', 'local_dir_handles', JSON.stringify(serialized));
+/**
+ * Writes every imported root's directory handle as one row, and returns the roots that row now holds.
+ *
+ * One handle IndexedDB can no longer serialize fails the whole row ("DataError Failed to write blobs"),
+ * and every later import rewrote that same bad handle with the new one, so no new root was ever kept
+ * and its songs could not be found again after a restart. When the row fails, each handle is tried
+ * alone in a probe row (twice, so one passing failure is not taken for a broken handle), and the
+ * real row is written once with the ones that stored: a broken old root costs only itself, and
+ * readers never see the row part-way through.
+ *
+ * When no handle stores at all the trouble is the database rather than a handle: the row on disk is
+ * left as it was (it still reads), and null is returned - as it is whenever the row was not rewritten.
+ */
+export const saveDirHandles = async (rawHandles: Record<string, FileSystemDirectoryHandle>): Promise<string[] | null> => {
+  // Android SAF and OPFS roots are stored as serialisable descriptors, not live handles.
+  const handles = serializeDirHandlesForStorage(rawHandles) as unknown as Record<string, FileSystemDirectoryHandle>;
+  try {
+    await putCacheEntry(LOCAL_DIR_HANDLES_KEY, handles);
+    void writeAndroidDiskCacheJson('index', LOCAL_DIR_HANDLES_KEY, JSON.stringify(handles));
+    return Object.keys(handles);
+  } catch (error) {
+    console.warn('[LocalMusic] Saving the directory handles failed; trying them one at a time', error);
+  }
+  const kept: Record<string, FileSystemDirectoryHandle> = {};
+  const dropped: string[] = [];
+  for (const [root, handle] of Object.entries(handles)) {
+    if (await storesAlone(root, handle)) kept[root] = handle;
+    else dropped.push(root);
+  }
+  // No handle stored: either every one is broken, or the database is failing. A row without
+  // handles tells them apart - it stores only when the database is fine.
+  const databaseWrites = Object.keys(kept).length > 0 || await probeWrites();
+  try {
+    await removeCacheEntry(LOCAL_DIR_HANDLES_PROBE_KEY);
+  } catch (error) {
+    console.warn('[LocalMusic] Removing the directory handle probe row failed', error);
+  }
+  if (!databaseWrites) {
+    console.error('[LocalMusic] No directory handle could be stored; the saved ones are left as they were');
+    return null;
+  }
+  try {
+    await putCacheEntry(LOCAL_DIR_HANDLES_KEY, kept);
+    void writeAndroidDiskCacheJson('index', LOCAL_DIR_HANDLES_KEY, JSON.stringify(kept));
+  } catch (error) {
+    console.error('[LocalMusic] Saving the directory handles that stored alone failed', error);
+    return null;
+  }
+  if (dropped.length > 0) console.warn(`[LocalMusic] Dropped ${dropped.length} directory handle(s) that can no longer be stored: ${dropped.join(', ')}`);
+  return Object.keys(kept);
+};
+
+const LOCAL_DIR_HANDLES_KEY = 'local_dir_handles';
+// Scratch row for saveDirHandles' one-at-a-time tries, removed right after; never read.
+const LOCAL_DIR_HANDLES_PROBE_KEY = 'local_dir_handles_probe';
+
+// Whether the probe row takes a write that holds no handle at all.
+const probeWrites = async (): Promise<boolean> => {
+  try {
+    await putCacheEntry(LOCAL_DIR_HANDLES_PROBE_KEY, {});
+    return true;
+  } catch (error) {
+    console.error('[LocalMusic] The directory handle row cannot be written at all', error);
+    return false;
+  }
+};
+
+// Whether one root's handle can be written on its own, tried twice before it counts as broken.
+const storesAlone = async (root: string, handle: FileSystemDirectoryHandle): Promise<boolean> => {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await putCacheEntry(LOCAL_DIR_HANDLES_PROBE_KEY, { [root]: handle });
+      return true;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  console.warn(`[LocalMusic] Directory handle for "${root}" cannot be stored any more`, lastError);
+  return false;
 };
 
 export const getDirHandles = async (): Promise<Record<string, FileSystemDirectoryHandle>> => {
@@ -304,11 +385,13 @@ export const getDirHandles = async (): Promise<Record<string, FileSystemDirector
   return handles;
 };
 
-export const deleteDirHandle = async (rootFolderName: string): Promise<void> => {
+/** Removes one root's directory handle; true when the saved row no longer holds it. */
+export const deleteDirHandle = async (rootFolderName: string): Promise<boolean> => {
   const handles = await getDirHandles();
-  if (!(rootFolderName in handles)) return;
+  if (!(rootFolderName in handles)) return true;
   delete handles[rootFolderName];
-  await saveDirHandles(handles);
+  // null: the row was not rewritten and still holds this root.
+  return (await saveDirHandles(handles)) !== null;
 };
 
 const getLocalSnapshotCacheKey = (rootFolderName: string) => `local_snapshot_${rootFolderName}`;
