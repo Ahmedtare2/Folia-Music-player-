@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { motionValue } from 'framer-motion';
-import { PlayerState, type LocalPlaylist, type LocalSong, type LyricLine, type Word } from '@/types';
+import { PlayerState, type LocalSong, type LyricLine, type Word } from '@/types';
 import {
     INITIAL_MOBILE_NAVIGATION_STATE,
     type MobileNavigationState,

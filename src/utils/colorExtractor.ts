@@ -1,4 +1,10 @@
 import { extractRepresentativeColorsFromPixels } from './colorPalette';
+import { extractAssetIdFromCoverUrl, resolveLocalCoverObjectUrl } from '../services/localCoverRuntime';
+import { buildBuiltinDualTheme } from '../hooks/themeControllerState';
+import {
+    readCachedCoverPalette,
+    writeCachedCoverPalette,
+} from '../services/persistentDiskCacheService';
 import { oklabDistance, oklabToSrgb, srgbToOklab, type Oklab } from './oklab';
 
 // src/utils/colorExtractor.ts
@@ -9,8 +15,12 @@ import { oklabDistance, oklabToSrgb, srgbToOklab, type Oklab } from './oklab';
  * 把图片缩到 50×50 读出像素（crossOrigin 匿名请求）。图片加载失败、没有 CORS 头、画布被污染（读像素抛
  * SecurityError）时都返回 null。silent：失败时不打 warn（墙上一批头像取色时用，失败只是回退）。
  */
-export const loadImagePixels = (imageUrl: string, { silent = false }: { silent?: boolean } = {}): Promise<Uint8ClampedArray | null> => (
-    new Promise(resolve => {
+export const loadImagePixels = async (imageUrl: string, { silent = false }: { silent?: boolean } = {}): Promise<Uint8ClampedArray | null> => {
+    const resolvedUrl = extractAssetIdFromCoverUrl(imageUrl)
+        ? (await resolveLocalCoverObjectUrl(imageUrl)) || imageUrl
+        : imageUrl;
+
+    return new Promise(resolve => {
         const img = new Image();
         img.crossOrigin = "Anonymous";
 
@@ -46,9 +56,9 @@ export const loadImagePixels = (imageUrl: string, { silent = false }: { silent?:
             if (!silent) console.warn("Failed to load image for color extraction", e);
             resolve(null);
         };
-        img.src = imageUrl;
-    })
-);
+        img.src = resolvedUrl;
+    });
+};
 
 type Cluster = Oklab & { weight: number; };
 
@@ -175,14 +185,46 @@ export const extractThemeColorsFromPixels = (imageData: Uint8ClampedArray, count
 };
 
 export const extractColors = async (imageUrl: string, count: number = 5): Promise<string[]> => {
+    const cached = await readCachedCoverPalette(imageUrl);
+    if (cached?.vibrantColors && cached.vibrantColors.length > 0) {
+        return cached.vibrantColors.slice(0, count);
+    }
+
     const pixels = await loadImagePixels(imageUrl);
-    return pixels ? extractThemeColorsFromPixels(pixels, count) : [];
+    if (!pixels) return [];
+    const targetCount = Math.max(count, 6);
+    const vibrant = extractThemeColorsFromPixels(pixels, targetCount);
+    const representative = extractRepresentativeColorsFromPixels(pixels, targetCount);
+    if (vibrant.length > 0 || representative.length > 0) {
+        void writeCachedCoverPalette(imageUrl, {
+            vibrantColors: vibrant,
+            representativeColors: representative,
+            dualTheme: vibrant.length > 0 ? buildBuiltinDualTheme({ coverColors: vibrant }) : undefined,
+        });
+    }
+    return vibrant.slice(0, count);
 };
 
 export const extractRepresentativeColors = async (
     imageUrl: string,
     count: number = 5,
 ): Promise<string[]> => {
+    const cached = await readCachedCoverPalette(imageUrl);
+    if (cached?.representativeColors && cached.representativeColors.length > 0) {
+        return cached.representativeColors.slice(0, count);
+    }
+
     const pixels = await loadImagePixels(imageUrl);
-    return pixels ? extractRepresentativeColorsFromPixels(pixels, count) : [];
+    if (!pixels) return [];
+    const targetCount = Math.max(count, 6);
+    const representative = extractRepresentativeColorsFromPixels(pixels, targetCount);
+    const vibrant = extractThemeColorsFromPixels(pixels, targetCount);
+    if (vibrant.length > 0 || representative.length > 0) {
+        void writeCachedCoverPalette(imageUrl, {
+            vibrantColors: vibrant,
+            representativeColors: representative,
+            dualTheme: vibrant.length > 0 ? buildBuiltinDualTheme({ coverColors: vibrant }) : undefined,
+        });
+    }
+    return representative.slice(0, count);
 };

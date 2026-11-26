@@ -387,6 +387,7 @@ describe('Android SAF local music adapter & Media3 playback bridge', () => {
         vi.mocked(saveDirHandles).mockImplementation(async (handles) => {
             const serialized = serializeDirHandlesForStorage(handles);
             persistedHandlesStore = JSON.parse(JSON.stringify(serialized));
+            return Object.keys(handles);
         });
         vi.mocked(getLocalLibrarySnapshot).mockImplementation(async (rootName) => (
             persistedSnapshotsStore[rootName] ?? null

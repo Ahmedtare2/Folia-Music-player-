@@ -113,7 +113,7 @@ vi.mock('@/services/coverCache', () => ({
 // The real hand-over of blob URLs, with a line for each call.
 vi.mock('@/services/playbackBlobUrls', async importOriginal => {
     const real = await importOriginal<typeof import('@/services/playbackBlobUrls')>();
-    return { retireBlobUrl: (url: string | null) => { env.detail(`retire ${url}`); real.retireBlobUrl(url); } };
+    return { ...real, retireBlobUrl: (url: string | null) => { env.detail(`retire ${url}`); real.retireBlobUrl(url); } };
 });
 vi.mock('@/services/navidromeService', () => ({
     getNavidromeConfig: () => env.navidromeConfig,
