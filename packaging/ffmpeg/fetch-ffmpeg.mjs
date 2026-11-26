@@ -76,9 +76,15 @@ const download = async (url, destination) => {
 };
 
 const extractArchive = (archive, destination) => {
-  const result = spawnSync("tar", ["-xzf", archive, "-C", destination], {
-    stdio: "inherit",
-  });
+  // GNU tar (the one on Windows runners) reads "C:" in a path as a remote host name. Run it inside the destination
+  // folder with a relative archive path (forward slashes) so no drive letter is ever passed to it.
+  const relative = path.relative(destination, archive).split(path.sep).join("/");
+  const sameDrive = !path.isAbsolute(relative);
+  const result = spawnSync(
+    "tar",
+    sameDrive ? ["-xzf", relative] : ["--force-local", "-xzf", archive, "-C", destination],
+    { stdio: "inherit", cwd: sameDrive ? destination : undefined },
+  );
   if (result.error) throw result.error;
   if (result.status !== 0)
     throw new Error(`tar failed with exit code ${result.status}`);

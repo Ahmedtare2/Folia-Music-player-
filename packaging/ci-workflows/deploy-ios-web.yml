@@ -1,8 +1,8 @@
 name: Deploy Web App (iPhone home-screen install)
 
-# Builds the web version of Folia and publishes it on GitHub Pages over HTTPS. On an iPhone, open the page in Safari,
+# Builds the web version of Folia and publishes it on GitHub Pages over HTTPS from the gh-pages branch (no workflow artifact, so the artifact storage quota is not used). On an iPhone, open the page in Safari,
 # tap Share, then "Add to Home Screen" (Folia opens full screen like an app). Turn Pages on once:
-# repository Settings -> Pages -> Build and deployment -> Source: GitHub Actions.
+# after the first run: Settings -> Pages -> Build and deployment -> Source: Deploy from a branch -> Branch: gh-pages, folder / (root).
 # It runs by itself after the Android workflow finishes and can also be run by hand.
 
 on:
@@ -12,9 +12,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
 
 concurrency:
   group: pages
@@ -50,16 +48,13 @@ jobs:
           cp dist/index.html dist/404.html
           touch dist/.nojekyll
 
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Publish the build to the gh-pages branch
+        run: |
+          cd dist
+          git init -q
+          git checkout -q -b gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "Deploy web build"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" gh-pages

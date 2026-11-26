@@ -1,3 +1,4 @@
+import { isSerializedOpfsHandle, openOpfsImportRoot } from './webOpfsImport';
 import type { LocalLibrarySnapshot, LocalSong } from '../types';
 import type { MigrationResult } from '../utils/lyrics/renderHints';
 import { appDatabase } from './appDatabase';
@@ -294,7 +295,13 @@ export const getDirHandles = async (): Promise<Record<string, FileSystemDirector
       }
     }
   }
-  return rehydrateDirHandlesFromStorage(stored);
+  const handles = rehydrateDirHandlesFromStorage(stored);
+  for (const [rootName, handle] of Object.entries(handles)) {
+    if (isSerializedOpfsHandle(handle)) {
+      try { handles[rootName] = await openOpfsImportRoot((handle as unknown as { name: string }).name); } catch { delete handles[rootName]; }
+    }
+  }
+  return handles;
 };
 
 export const deleteDirHandle = async (rootFolderName: string): Promise<void> => {

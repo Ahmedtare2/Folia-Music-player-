@@ -1,3 +1,4 @@
+import { getOpfsRootName, isSerializedOpfsHandle } from '../webOpfsImport';
 import { isAndroidNativeApp } from '../../utils/platform';
 import {
     buildAndroidSafStreamUrl,
@@ -512,6 +513,8 @@ export const serializeDirHandlesForStorage = (
                 ...(handle.relativePrefix ? { relativePrefix: handle.relativePrefix } : {}),
                 ...(handle.virtualEntries ? { virtualEntries: handle.virtualEntries } : {}),
             };
+        } else if (getOpfsRootName(handle)) {
+            output[rootName] = { __foliaOpfsHandle: true, kind: 'directory', name: getOpfsRootName(handle)! } as unknown as FileSystemDirectoryHandle;
         } else {
             output[rootName] = handle;
         }
@@ -534,6 +537,9 @@ export const rehydrateDirHandlesFromStorage = (
                 relativePrefix: value.relativePrefix,
                 virtualEntries: value.virtualEntries,
             });
+        } else if (isSerializedOpfsHandle(value)) {
+            // Resolved to a live handle by getDirHandles (async).
+            output[rootName] = value as unknown as FileSystemDirectoryHandle;
         } else if (value) {
             output[rootName] = value as FileSystemDirectoryHandle;
         }

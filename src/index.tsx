@@ -2,6 +2,7 @@ import { Buffer } from 'buffer';
 import { installGlobalVisualizerFrameRateLimiter } from './utils/frameRateLimiter';
 import { installConsoleLogCapture } from './utils/consoleLogBuffer';
 import { installDebugModule } from './services/debug/debugModule';
+import { installWebBuildTag } from './utils/webBuildTag';
 import { installMemorySampleFeed } from './services/debug/memorySamples';
 // import { installCoverSizeAudit } from './services/debug/coverSizeSamples';
 // @ts-ignore
@@ -21,5 +22,6 @@ installMemorySampleFeed();
 // observer or the rows it retains.
 // if (import.meta.env.DEV) installCoverSizeAudit();
 installGlobalVisualizerFrameRateLimiter();
+installWebBuildTag();
 
 void import('./bootstrap');

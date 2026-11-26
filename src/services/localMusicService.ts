@@ -1,4 +1,5 @@
 import { LocalSong, LyricData, LocalLibrarySnapshot, LocalLibrarySnapshotFile, LocalLibrarySnapshotNode, type SongResult } from '../types';
+import { pickAndCopyToOpfs, removeOpfsImportRoot, getOpfsRootName } from './webOpfsImport';
 import { saveLocalSong, saveLocalSongs, deleteLocalSong as dbDeleteLocalSong, deleteLocalSongs as dbDeleteLocalSongs, saveDirHandles, getDirHandles, deleteDirHandle, getLocalSongs, getLocalLibrarySnapshot, saveLocalLibrarySnapshot, deleteLocalLibrarySnapshot } from './db';
 import { getLocalPlaylists, saveLocalPlaylists } from './localPlaylistService';
 import { parseEmbeddedMetadataAsync, type EmbeddedMetadataResult } from '../utils/localMetadataWorkerClient';
@@ -237,8 +238,8 @@ async function getImportDirectoryHandle(expectedRootName?: string): Promise<File
             requestPermission: (descriptor: { mode: 'read' | 'readwrite'; }) => Promise<PermissionState>;
         };
 
-        let permission = await permissionAwareHandle.queryPermission({ mode: 'read' });
-        if (permission !== 'granted') {
+        let permission = (await permissionAwareHandle.queryPermission?.({ mode: 'read' })) ?? 'granted';
+        if (permission !== 'granted' && permissionAwareHandle.requestPermission) {
             permission = await permissionAwareHandle.requestPermission({ mode: 'read' });
         }
 
@@ -255,6 +256,8 @@ async function getImportDirectoryHandle(expectedRootName?: string): Promise<File
     if (hasFoliaAndroidBridge()) {
         return await pickAndroidDirectoryHandle();
     }
+
+    if (!('showDirectoryPicker' in window)) return await pickAndCopyToOpfs();
 
     // @ts-ignore - showDirectoryPicker is not in all TypeScript definitions
     return await window.showDirectoryPicker();
@@ -2400,7 +2403,7 @@ async function recoverFileHandleFromPersistedDirectory(song: LocalSong): Promise
     const permissionAwareHandle = rootDirHandle as FileSystemDirectoryHandle & {
         queryPermission: (descriptor: { mode: 'read' | 'readwrite'; }) => Promise<PermissionState>;
     };
-    const permission = await permissionAwareHandle.queryPermission({ mode: 'read' });
+    const permission = (await permissionAwareHandle.queryPermission?.({ mode: 'read' })) ?? 'granted';
     if (permission !== 'granted') {
         return null;
     }
@@ -2810,6 +2813,7 @@ async function removeImportedRootContents(rootFolderName: string): Promise<void>
     if (songIds.length > 0) {
         await deleteSongsByIds(songIds);
     }
+    try { const h = (await getDirHandles())[normalizedRoot]; if (h && getOpfsRootName(h)) await removeOpfsImportRoot(normalizedRoot); } catch { /* ignore */ }
     await Promise.all([
         deleteDirHandle(normalizedRoot),
         deleteLocalLibrarySnapshot(normalizedRoot),

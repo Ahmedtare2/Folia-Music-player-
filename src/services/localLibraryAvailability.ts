@@ -21,6 +21,8 @@ export const getLocalLibraryAvailability = (): LocalLibraryAvailability => {
   if (!(currentLocation.protocol === 'https:' || isLocalhost) || !window.isSecureContext) {
     return { supported: false, reason: 'insecure-http' };
   }
+  // No folder picker (iPhone Safari): the import button picks files and copies them into the app's private storage.
+  if (!('showDirectoryPicker' in window)) return { supported: true, reason: null };
   if (!('showDirectoryPicker' in window) || typeof navigator.storage?.getDirectory !== 'function') {
     return { supported: false, reason: 'file-system-api-unavailable' };
   }
