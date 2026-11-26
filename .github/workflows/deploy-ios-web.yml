@@ -35,6 +35,15 @@ jobs:
       - name: Apply the latest source overrides from the ZIP
         run: node packaging/android/restore-latest-overrides.mjs
 
+      - name: Show which source this build uses
+        run: |
+          git log -1 --format='main commit: %H %cI %s'
+          for f in src/utils/webBuildTag.ts src/services/webOpfsImport.ts; do
+            if [ -f "$f" ]; then echo "present: $f"; else echo "MISSING: $f"; fi
+          done
+          grep -c "installWebBuildTag" src/index.tsx || true
+          grep -n "showDirectoryPicker" src/services/localLibraryAvailability.ts || true
+
       - name: Install npm dependencies
         run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
 
@@ -47,6 +56,12 @@ jobs:
           # A reload of a deep link must still open the app.
           cp dist/index.html dist/404.html
           touch dist/.nojekyll
+          # Proof of what was published: open <site>/build-info.json in Safari.
+          TAGGED=no
+          if grep -rl "folia-web-build-tag" dist/assets >/dev/null 2>&1; then TAGGED=yes; fi
+          echo "build tag code in the bundle: $TAGGED"
+          printf '{"commit":"%s","builtAt":"%s","webBuildTagInBundle":"%s"}\n' "$(git rev-parse HEAD)" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$TAGGED" > dist/build-info.json
+          cat dist/build-info.json
 
       - name: Publish the build to the gh-pages branch
         run: |
