@@ -172,7 +172,13 @@ export const createDesktopMp4Sink = async (options: {
     let writeFailure: Error | null = null;
     const muxer = new Muxer({
         target: new StreamTarget({
-            onData: (data: Uint8Array) => {
+            // mp4-muxer needs the (data, position) form; fragmented files are written front to back, so a position
+            // that is not the end of what was already written would mean a broken file, which we refuse.
+            onData: (data: Uint8Array, position: number) => {
+                if (position !== written && !writeFailure) {
+                    writeFailure = new Error(`the video writer asked for a non-sequential write (at ${position}, expected ${written})`);
+                    return;
+                }
                 const copy = data.slice().buffer as ArrayBuffer;
                 written += copy.byteLength;
                 writeChain = writeChain
