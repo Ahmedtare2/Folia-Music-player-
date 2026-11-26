@@ -326,19 +326,19 @@ function tripledes_crypt(data: Uint8Array, keySchedule: number[][][]): Uint8Arra
  * Helper to decompress raw deflate data using browser's DecompressionStream.
  */
 async function decompressDeflate(bytes: Uint8Array): Promise<string> {
-  // fflate first: it ignores the zero padding the 8-byte block cipher leaves after the zlib stream, and does not
-  // depend on the WebView shipping DecompressionStream. The stream below stays as the fallback.
+  // The 8-byte block cipher leaves zero padding after the zlib stream; if the stream rejects it with nothing read,
+  // run once more without the padding.
   try {
-    const { unzlibSync, inflateSync } = await import('fflate');
+    return await inflateWithStream(bytes);
+  } catch (error) {
     let end = bytes.length;
     while (end > 0 && bytes[end - 1] === 0) end--;
-    for (const candidate of [bytes, bytes.subarray(0, end)]) {
-      try {
-        return new TextDecoder('utf-8').decode(unzlibSync(candidate));
-      } catch { /* try the next shape */ }
-    }
-    return new TextDecoder('utf-8').decode(inflateSync(bytes.subarray(2, end)));
-  } catch { /* fall through to DecompressionStream */ }
+    if (end === bytes.length) throw error;
+    return inflateWithStream(bytes.subarray(0, end));
+  }
+}
+
+async function inflateWithStream(bytes: Uint8Array): Promise<string> {
   const ds = new DecompressionStream('deflate');
   const writer = ds.writable.getWriter();
   writer.write(new Uint8Array(bytes)).catch(() => {});
