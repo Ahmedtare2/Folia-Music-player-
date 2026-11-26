@@ -67,7 +67,8 @@ jobs:
       - name: List the installer
         run: ls -la release/*.exe
 
-      - name: Upload the installer as a workflow artifact
+      - name: Upload the installer as a workflow artifact (skipped when the artifact storage quota is full)
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: Folia-Windows-x64-Setup
