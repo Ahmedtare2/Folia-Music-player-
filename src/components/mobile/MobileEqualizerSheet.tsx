@@ -33,6 +33,12 @@ import {
 } from '../../services/mobileEqualizerCompat';
 import { useAudioSettingsStore } from '../../stores/useAudioSettingsStore';
 
+import {
+    OUTPUT_STAGE_MAX_PREAMP_DB,
+    OUTPUT_STAGE_MIN_PREAMP_DB,
+} from '../../services/audioOutputStage';
+import { useOutputStage } from '../panelTab/equalizer/useOutputStage';
+
 // src/components/mobile/MobileEqualizerSheet.tsx
 // Mobile-first 10-band Audio Equalizer & Effects panel connected directly to the live
 // Web Audio BiquadFilterNode playback chain via useAudioSettingsStore.
@@ -64,6 +70,7 @@ export const MobileEqualizerSheet: React.FC<MobileEqualizerSheetProps> = ({
     onClose,
     onOpenFullDesktopEqualizer,
 }) => {
+    const [outputStage, setOutputStage] = useOutputStage();
     const settings = useAudioSettingsStore(state => state.audioEqualizerSettings);
     const setSettings = useAudioSettingsStore(state => state.handleSetAudioEqualizerSettings);
     const applyPresetInStore = useAudioSettingsStore(state => state.handleApplyAudioSoundPreset);
@@ -387,6 +394,32 @@ export const MobileEqualizerSheet: React.FC<MobileEqualizerSheetProps> = ({
                             );
                         })}
                     </div>
+                </div>
+
+                {/* Preamp before the bands, limiter after them (audioOutputStage.ts) */}
+                <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-3.5 space-y-2.5">
+                    <div className="flex items-center justify-between text-xs">
+                        <span className="font-semibold uppercase tracking-wider text-zinc-300">Preamp</span>
+                        <span className="font-mono text-zinc-400">{outputStage.preampDb.toFixed(1)} dB</span>
+                    </div>
+                    <input
+                        type="range"
+                        aria-label="Preamp"
+                        min={OUTPUT_STAGE_MIN_PREAMP_DB}
+                        max={OUTPUT_STAGE_MAX_PREAMP_DB}
+                        step={0.5}
+                        value={outputStage.preampDb}
+                        onChange={(e) => setOutputStage({ preampDb: Number(e.target.value) })}
+                        className="w-full accent-white"
+                    />
+                    <label className="flex items-center gap-2 text-xs text-zinc-200">
+                        <input
+                            type="checkbox"
+                            checked={outputStage.limiterEnabled}
+                            onChange={(e) => setOutputStage({ limiterEnabled: e.target.checked })}
+                        />
+                        <span>Limiter (stops boosts from clipping)</span>
+                    </label>
                 </div>
 
                 {/* Optional Post-EQ Audio Effects Section */}

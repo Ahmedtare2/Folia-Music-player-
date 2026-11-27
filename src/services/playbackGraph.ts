@@ -1,4 +1,5 @@
 import { connectAudioEqualizerGraph } from './audioEqualizerGraph';
+import { createAudioOutputStage } from './audioOutputStage';
 import { createAudioEffectChain, type AudioEffectChain } from './audioEffects/effectChain';
 import type { AudioEqualizerSettings } from '../utils/audioEqualizer';
 
@@ -50,10 +51,14 @@ export const buildPlaybackGraph = ({
 
     // Keeps a stable seam between the equalizer bands and the effect chain.
     const equalizerOutput = context.createGain();
+    // Preamp before the bands and a limiter after them, so a boost does not clip (audioOutputStage.ts).
+    const outputStage = createAudioOutputStage(context);
+    mixNode.connect(outputStage.preamp);
+    outputStage.limiter.connect(equalizerOutput);
     connectAudioEqualizerGraph({
         context,
-        input: mixNode,
-        output: equalizerOutput,
+        input: outputStage.preamp,
+        output: outputStage.limiter,
         nodesRef: equalizerNodesRef,
         settings,
     });
@@ -104,7 +109,7 @@ export const buildPlaybackGraph = ({
     // ever reads "volume" before "effects" again, the vinyl noise has stopped answering the
     // volume control and the bit crush has gone back to tracking it.
     console.log(
-        '[AudioContext] graph: decks -> mix -> equaliser -> effects -> fade -> [room] -> volume -> analyser -> out'
+        '[AudioContext] graph: decks -> mix -> preamp -> equaliser -> limiter -> effects -> fade -> [room] -> volume -> analyser -> out'
         + ` (equaliser ${settings.enabled ? 'on' : 'flat'},`
         + ` noise ${settings.effects.noise}, crush ${settings.effects.crush}, punch ${settings.effects.punch})`,
     );

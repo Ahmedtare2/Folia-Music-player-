@@ -4,22 +4,15 @@
     android:height="108dp"
     android:viewportWidth="512"
     android:viewportHeight="512">
+    <!-- The desktop icon (build/icon.png): four white rounded blocks that form an F. Scaled to sit inside the adaptive-icon safe zone. -->
     <group
-        android:scaleX="0.62"
-        android:scaleY="0.62"
-        android:translateX="97.28"
-        android:translateY="97.28">
-        <!-- Vertical Stem from public/icon.svg -->
-        <path
-            android:fillColor="#FFFFFFFF"
-            android:pathData="M160,128 C160,110 175,110 190,110 H220 C235,110 250,125 250,140 V372 C250,388 235,402 220,402 H190 C175,402 160,388 160,372 V128 Z" />
-        <!-- Top Bar (Leaf Shape) from public/icon.svg -->
-        <path
-            android:fillColor="#FFFFFFFF"
-            android:pathData="M240,110 H340 C380,110 400,140 400,170 C400,200 360,200 340,200 H250 V110 Z" />
-        <!-- Middle Bar (Smaller Leaf Shape) from public/icon.svg -->
-        <path
-            android:fillColor="#FFFFFFFF"
-            android:pathData="M250,240 H320 C350,240 360,260 360,280 C360,300 340,300 320,300 H250 V240 Z" />
+        android:scaleX="0.72"
+        android:scaleY="0.72"
+        android:translateX="64.5"
+        android:translateY="71.7">
+        <path android:fillColor="#FFFFFFFF" android:pathData="M153,86 H217 A12,12 0 0 1 229,98 V230 A12,12 0 0 1 217,242 H153 A12,12 0 0 1 141,230 V98 A12,12 0 0 1 153,86 Z" />
+        <path android:fillColor="#FFFFFFFF" android:pathData="M253,86 H379 A12,12 0 0 1 391,98 V158 A12,12 0 0 1 379,170 H253 A12,12 0 0 1 241,158 V98 A12,12 0 0 1 253,86 Z" />
+        <path android:fillColor="#FFFFFFFF" android:pathData="M153,254 H329 A12,12 0 0 1 341,266 V322 A12,12 0 0 1 329,334 H153 A12,12 0 0 1 141,322 V266 A12,12 0 0 1 153,254 Z" />
+        <path android:fillColor="#FFFFFFFF" android:pathData="M153,346 H217 A12,12 0 0 1 229,358 V414 A12,12 0 0 1 217,426 H153 A12,12 0 0 1 141,414 V358 A12,12 0 0 1 153,346 Z" />
     </group>
 </vector>

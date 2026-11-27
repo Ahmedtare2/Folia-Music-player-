@@ -1,5 +1,6 @@
 import type { MutableRefObject } from 'react';
 import { AUDIO_EQUALIZER_BANDS, audioEqualizerBandShape, type AudioEqualizerSettings } from '../utils/audioEqualizer';
+import { computeDeCumulatedBandGainDb, getEqualizerBandQ } from './mobileEqualizerCompat';
 import type { AudioEqualizerChangeOrigin } from '../utils/audioEqualizerModCurve';
 
 // src/services/audioEqualizerGraph.ts
@@ -29,8 +30,8 @@ export const connectAudioEqualizerGraph = ({
         const filter = context.createBiquadFilter();
         filter.type = audioEqualizerBandShape(index);
         filter.frequency.value = resolveFilterFrequency(context, band.frequency);
-        filter.Q.value = 1.4;
-        filter.gain.value = settings.enabled ? settings.gains[index] : 0;
+        filter.Q.value = getEqualizerBandQ(index);
+        filter.gain.value = settings.enabled ? computeDeCumulatedBandGainDb(settings.gains, index) : 0;
         return filter;
     });
 
@@ -58,7 +59,7 @@ export const applyAudioEqualizerSettings = (
     timeConstant = EQUALIZER_TIME_CONSTANT_SECONDS,
 ) => {
     nodes.forEach((filter, index) => {
-        const nextGain = settings.enabled ? (settings.gains[index] ?? 0) : 0;
+        const nextGain = settings.enabled ? computeDeCumulatedBandGainDb(settings.gains, index) : 0;
         filter.gain.cancelScheduledValues(context.currentTime);
         filter.gain.setTargetAtTime(nextGain, context.currentTime, timeConstant);
     });

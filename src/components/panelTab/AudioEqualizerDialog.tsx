@@ -17,6 +17,7 @@ import Sheet from '../shared/Sheet';
 import { Toggle } from '../modal/settings/kit';
 import AudioEffectGrid from './equalizer/AudioEffectGrid';
 import EqualizerBandGrid from './equalizer/EqualizerBandGrid';
+import OutputStageSection from './equalizer/OutputStageSection';
 import PresetChips from './equalizer/PresetChips';
 import ModCurveNotice from './equalizer/ModCurveNotice';
 import StemMixerSection from './equalizer/StemMixerSection';
@@ -217,6 +218,7 @@ const AudioEqualizerDialog: React.FC<AudioEqualizerDialogProps> = ({ isDaylight 
                     className={`st-t-move flex flex-1 flex-col transition-opacity${draft.enabled && !readOnly ? '' : ' opacity-40'}`}
                 >
                     <EqualizerBandGrid gains={draft.gains} onBandChange={updateBandDraft} onCommit={commitDraft} readOnly={readOnly} />
+                    <OutputStageSection />
                     <AudioEffectGrid effects={draft.effects} onEffectChange={updateEffectDraft} onCommit={commitDraft} readOnly={readOnly} />
                 </div>
                 {/* 不随上面的音频处理开关变淡：它有自己的开关。 */}
