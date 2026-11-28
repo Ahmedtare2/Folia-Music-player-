@@ -1,0 +1,1 @@
+if('serviceWorker' in navigator) {window.addEventListener('load', () => {navigator.serviceWorker.register('/Folia-Music-player-/sw.js', { scope: '/Folia-Music-player-/' })})}

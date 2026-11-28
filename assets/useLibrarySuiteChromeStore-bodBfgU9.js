@@ -1,0 +1,1 @@
+import{t as e}from"./react-CrN815kv.js";var t=e((e,t)=>({chrome:null,registerChrome:n=>(e({chrome:n}),()=>{t().chrome===n&&e({chrome:null})})})),n=e=>t.getState().registerChrome(e);export{t as n,n as t};

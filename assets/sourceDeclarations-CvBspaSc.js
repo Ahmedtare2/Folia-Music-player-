@@ -1,0 +1,1 @@
+var e=new Map,t=new Set,n=()=>t.forEach(e=>{try{e()}catch(e){console.warn(`[sourceDeclarations] a listener failed`,e)}}),r=(t,r)=>{let i=Object.freeze({...r});return e.set(t,i),n(),()=>{e.get(t)===i&&(e.delete(t),n())}},i=t=>e.get(t),a=()=>Array.from(e.entries()),o=e=>(t.add(e),()=>{t.delete(e)});export{o as i,i as n,a as r,r as t};

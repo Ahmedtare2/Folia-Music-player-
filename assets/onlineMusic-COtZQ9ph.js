@@ -1,0 +1,1 @@
+var e=class extends Error{constructor(e,t,n,r,i,a){super(t),this.code=e,this.providerId=n,this.cause=r,this.httpStatus=i,this.retryAfterMs=a,this.name=`OnlineProviderError`}};export{e as t};

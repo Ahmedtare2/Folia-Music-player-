@@ -1,0 +1,1 @@
+var e=typeof window>`u`?void 0:window.location,t=new URLSearchParams(e?.search??``),n=typeof window<`u`&&(t.get(`obs`)===`1`||e?.pathname===`/obs`),r=t.get(`obsSource`),i=!n&&t.get(`remote`)===`1`,a=!n&&!i&&t.get(`perfCheck`)===`1`,o=typeof window<`u`&&!n&&!i&&!a;export{r as a,i,n,a as r,o as t};
