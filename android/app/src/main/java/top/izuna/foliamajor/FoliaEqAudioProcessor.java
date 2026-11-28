@@ -39,6 +39,38 @@ public final class FoliaEqAudioProcessor extends BaseAudioProcessor {
     private static volatile Settings latest = new Settings(false, new double[BAND_COUNT], 0.0, true);
     private static volatile int latestVersion = 0;
 
+    // What the live processor reports back, so the app can show that the native EQ really is processing.
+    private static volatile boolean statusConfigured = false;
+    private static volatile int statusSampleRate = 0;
+    private static volatile int statusChannels = 0;
+    private static volatile String statusFormat = "";
+    private static volatile long statusFrames = 0L;
+    private static volatile int statusAppliedVersion = -1;
+    private static volatile boolean statusEnabled = false;
+    private static volatile double statusPreampDb = 0.0;
+    private static volatile double statusMaxReduction = 1.0; // lowest limiter gain since the last read
+
+    public static org.json.JSONObject readStatus() {
+        org.json.JSONObject o = new org.json.JSONObject();
+        try {
+            double minGain = statusMaxReduction;
+            statusMaxReduction = 1.0;
+            o.put("configured", statusConfigured);
+            o.put("sampleRate", statusSampleRate);
+            o.put("channels", statusChannels);
+            o.put("format", statusFormat);
+            o.put("frames", statusFrames);
+            o.put("settingsSent", latestVersion);
+            o.put("settingsApplied", statusAppliedVersion);
+            o.put("enabled", statusEnabled);
+            o.put("preampDb", statusPreampDb);
+            o.put("limiterReductionDb", minGain >= 1.0 ? 0.0 : -20.0 * Math.log10(minGain));
+        } catch (org.json.JSONException ignored) {
+            // Keys are fixed strings; cannot fail.
+        }
+        return o;
+    }
+
     /** Called from the bridge on any thread. gainsDb has one value per band (de-cumulated by the caller). */
     public static void applySettings(boolean enabled, double[] gainsDb, double preampDb, boolean limiter) {
         double[] g = new double[BAND_COUNT];
@@ -92,6 +124,8 @@ public final class FoliaEqAudioProcessor extends BaseAudioProcessor {
     protected AudioFormat onConfigure(AudioFormat inputAudioFormat) throws UnhandledAudioFormatException {
         int enc = inputAudioFormat.encoding;
         if (enc != C.ENCODING_PCM_16BIT && enc != C.ENCODING_PCM_FLOAT) {
+            statusConfigured = false;
+            statusFormat = "unsupported:" + enc;
             return AudioFormat.NOT_SET;
         }
         if (inputAudioFormat.channelCount < 1 || inputAudioFormat.channelCount > MAX_CHANNELS
@@ -102,6 +136,10 @@ public final class FoliaEqAudioProcessor extends BaseAudioProcessor {
         sampleRate = inputAudioFormat.sampleRate;
         floatPcm = enc == C.ENCODING_PCM_FLOAT;
         resetDsp();
+        statusConfigured = true;
+        statusSampleRate = sampleRate;
+        statusChannels = channels;
+        statusFormat = floatPcm ? "float" : "pcm16";
         return inputAudioFormat;
     }
 
@@ -179,7 +217,10 @@ public final class FoliaEqAudioProcessor extends BaseAudioProcessor {
             return;
         }
         appliedVersion = version;
+        statusAppliedVersion = version;
         Settings s = latest;
+        statusEnabled = s.enabled;
+        statusPreampDb = s.preampDb;
         enabledNow = s.enabled;
         limiterOn = s.enabled && s.limiter;
         preampTarget = s.enabled ? Math.pow(10.0, s.preampDb / 20.0) : 1.0;
@@ -220,6 +261,7 @@ public final class FoliaEqAudioProcessor extends BaseAudioProcessor {
                 }
             }
         }
+        statusFrames += frames;
         out.flip();
     }
 
@@ -358,6 +400,9 @@ public final class FoliaEqAudioProcessor extends BaseAudioProcessor {
             smoothed += (avg - smoothed) * releaseCoef;
         }
         double g = smoothed;
+        if (g < statusMaxReduction) {
+            statusMaxReduction = g;
+        }
         // Delay line of exactly window - 1 frames, which keeps every output sample inside the min-filter and box coverage.
         int readPos = delayPos;
         for (int c = 0; c < channels; c++) {

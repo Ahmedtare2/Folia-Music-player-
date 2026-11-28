@@ -6,6 +6,7 @@ import {
 } from '../../../services/audioOutputStage';
 import PanelSlider from '../controls/PanelSlider';
 import EqualizerSection from './EqualizerSection';
+import { useNativeEqStatus } from './useNativeEqStatus';
 import { useOutputStage } from './useOutputStage';
 import { hasAndroidNativeExoPlayerBridge } from '../../../services/android/foliaAndroidBridge';
 import { getAudioEngine, setAudioEngine, subscribeAudioEngine } from '../../../services/audioEngine';
@@ -20,6 +21,7 @@ const OutputStageSection: React.FC = () => {
     const { t } = useTranslation();
     const [stage, setStage] = useOutputStage();
     const engine = useSyncExternalStore(subscribeAudioEngine, getAudioEngine, getAudioEngine);
+    const nativeLine = useNativeEqStatus(engine === 'native' && hasAndroidNativeExoPlayerBridge());
     const label = t('ui.equalizerPreamp', { defaultValue: 'Preamp' });
     const valueText = formatDb(stage.preampDb);
     return (
@@ -53,9 +55,10 @@ const OutputStageSection: React.FC = () => {
                             checked={engine === 'native'}
                             onChange={event => setAudioEngine(event.target.checked ? 'native' : 'standard')}
                         />
-                        <span>Native audio engine (ExoPlayer, applies from the next song; visualizer is not sound-reactive)</span>
+                        <span>Native audio engine (ExoPlayer; switches at once; the visualizer is not sound-reactive)</span>
                     </label>
                 )}
+                {nativeLine && <div className={`text-xs leading-4 ${nativeLine.running ? 'text-[color:var(--st-t2)]' : 'text-[color:var(--st-t3)]'}`}>{nativeLine.text}</div>}
             </div>
         </EqualizerSection>
     );

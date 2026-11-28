@@ -1,11 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
 import type { MutableRefObject, RefObject } from 'react';
 import { PlayerState } from '../../../../types';
 import type { ReplayGainInfo, ReplayGainMode, SongResult, StatusMessage } from '../../../../types';
 import type { LocalSong } from '../../../../types';
 import { isLocalPlaybackSong, resolveNavidromePlaybackCarrier } from '../../../../utils/appPlaybackGuards';
 import { calculateReplayGain } from '../../../../utils/replayGain';
-import { getAudioEngine } from '../../../../services/audioEngine';
+import { getAudioEngine, subscribeAudioEngine } from '../../../../services/audioEngine';
 import { getOutputStageSettings, subscribeOutputStageSettings } from '../../../../services/audioOutputStage';
 import { syncNativeEqSettings } from '../../../../services/nativeEqSync';
 import { applyAudioEqualizerSettings, planAudioEqualizerApply } from '../../../../services/audioEqualizerGraph';
@@ -15,8 +15,10 @@ import { cachePlayedTrackAssets } from '../../../../services/playedTrackCache';
 import { markProgrammaticPause, registerPlaybackFadeGraph } from '../../../../services/playbackFade';
 import {
     bindAudioElementToNativeExoPlayer,
+    getInterpolatedAndroidPlaybackPositionSec,
     isAndroidSafStreamUrl,
     loadAndroidNativeTrack,
+    pauseAndroidNativeAudio,
     setAndroidNativeExoPlayerActive,
     shouldRouteToAndroidNativeExoPlayer,
 } from '../../../../services/android/foliaAndroidBridge';
@@ -110,12 +112,8 @@ export function usePlaybackAudioBridge({
         && Boolean((window as Window & { __FOLIA_FORCE_NATIVE_EXOPLAYER__?: boolean }).__FOLIA_FORCE_NATIVE_EXOPLAYER__);
     // The Native audio engine (Settings: EQ window) plays through ExoPlayer WITH its own EQ, so the EQ being on
     // does not keep it off the native route. Automix and stem separation still do (they need the web graph).
-    // The choice is read when a track starts, so switching engines never restarts the song that is playing.
-    const engineForTrackRef = useRef({ src: audioSrc, engine: getAudioEngine() });
-    if (engineForTrackRef.current.src !== audioSrc) {
-        engineForTrackRef.current = { src: audioSrc, engine: getAudioEngine() };
-    }
-    const nativeEngineSelected = engineForTrackRef.current.engine === 'native';
+    // The switch takes effect at once: the song that is playing is handed over at its position (below).
+    const nativeEngineSelected = useSyncExternalStore(subscribeAudioEngine, getAudioEngine, getAudioEngine) === 'native';
     const useNativeExoPlayer = (forceNativeExoOverride || nativeEngineSelected) && shouldRouteToAndroidNativeExoPlayer({
         audioSrc,
         automixEnabled,
@@ -124,18 +122,54 @@ export function usePlaybackAudioBridge({
     });
     const lastLoadedExoSrcRef = useRef<string | null>(null);
 
+    // A mid-song switch between the engines: where the song was and whether it was playing, handed to the other engine.
+    const wasNativeRef = useRef(false);
+    const handoverSrcRef = useRef<string | null>(audioSrc);
+    const nativeHandoverRef = useRef<{ positionMs: number; playing: boolean } | null>(null);
     useEffect(() => {
+        const element = audioRef.current;
+        const sameSong = handoverSrcRef.current === audioSrc;
+        handoverSrcRef.current = audioSrc;
+        const wasNative = wasNativeRef.current;
+        wasNativeRef.current = useNativeExoPlayer;
+        if (element && sameSong && useNativeExoPlayer && !wasNative && audioSrc) {
+            // Web engine -> native: read the web element BEFORE it is bound (and muted) to the native player.
+            const positionMs = Math.round((element.currentTime || 0) * 1000);
+            const playing = !element.paused && !element.ended;
+            if (positionMs > 0 || playing) {
+                nativeHandoverRef.current = { positionMs, playing };
+            }
+        }
+        let backToWeb: { positionSec: number; playing: boolean } | null = null;
+        if (element && sameSong && !useNativeExoPlayer && wasNative) {
+            // Native -> web engine: the native clock is still the element's clock until it is unbound.
+            const clock = getInterpolatedAndroidPlaybackPositionSec();
+            if (clock) {
+                backToWeb = { positionSec: clock.positionSec, playing: clock.isPlaying && !clock.ended };
+            }
+            void pauseAndroidNativeAudio();
+        }
         setAndroidNativeExoPlayerActive(useNativeExoPlayer);
-        bindAudioElementToNativeExoPlayer(audioRef.current, useNativeExoPlayer);
+        bindAudioElementToNativeExoPlayer(element, useNativeExoPlayer);
         if (!useNativeExoPlayer) {
             lastLoadedExoSrcRef.current = null;
+        }
+        if (element && backToWeb) {
+            try {
+                element.currentTime = backToWeb.positionSec;
+                if (backToWeb.playing) {
+                    void element.play()?.catch(() => undefined);
+                }
+            } catch {
+                // The element was not ready; the next song starts clean.
+            }
         }
         return () => {
             if (!useNativeExoPlayer && audioRef.current) {
                 bindAudioElementToNativeExoPlayer(audioRef.current, false);
             }
         };
-    }, [audioRef, useNativeExoPlayer]);
+    }, [audioRef, audioSrc, useNativeExoPlayer]);
     // What is heard: the listener's own settings with a mod's curve over the gains (Folium 1.7). Worked out
     // here rather than in a selector, which would hand useSyncExternalStore a new object on every read.
     const modCurve = useAudioSettingsStore(state => state.audioEqualizerModCurve);
@@ -407,7 +441,12 @@ export function usePlaybackAudioBridge({
                 const autoPlayWanted = Boolean(shouldAutoPlayRef.current && !isAutoplayHeld && !suppressAutoplayRef.current);
                 if (lastLoadedExoSrcRef.current !== audioSrc) {
                     lastLoadedExoSrcRef.current = audioSrc;
-                    if (suppressAutoplayRef.current) {
+                    const handover = nativeHandoverRef.current;
+                    nativeHandoverRef.current = null;
+                    if (handover) {
+                        // Switched engines mid-song: carry on from the same place, playing or paused as it was.
+                        if (handover.playing) setPlayerState(PlayerState.PLAYING);
+                    } else if (suppressAutoplayRef.current) {
                         suppressAutoplayRef.current = false;
                         shouldAutoPlayRef.current = false;
                         setPlayerState(PlayerState.PAUSED);
@@ -422,8 +461,8 @@ export function usePlaybackAudioBridge({
                         artist: currentSong ? (getSongArtistLabel(currentSong) || '') : '',
                         album: currentSong ? (getSongAlbumLabel(currentSong) || '') : '',
                         artworkUrl: getCoverUrl(),
-                        autoPlay: autoPlayWanted,
-                        startPositionMs: 0,
+                        autoPlay: handover ? handover.playing : autoPlayWanted,
+                        startPositionMs: handover ? handover.positionMs : 0,
                         volume: getTargetPlaybackVolume(),
                         playbackSpeed: 1.0,
                     });

@@ -1643,6 +1643,23 @@ public class FoliaNativeBridgePlugin extends Plugin {
     }
 
     @PluginMethod
+    public void getEqProcessorStatus(PluginCall call) {
+        JSObject res = new JSObject();
+        try {
+            org.json.JSONObject o = FoliaEqAudioProcessor.readStatus();
+            java.util.Iterator<String> keys = o.keys();
+            while (keys.hasNext()) {
+                String k = keys.next();
+                res.put(k, o.get(k));
+            }
+        } catch (Exception ignored) {
+            // Report whatever was copied.
+        }
+        res.put("ok", true);
+        call.resolve(res);
+    }
+
+    @PluginMethod
     public void play(PluginCall call) {
         FoliaPlaybackService.commandPlay(getContext());
         FoliaPlaybackService.PlaybackClockSnapshot snap = FoliaPlaybackService.getPlaybackClockSnapshot();

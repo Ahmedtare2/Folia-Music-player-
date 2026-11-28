@@ -324,11 +324,26 @@ export interface FoliaNativeBridgePluginContract {
     setPlaybackSpeed?: (options: { playbackSpeed: number; speed?: number }) => Promise<FoliaNativePlaybackClockAnchor & { ok: boolean }>;
     getPlaybackPosition?: () => Promise<FoliaNativePlaybackClockAnchor & { ok: boolean }>;
     setEqProcessorSettings?: (options: { enabled: boolean; gainsDb: number[]; preampDb: number; limiterEnabled: boolean }) => Promise<{ ok: boolean }>;
+    getEqProcessorStatus?: () => Promise<FoliaNativeEqStatus & { ok: boolean }>;
     addListener?: (
         eventName: 'mediaAction' | 'displayRefreshRateChanged' | 'playbackClockAnchor',
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         listenerFunc: (event: any) => void,
     ) => Promise<{ remove: () => Promise<void> }> | { remove: () => Promise<void> };
+}
+
+/** What the native EQ reports about itself while ExoPlayer plays through it. */
+export interface FoliaNativeEqStatus {
+    configured: boolean;
+    sampleRate: number;
+    channels: number;
+    format: string;
+    frames: number;
+    settingsSent: number;
+    settingsApplied: number;
+    enabled: boolean;
+    preampDb: number;
+    limiterReductionDb: number;
 }
 
 export const ANDROID_SAF_STREAM_PATH = '/__folia_saf/stream';
@@ -1234,6 +1249,17 @@ export const setAndroidNativeEqSettings = (options: {
     const plugin = getNativePlugin();
     if (!plugin || typeof plugin.setEqProcessorSettings !== 'function') return;
     void plugin.setEqProcessorSettings(options).catch(() => undefined);
+};
+
+export const getAndroidNativeEqStatus = async (): Promise<FoliaNativeEqStatus | null> => {
+    if (!hasAndroidNativeExoPlayerBridge()) return null;
+    const plugin = getNativePlugin();
+    if (!plugin || typeof plugin.getEqProcessorStatus !== 'function') return null;
+    try {
+        return await plugin.getEqProcessorStatus();
+    } catch {
+        return null;
+    }
 };
 
 export const isAndroidNativeExoPlayerActive = (): boolean => (

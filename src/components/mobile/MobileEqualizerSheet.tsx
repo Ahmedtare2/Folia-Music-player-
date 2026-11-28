@@ -38,6 +38,7 @@ import {
     OUTPUT_STAGE_MIN_PREAMP_DB,
 } from '../../services/audioOutputStage';
 import { useOutputStage } from '../panelTab/equalizer/useOutputStage';
+import { useNativeEqStatus } from '../panelTab/equalizer/useNativeEqStatus';
 import { hasAndroidNativeExoPlayerBridge } from '../../services/android/foliaAndroidBridge';
 import { getAudioEngine, setAudioEngine, subscribeAudioEngine } from '../../services/audioEngine';
 
@@ -74,6 +75,7 @@ export const MobileEqualizerSheet: React.FC<MobileEqualizerSheetProps> = ({
 }) => {
     const [outputStage, setOutputStage] = useOutputStage();
     const audioEngine = React.useSyncExternalStore(subscribeAudioEngine, getAudioEngine, getAudioEngine);
+    const nativeLine = useNativeEqStatus(audioEngine === 'native' && hasAndroidNativeExoPlayerBridge());
     const settings = useAudioSettingsStore(state => state.audioEqualizerSettings);
     const setSettings = useAudioSettingsStore(state => state.handleSetAudioEqualizerSettings);
     const applyPresetInStore = useAudioSettingsStore(state => state.handleApplyAudioSoundPreset);
@@ -431,9 +433,10 @@ export const MobileEqualizerSheet: React.FC<MobileEqualizerSheetProps> = ({
                                 checked={audioEngine === 'native'}
                                 onChange={(e) => setAudioEngine(e.target.checked ? 'native' : 'standard')}
                             />
-                            <span>Native audio engine (ExoPlayer). Applies from the next song. The visualizer is not sound-reactive in this mode; automix and stem separation use the standard engine.</span>
+                            <span>Native audio engine (ExoPlayer). Switches at once. The visualizer is not sound-reactive in this mode; automix and stem separation use the standard engine.</span>
                         </label>
                     )}
+                    {nativeLine && <div className={`text-[11px] leading-4 ${nativeLine.running ? 'text-zinc-300' : 'text-zinc-500'}`}>{nativeLine.text}</div>}
                 </div>
 
                 {/* Optional Post-EQ Audio Effects Section */}
