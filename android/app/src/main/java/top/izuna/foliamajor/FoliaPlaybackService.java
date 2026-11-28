@@ -31,6 +31,8 @@ import androidx.media3.common.PlaybackException;
 import androidx.media3.common.PlaybackParameters;
 import androidx.media3.common.Player;
 import androidx.media3.exoplayer.DefaultRenderersFactory;
+import androidx.media3.exoplayer.audio.AudioSink;
+import androidx.media3.exoplayer.audio.DefaultAudioSink;
 import androidx.media3.exoplayer.ExoPlayer;
 import java.io.File;
 import java.lang.ref.WeakReference;
@@ -352,7 +354,23 @@ public class FoliaPlaybackService extends Service {
     }
 
     private void initExoPlayerAndMediaSessions() {
-        DefaultRenderersFactory renderersFactory = new DefaultRenderersFactory(this)
+        // The audio sink carries Folia's own equalizer (preamp, ten RBJ biquad bands, look-ahead limiter).
+        DefaultRenderersFactory renderersFactory = new DefaultRenderersFactory(this) {
+            @Override
+            protected AudioSink buildAudioSink(
+                Context context,
+                boolean enableFloatOutput,
+                boolean enableAudioTrackPlaybackParams
+            ) {
+                return new DefaultAudioSink.Builder(context)
+                    .setEnableFloatOutput(enableFloatOutput)
+                    .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
+                    .setAudioProcessors(new androidx.media3.common.audio.AudioProcessor[] {
+                        new FoliaEqAudioProcessor()
+                    })
+                    .build();
+            }
+        }
             .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
             .setEnableAudioFloatOutput(true);
 

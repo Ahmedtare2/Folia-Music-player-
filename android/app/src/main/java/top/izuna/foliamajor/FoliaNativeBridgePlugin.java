@@ -1620,6 +1620,29 @@ public class FoliaNativeBridgePlugin extends Plugin {
     }
 
     @PluginMethod
+    public void setEqProcessorSettings(PluginCall call) {
+        boolean enabled = Boolean.TRUE.equals(call.getBoolean("enabled", false));
+        Double preamp = call.getDouble("preampDb", 0.0);
+        boolean limiter = !Boolean.FALSE.equals(call.getBoolean("limiterEnabled", true));
+        double[] gains = new double[FoliaEqAudioProcessor.BAND_COUNT];
+        com.getcapacitor.JSArray arr = null;
+        try {
+            arr = call.getArray("gainsDb");
+        } catch (Exception ignored) {
+            arr = null;
+        }
+        if (arr != null) {
+            for (int i = 0; i < gains.length && i < arr.length(); i++) {
+                gains[i] = arr.optDouble(i, 0.0);
+            }
+        }
+        FoliaEqAudioProcessor.applySettings(enabled, gains, preamp != null ? preamp : 0.0, limiter);
+        JSObject res = new JSObject();
+        res.put("ok", true);
+        call.resolve(res);
+    }
+
+    @PluginMethod
     public void play(PluginCall call) {
         FoliaPlaybackService.commandPlay(getContext());
         FoliaPlaybackService.PlaybackClockSnapshot snap = FoliaPlaybackService.getPlaybackClockSnapshot();

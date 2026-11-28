@@ -5,6 +5,9 @@ import type { ReplayGainInfo, ReplayGainMode, SongResult, StatusMessage } from '
 import type { LocalSong } from '../../../../types';
 import { isLocalPlaybackSong, resolveNavidromePlaybackCarrier } from '../../../../utils/appPlaybackGuards';
 import { calculateReplayGain } from '../../../../utils/replayGain';
+import { getAudioEngine } from '../../../../services/audioEngine';
+import { getOutputStageSettings, subscribeOutputStageSettings } from '../../../../services/audioOutputStage';
+import { syncNativeEqSettings } from '../../../../services/nativeEqSync';
 import { applyAudioEqualizerSettings, planAudioEqualizerApply } from '../../../../services/audioEqualizerGraph';
 import { type AudioEffectChain } from '../../../../services/audioEffects/effectChain';
 import { buildPlaybackGraph } from '../../../../services/playbackGraph';
@@ -105,11 +108,19 @@ export function usePlaybackAudioBridge({
     const shouldBypassDsp = shouldBypassWebAudioDspGraph({ equalizerSettings: audioEqualizerSettings, automixEnabled, stemSeparationEnabled });
     const forceNativeExoOverride = typeof window !== 'undefined'
         && Boolean((window as Window & { __FOLIA_FORCE_NATIVE_EXOPLAYER__?: boolean }).__FOLIA_FORCE_NATIVE_EXOPLAYER__);
-    const useNativeExoPlayer = forceNativeExoOverride && shouldRouteToAndroidNativeExoPlayer({
+    // The Native audio engine (Settings: EQ window) plays through ExoPlayer WITH its own EQ, so the EQ being on
+    // does not keep it off the native route. Automix and stem separation still do (they need the web graph).
+    // The choice is read when a track starts, so switching engines never restarts the song that is playing.
+    const engineForTrackRef = useRef({ src: audioSrc, engine: getAudioEngine() });
+    if (engineForTrackRef.current.src !== audioSrc) {
+        engineForTrackRef.current = { src: audioSrc, engine: getAudioEngine() };
+    }
+    const nativeEngineSelected = engineForTrackRef.current.engine === 'native';
+    const useNativeExoPlayer = (forceNativeExoOverride || nativeEngineSelected) && shouldRouteToAndroidNativeExoPlayer({
         audioSrc,
         automixEnabled,
         stemSeparationEnabled,
-        equalizerEnabled: !shouldBypassDsp,
+        equalizerEnabled: nativeEngineSelected ? false : !shouldBypassDsp,
     });
     const lastLoadedExoSrcRef = useRef<string | null>(null);
 
@@ -134,6 +145,13 @@ export function usePlaybackAudioBridge({
         () => resolveHeardAudioEqualizerSettings(audioEqualizerSettings, modCurve, modCurveSuspended),
         [audioEqualizerSettings, modCurve, modCurveSuspended],
     );
+    // The native engine has its own EQ: it is told what is heard, and the preamp and limiter, whenever they change.
+    useEffect(() => {
+        if (!useNativeExoPlayer) return undefined;
+        const push = () => syncNativeEqSettings(heardEqualizerSettings, getOutputStageSettings());
+        push();
+        return subscribeOutputStageSettings(push);
+    }, [heardEqualizerSettings, useNativeExoPlayer]);
     const heardEqualizerSettingsRef = useRef(heardEqualizerSettings);
     const isTransitionAudibleRef = useRef(isTransitionAudible);
     // Read only in the equalizer effect and its timer; written in an effect, not while rendering.

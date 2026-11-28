@@ -323,6 +323,7 @@ export interface FoliaNativeBridgePluginContract {
     setVolume?: (options: { volume: number }) => Promise<{ ok: boolean; volume?: number }>;
     setPlaybackSpeed?: (options: { playbackSpeed: number; speed?: number }) => Promise<FoliaNativePlaybackClockAnchor & { ok: boolean }>;
     getPlaybackPosition?: () => Promise<FoliaNativePlaybackClockAnchor & { ok: boolean }>;
+    setEqProcessorSettings?: (options: { enabled: boolean; gainsDb: number[]; preampDb: number; limiterEnabled: boolean }) => Promise<{ ok: boolean }>;
     addListener?: (
         eventName: 'mediaAction' | 'displayRefreshRateChanged' | 'playbackClockAnchor',
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1220,6 +1221,19 @@ export const hasAndroidNativeExoPlayerBridge = (): boolean => {
     if (!hasFoliaAndroidBridge()) return false;
     const plugin = getNativePlugin();
     return Boolean(plugin && typeof plugin.loadTrack === 'function');
+};
+
+/** Sends the equalizer, preamp and limiter settings to the native ExoPlayer engine's own EQ (FoliaEqAudioProcessor). */
+export const setAndroidNativeEqSettings = (options: {
+    enabled: boolean;
+    gainsDb: number[];
+    preampDb: number;
+    limiterEnabled: boolean;
+}): void => {
+    if (!hasAndroidNativeExoPlayerBridge()) return;
+    const plugin = getNativePlugin();
+    if (!plugin || typeof plugin.setEqProcessorSettings !== 'function') return;
+    void plugin.setEqProcessorSettings(options).catch(() => undefined);
 };
 
 export const isAndroidNativeExoPlayerActive = (): boolean => (

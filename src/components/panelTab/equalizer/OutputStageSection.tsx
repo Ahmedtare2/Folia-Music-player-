@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useSyncExternalStore } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
     OUTPUT_STAGE_MAX_PREAMP_DB,
@@ -7,6 +7,8 @@ import {
 import PanelSlider from '../controls/PanelSlider';
 import EqualizerSection from './EqualizerSection';
 import { useOutputStage } from './useOutputStage';
+import { hasAndroidNativeExoPlayerBridge } from '../../../services/android/foliaAndroidBridge';
+import { getAudioEngine, setAudioEngine, subscribeAudioEngine } from '../../../services/audioEngine';
 
 // src/components/panelTab/equalizer/OutputStageSection.tsx
 // The preamp (before the bands) and the limiter (after them) of the audio effect window.
@@ -17,6 +19,7 @@ const formatDb = (db: number) => `${db < 0 ? '−' : ''}${Math.abs(db).toFixed(1
 const OutputStageSection: React.FC = () => {
     const { t } = useTranslation();
     const [stage, setStage] = useOutputStage();
+    const engine = useSyncExternalStore(subscribeAudioEngine, getAudioEngine, getAudioEngine);
     const label = t('ui.equalizerPreamp', { defaultValue: 'Preamp' });
     const valueText = formatDb(stage.preampDb);
     return (
@@ -43,6 +46,16 @@ const OutputStageSection: React.FC = () => {
                     />
                     <span>{t('ui.equalizerLimiter', { defaultValue: 'Limiter (stops boosts from clipping)' })}</span>
                 </label>
+                {hasAndroidNativeExoPlayerBridge() && (
+                    <label className="flex items-center gap-2 text-[13px] leading-5">
+                        <input
+                            type="checkbox"
+                            checked={engine === 'native'}
+                            onChange={event => setAudioEngine(event.target.checked ? 'native' : 'standard')}
+                        />
+                        <span>Native audio engine (ExoPlayer, applies from the next song; visualizer is not sound-reactive)</span>
+                    </label>
+                )}
             </div>
         </EqualizerSection>
     );
